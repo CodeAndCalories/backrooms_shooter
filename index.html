@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Backrooms — Survival Shooter</title>
+<meta name="description" content="A liminal horror FPS survival shooter set in the infinite corridors of The Backrooms.">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div id="loadingScreen">
+  <div class="loading-text">Noclipping...</div>
+  <div class="loading-bar"><div class="loading-bar-fill" id="loadBarFill"></div></div>
+</div>
+
+<div id="startMenu" class="menu-overlay">
+  <div class="menu-title">The Backrooms</div>
+  <div class="menu-subtitle">If you're not careful and noclip out of reality...</div>
+  <button class="menu-btn" id="btnStart">Noclip In</button>
+  <button class="menu-btn" id="btnControls">Controls</button>
+  <div id="controlsInfo" style="display:none;color:#8a7f55;margin-top:20px;font-size:0.8em;line-height:2.2;letter-spacing:1px;text-align:center;">
+    WASD — Move &nbsp;|&nbsp; SHIFT — Sprint &nbsp;|&nbsp; SPACE — Jump<br>
+    MOUSE — Look &nbsp;|&nbsp; LEFT CLICK — Shoot &nbsp;|&nbsp; R — Reload<br>
+    RIGHT CLICK — Aim Down Sights &nbsp;|&nbsp; F — Flashlight<br>
+    ESC — Pause &nbsp;|&nbsp; Find the EXIT to advance floors<br>
+    <span style="color:#ff6644;">Boss fights every 5 levels — survive to progress!</span>
+  </div>
+</div>
+
+<div id="pauseMenu" class="menu-overlay">
+  <div class="menu-title" style="font-size:2em;">Paused</div>
+  <div class="menu-subtitle">They know where you are</div>
+  
+  <div style="margin: 20px 0; width: 300px; text-align: left; background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid #444; border-radius: 4px;">
+    <div style="color: #d4c36a; margin-bottom: 15px; font-weight: bold; text-align: center; letter-spacing: 2px;">AUDIO SETTINGS</div>
+    
+    <label style="color: #ccc; font-size: 0.9em; display: flex; justify-content: space-between; margin-bottom: 5px;">
+      Master Volume <span id="lblVolMaster">100%</span>
+    </label>
+    <input type="range" id="sliderVolMaster" min="0" max="100" value="100" style="width: 100%; margin-bottom: 15px; cursor: pointer;">
+    
+    <label style="color: #ccc; font-size: 0.9em; display: flex; justify-content: space-between; margin-bottom: 5px;">
+      SFX Volume <span id="lblVolSFX">100%</span>
+    </label>
+    <input type="range" id="sliderVolSFX" min="0" max="100" value="100" style="width: 100%; margin-bottom: 15px; cursor: pointer;">
+    
+    <label style="color: #ccc; font-size: 0.9em; display: flex; justify-content: space-between; margin-bottom: 5px;">
+      Ambient Volume <span id="lblVolAmbient">60%</span>
+    </label>
+    <input type="range" id="sliderVolAmbient" min="0" max="100" value="60" style="width: 100%; cursor: pointer;">
+  </div>
+
+  <button class="menu-btn" id="btnShop">Black Market</button>
+  <button class="menu-btn" id="btnResume">Resume</button>
+  <button class="menu-btn" id="btnQuit">Quit</button>
+</div>
+
+<div id="gameOverMenu" class="menu-overlay">
+  <div class="game-over-title">You Didn't Make It</div>
+  <div class="game-over-stats" id="goStats"></div>
+  <button class="menu-btn" id="btnRestart">Try Again</button>
+</div>
+
+<div class="floor-announce" id="floorAnnounce">
+  <div class="fa-level" id="faLevel"></div>
+  <div class="fa-name" id="faName"></div>
+  <div class="fa-subtitle" id="faSubtitle"></div>
+</div>
+
+<div id="hud">
+  <div class="hud-floor" id="hudFloor">Level 0</div>
+  <div class="hud-level-name" id="hudLevelName">The Lobby</div>
+  <div class="hud-wave" id="hudWave">Wave 1</div>
+  <div class="hud-kills" id="hudKills">Kills: 0</div>
+
+  <div class="hud-danger" id="hudDanger">DANGER
+    <div class="danger-bar-container" id="dangerBarContainer"><div class="danger-bar-fill" id="dangerBarFill"></div></div>
+  </div>
+
+  <div class="hud-flashlight" id="hudFlashlight">FLASHLIGHT [F]</div>
+
+  <div class="boss-hp-container" id="bossHpContainer">
+    <div class="boss-hp-name" id="bossHpName">THE WARDEN</div>
+    <div class="boss-hp-bar"><div class="boss-hp-fill" id="bossHpFill"></div></div>
+  </div>
+
+  <div class="hud-bars">
+    <div class="bar-container"><div class="bar-label">Health</div><div class="bar-fill" id="healthFill"></div></div>
+    <div class="bar-container"><div class="bar-label">Stamina</div><div class="bar-fill" id="staminaFill"></div></div>
+  </div>
+
+  <div class="hud-ammo">
+    <div class="ammo-current" id="ammoCurrent">12</div>
+    <div class="ammo-reserve" id="ammoReserve">/ 60</div>
+    <div class="ammo-warning" id="ammoWarning">PRESS R TO RELOAD</div>
+    <div class="reload-bar-container" id="reloadBarContainer"><div class="reload-bar-fill" id="reloadBarFill"></div></div>
+  </div>
+
+  <div class="crosshair">
+    <div class="crosshair-dot"></div>
+    <div class="crosshair-line ch-top"></div>
+    <div class="crosshair-line ch-bottom"></div>
+    <div class="crosshair-line ch-left"></div>
+    <div class="crosshair-line ch-right"></div>
+  </div>
+
+  <div class="hitmarker" id="hitmarker">
+    <div class="hitmarker-line hm-1"></div>
+    <div class="hitmarker-line hm-2"></div>
+    <div class="hitmarker-line hm-3"></div>
+    <div class="hitmarker-line hm-4"></div>
+  </div>
+
+  <div class="damage-indicator">
+    <div class="dmg-arrow dmg-left" id="dmgLeft"><div class="dmg-arrow-inner"></div></div>
+    <div class="dmg-arrow dmg-right" id="dmgRight"><div class="dmg-arrow-inner"></div></div>
+    <div class="dmg-arrow dmg-top" id="dmgTop"><div class="dmg-arrow-inner"></div></div>
+    <div class="dmg-arrow dmg-bottom" id="dmgBottom"><div class="dmg-arrow-inner"></div></div>
+  </div>
+
+  <div class="hud-money" id="hudMoney">$0</div>
+
+  <div class="minimap-container"><canvas class="minimap-canvas" id="minimapCanvas" width="190" height="190"></canvas></div>
+</div>
+
+<div id="shopOverlay">
+  <div class="shop-title">Black Market</div>
+  <div class="shop-subtitle">Spend wisely. You won't get a refund.</div>
+  <div class="shop-balance" id="shopBalance">Balance: $0</div>
+  <div class="shop-grid" id="shopGrid"></div>
+  <button class="shop-close" id="btnShopClose">Back</button>
+</div>
+
+<div class="muzzle-overlay" id="muzzleOverlay"></div>
+<div class="damage-vignette" id="damageVignette"></div>
+
+<!-- Three.js CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<!-- Modular Game Scripts (load order matters) -->
+<script src="js/audio.js"></script>
+<script src="js/enemies.js"></script>
+<script src="js/main.js"></script>
+
+</body>
+</html>
