@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════ */
 
 *{margin:0;padding:0;box-sizing:border-box;}
-html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Courier New',monospace;cursor:none;user-select:none;}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Courier New',monospace;user-select:none;}
 canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%;z-index:1;}
 
 /* ── Menus ── */
@@ -18,13 +18,25 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .menu-btn:hover{background:rgba(212,195,106,0.12);border-color:#d4c36a;text-shadow:0 0 12px rgba(212,195,106,0.6);transform:scale(1.04);}
 .menu-btn::before{content:'';position:absolute;top:0;left:-100%;width:100%;height:100%;background:linear-gradient(90deg,transparent,rgba(212,195,106,0.08),transparent);transition:left 0.5s;}
 .menu-btn:hover::before{left:100%;}
+
+/* ════ DEV TOOL: level select (safe to delete this block) ════ */
+#devLevelSelect{margin-top:26px;padding:14px 18px;border:1px dashed #6a5a2a;border-radius:4px;max-width:440px;background:rgba(0,0,0,0.3);}
+.dev-ls-title{color:#ff8844;font-size:0.72em;letter-spacing:3px;margin-bottom:10px;text-transform:uppercase;}
+.dev-ls-buttons{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;}
+.dev-ls-hint{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
+.dev-ls-hint span{color:#d4c36a;}
+.dev-ls-btn{background:none;border:1px solid #d4c36a33;color:#8a7f55;width:34px;height:30px;font-family:'Courier New',monospace;font-size:0.85em;cursor:pointer;transition:all 0.2s;}
+.dev-ls-btn:hover{background:rgba(212,195,106,0.12);color:#d4c36a;border-color:#d4c36a;}
+.dev-ls-btn.boss{color:#bb5544;border-color:#ff442233;}
+.dev-ls-btn.boss:hover{background:rgba(255,68,34,0.12);color:#ff6644;border-color:#ff6644;}
+.dev-ls-btn.selected{background:rgba(212,195,106,0.22);color:#fff;border-color:#d4c36a;box-shadow:0 0 10px rgba(212,195,106,0.4);}
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}
 
-.floor-announce{position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:500;text-align:center;opacity:0;transition:opacity 1s;}
-.floor-announce .fa-level{font-size:3.2em;color:#d4c36a;text-shadow:0 0 40px rgba(212,195,106,0.6);letter-spacing:10px;text-transform:uppercase;}
-.floor-announce .fa-name{font-size:1.3em;color:#8a7f55;letter-spacing:6px;margin-top:8px;}
-.floor-announce .fa-subtitle{font-size:0.85em;color:#665e3a;letter-spacing:3px;margin-top:5px;}
+.floor-announce{position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:500;text-align:center;opacity:0;}
+.floor-announce .fa-level{font-size:3.2em;color:#d4c36a;text-shadow:0 0 40px rgba(212,195,106,0.6);letter-spacing:10px;text-transform:uppercase;opacity:0;}
+.floor-announce .fa-name{font-size:1.3em;color:#8a7f55;letter-spacing:6px;margin-top:8px;opacity:0;}
+.floor-announce .fa-subtitle{font-size:0.85em;color:#665e3a;letter-spacing:3px;margin-top:5px;opacity:0;}
 
 /* ── HUD ── */
 #hud{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:100;display:none;}
@@ -48,6 +60,7 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .hud-level-name{position:absolute;top:45px;left:30px;color:rgba(212,195,106,0.35);font-size:0.6em;letter-spacing:2px;text-transform:uppercase;}
 .hud-wave{position:absolute;top:25px;right:230px;color:rgba(212,195,106,0.55);font-size:0.75em;letter-spacing:3px;text-transform:uppercase;}
 .hud-kills{position:absolute;top:45px;right:230px;color:rgba(212,195,106,0.35);font-size:0.6em;letter-spacing:2px;text-transform:uppercase;}
+.hud-fps{position:absolute;top:25px;left:50%;transform:translateX(-50%);color:rgba(120,220,120,0.6);font-size:0.7em;letter-spacing:2px;text-transform:uppercase;}
 
 /* Danger meter */
 .hud-danger{position:absolute;top:70px;left:30px;color:rgba(255,80,40,0.0);font-size:0.65em;letter-spacing:2px;text-transform:uppercase;transition:color 0.5s;}

@@ -26,6 +26,13 @@
     ESC — Pause &nbsp;|&nbsp; Find the EXIT to advance floors<br>
     <span style="color:#ff6644;">Boss fights every 5 levels — survive to progress!</span>
   </div>
+
+  <!-- ════ DEV TOOL: level select. Remove this whole block (and #devLevelSelect CSS + JS) to disable. ════ -->
+  <div id="devLevelSelect">
+    <div class="dev-ls-title">⚠ DEV — LEVEL SELECT</div>
+    <div class="dev-ls-buttons" id="devLevelButtons"><!-- buttons injected by main.js --></div>
+    <div class="dev-ls-hint">Start floor: <span id="devSelectedFloor">0</span> — then press “Noclip In”.</div>
+  </div>
 </div>
 
 <div id="pauseMenu" class="menu-overlay">
@@ -73,6 +80,7 @@
   <div class="hud-level-name" id="hudLevelName">The Lobby</div>
   <div class="hud-wave" id="hudWave">Wave 1</div>
   <div class="hud-kills" id="hudKills">Kills: 0</div>
+  <div class="hud-fps" id="hudFps">FPS: --</div>
 
   <div class="hud-danger" id="hudDanger">DANGER
     <div class="danger-bar-container" id="dangerBarContainer"><div class="danger-bar-fill" id="dangerBarFill"></div></div>
@@ -137,6 +145,9 @@
 
 <!-- Three.js CDN -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- GLTF model loading (version-matched to r128 / 0.128.0). cdnjs doesn't host examples/, so use jsDelivr. SkeletonUtils for cloning rigged meshes. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 
 <!-- Modular Game Scripts (load order matters) -->
 <script src="js/audio.js"></script>

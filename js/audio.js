@@ -31,39 +31,65 @@ function playSound(fn) { if (audioCtx) fn(); }
 function playGunshot() {
   playSound(() => {
     const t = audioCtx.currentTime;
-    
-    // Sub-bass thump
+    const sr = audioCtx.sampleRate;
+
+    // 1. CRACK — sharp high-frequency transient. A very short noise burst pushed
+    //    through a highpass, with a near-instant attack and a fast (~25ms) decay.
+    //    This is what makes it read as a "crack" instead of a "thump".
+    const crackLen = sr * 0.05;
+    const crackBuf = audioCtx.createBuffer(1, crackLen, sr);
+    const crackData = crackBuf.getChannelData(0);
+    for (let i = 0; i < crackLen; i++) {
+      crackData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.008)); // ~8ms decay
+    }
+    const crack = audioCtx.createBufferSource();
+    crack.buffer = crackBuf;
+    const crackHP = audioCtx.createBiquadFilter();
+    crackHP.type = 'highpass';
+    crackHP.frequency.value = 3000;          // keep only the bright top end
+    const crackPeak = audioCtx.createBiquadFilter();
+    crackPeak.type = 'peaking';              // emphasize the snap band
+    crackPeak.frequency.value = 5000;
+    crackPeak.Q.value = 0.8;
+    crackPeak.gain.value = 8;
+    const crackGain = audioCtx.createGain();
+    crackGain.gain.setValueAtTime(3.0, t);   // loud, instant
+    crackGain.gain.exponentialRampToValueAtTime(0.01, t + 0.03);
+    crack.connect(crackHP); crackHP.connect(crackPeak); crackPeak.connect(crackGain);
+    crackGain.connect(sfxGain);
+    crack.start(t);
+
+    // 2. BODY — a bit of midrange punch so it has weight behind the crack.
+    //    Shorter and snappier than before (decays by ~90ms instead of ~250ms).
+    const bodyLen = sr * 0.12;
+    const bodyBuf = audioCtx.createBuffer(1, bodyLen, sr);
+    const bodyData = bodyBuf.getChannelData(0);
+    for (let i = 0; i < bodyLen; i++) {
+      bodyData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.025));
+    }
+    const body = audioCtx.createBufferSource();
+    body.buffer = bodyBuf;
+    const bodyLP = audioCtx.createBiquadFilter();
+    bodyLP.type = 'lowpass';
+    bodyLP.frequency.setValueAtTime(6000, t);
+    bodyLP.frequency.exponentialRampToValueAtTime(400, t + 0.08); // quick darkening
+    const bodyGain = audioCtx.createGain();
+    bodyGain.gain.setValueAtTime(1.6, t);
+    bodyGain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+    body.connect(bodyLP); bodyLP.connect(bodyGain); bodyGain.connect(sfxGain);
+    body.start(t);
+
+    // 3. LOW-END — keep a touch of sub for chest-thump, but short so it doesn't
+    //    smear the transient into a soft "whump".
     const osc = audioCtx.createOscillator();
     const oscGain = audioCtx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(150, t);
-    osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.1);
-    oscGain.gain.setValueAtTime(1.0, t);
-    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+    osc.frequency.setValueAtTime(180, t);
+    osc.frequency.exponentialRampToValueAtTime(40, t + 0.06);
+    oscGain.gain.setValueAtTime(0.7, t);     // lower than before — supports, not dominates
+    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
     osc.connect(oscGain); oscGain.connect(sfxGain);
-    osc.start(t); osc.stop(t + 0.1);
-    
-    // Noise transient (punch)
-    const bufSize = audioCtx.sampleRate * 0.25;
-    const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < bufSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (audioCtx.sampleRate * 0.04));
-    }
-    const noise = audioCtx.createBufferSource();
-    noise.buffer = buf;
-    
-    const filter = audioCtx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(8000, t);
-    filter.frequency.exponentialRampToValueAtTime(300, t + 0.15);
-    
-    const noiseGain = audioCtx.createGain();
-    noiseGain.gain.setValueAtTime(2.5, t);
-    noiseGain.gain.exponentialRampToValueAtTime(0.01, t + 0.25);
-    
-    noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(sfxGain);
-    noise.start(t);
+    osc.start(t); osc.stop(t + 0.07);
   });
 }
 

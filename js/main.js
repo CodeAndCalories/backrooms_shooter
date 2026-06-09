@@ -23,11 +23,24 @@ const LINGER_SPAWN_BASE = 8; // seconds between danger spawns at level 1
 const LINGER_SPAWN_MIN = 1.5; // minimum seconds between spawns at max danger
 
 /* ═══════════════════════════════════════════
+   SEEDED PRNG (level generation only)
+   ═══════════════════════════════════════════ */
+function mulberry32(seed) {
+  return function() {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ═══════════════════════════════════════════
    LEVEL THEMES — 15+ Levels with Boss every 5
    ═══════════════════════════════════════════ */
 const LEVEL_THEMES = [
   {
     id: 0,
+    archetype: 'rooms',
     name: "The Lobby",
     subtitle: "Mono-yellow purgatory. ~600 million sq miles of empty rooms.",
     wallColor: '#c9b968', wallColor2: '#b5a855',
@@ -45,6 +58,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 1,
+    archetype: 'rooms',
     name: "Habitable Zone",
     subtitle: "Concrete warehouses stretching into infinity.",
     wallColor: '#707070', wallColor2: '#606060',
@@ -62,6 +76,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 2,
+    archetype: 'rooms',
     name: "Pipe Dreams",
     subtitle: "Maintenance tunnels. The machinery never stops.",
     wallColor: '#4a4035', wallColor2: '#3d352c',
@@ -79,6 +94,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 3,
+    archetype: 'rooms',
     name: "The Poolrooms",
     subtitle: "Endless tiled pools. The water is warm. You are not alone.",
     wallColor: '#d0e8f0', wallColor2: '#b8d8e8',
@@ -96,6 +112,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 4,
+    archetype: 'rooms',
     name: "BOSS — The Warden",
     subtitle: "Something massive guards this threshold.",
     wallColor: '#3a1010', wallColor2: '#2a0808',
@@ -112,6 +129,7 @@ const LEVEL_THEMES = [
     darknessLevel: 0.7,
     isBoss: true,
     bossName: "THE WARDEN",
+    bossTex: 'boss_warden',
     bossHp: 800,
     bossScale: 3.0,
     bossSpeed: 2.2,
@@ -120,6 +138,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 5,
+    archetype: 'rooms',
     name: "Level Fun =)",
     subtitle: "Come play with us! We have cake! =) =) =)",
     wallColor: '#ff88aa', wallColor2: '#88ddff',
@@ -137,6 +156,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 6,
+    archetype: 'rooms',
     name: "The Electrical Station",
     subtitle: "Buzzing transformers. The air tastes like copper.",
     wallColor: '#3a4050', wallColor2: '#2c3340',
@@ -154,6 +174,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 7,
+    archetype: 'open',
     name: "The Suburbs",
     subtitle: "Cookie-cutter houses. Nobody's home. Nobody was ever home.",
     wallColor: '#a8a090', wallColor2: '#988878',
@@ -171,6 +192,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 8,
+    archetype: 'rooms',
     name: "The Crypt",
     subtitle: "Ancient stone. The walls weep something dark.",
     wallColor: '#484040', wallColor2: '#383030',
@@ -188,6 +210,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 9,
+    archetype: 'rooms',
     name: "BOSS — The Amalgam",
     subtitle: "It has consumed everything on this level. You're next.",
     wallColor: '#1a1020', wallColor2: '#120818',
@@ -204,6 +227,7 @@ const LEVEL_THEMES = [
     darknessLevel: 0.7,
     isBoss: true,
     bossName: "THE AMALGAM",
+    bossTex: 'boss_amalgam',
     bossHp: 1400,
     bossScale: 3.5,
     bossSpeed: 2.8,
@@ -212,6 +236,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 10,
+    archetype: 'rooms',
     name: "The Hospital",
     subtitle: "Fluorescent lights. Sterile halls. Something on the gurney moved.",
     wallColor: '#c8c8c0', wallColor2: '#b0b0a8',
@@ -229,6 +254,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 11,
+    archetype: 'field', // open overgrown ground with sparse obstacles — the nature/field floor
     name: "The Greenhouse",
     subtitle: "Overgrown corridors. The plants are watching.",
     wallColor: '#4a6a3a', wallColor2: '#3a5a2a',
@@ -246,6 +272,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 12,
+    archetype: 'linear', // infinite shelves = long aisle with shelving down both sides — the corridor floor
     name: "The Archive",
     subtitle: "Infinite shelves. The books contain only your name.",
     wallColor: '#6a5a40', wallColor2: '#5a4a30',
@@ -263,6 +290,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 13,
+    archetype: 'rooms',
     name: "The Freezer",
     subtitle: "Sub-zero. Your breath crystallizes. Something exhales behind you.",
     wallColor: '#8898a8', wallColor2: '#7888a0',
@@ -280,6 +308,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 14,
+    archetype: 'rooms',
     name: "BOSS — The Hive Mind",
     subtitle: "A thousand voices speak as one. It wants you to join.",
     wallColor: '#2a1a2a', wallColor2: '#1a0a1a',
@@ -296,11 +325,30 @@ const LEVEL_THEMES = [
     darknessLevel: 0.65,
     isBoss: true,
     bossName: "THE HIVE MIND",
+    bossTex: 'boss_hive',
     bossHp: 2200,
     bossScale: 4.0,
     bossSpeed: 3.2,
     bossDamage: 28,
     bossSpawnCount: 5
+  },
+  {
+    id: 15,
+    archetype: 'linear', // long aisle with seat blocks down both sides — see generateLinear
+    name: "The Endless Bus",
+    subtitle: "The route has no stops. The seats are never empty behind you.",
+    wallColor: '#b5a44e', wallColor2: '#8f8246', // dull school-bus yellow panels
+    floorColor: '#2a2824', floorColor2: '#201e1a', // dark rubber aisle matting
+    ceilColor: '#9a958a',                          // grimy grey ceiling
+    fogColor: 0x0a0904, fogNear: 1, fogFar: 22,
+    lightColor: 0xffe8a0, lightIntensity: 0.5,     // dim sickly cabin lights
+    ambientColor: 0x33301f, ambientIntensity: 0.05,
+    bgColor: 0x080704,
+    mazeSize: 10,
+    floorType: 'metal',
+    decorations: 'none',
+    enemyTint: 0.4,
+    darknessLevel: 0.5
   }
 ];
 
@@ -318,6 +366,11 @@ function isBossFloor(floor) {
    ═══════════════════════════════════════════ */
 let scene, camera, renderer, clock;
 let gameState = 'menu';
+
+// Seeded RNG for level generation (host may override floorSeed for multiplayer later)
+let rng = Math.random;
+let floorSeed = 0;
+function seedFloor(floor) { floorSeed = (floor * 2654435761) >>> 0; rng = mulberry32(floorSeed); }
 let player = {
   pos: new THREE.Vector3(0, 1.6, 0),
   vel: new THREE.Vector3(),
@@ -331,6 +384,7 @@ let player = {
   isADS: false, currentFOV: DEFAULT_FOV
 };
 let currentFloor = 0, currentWave = 1, waveMobsLeft = 0;
+let devStartFloor = 0; // DEV TOOL: floor chosen in the start-menu level select (0 = normal start)
 let keys = {}, mouseDown = false, rightMouseDown = false;
 let mazeWalls = [], mazeGrid = [];
 let enemies = [], lights = [];
@@ -339,6 +393,7 @@ let gunGroup = null, gunRecoil = 0, gunSwayX = 0, gunSwayY = 0;
 let damageVigTimer = 0, hitmarkerTimer = 0, hitmarkerKill = false;
 let dmgInd = { left: 0, right: 0, top: 0, bottom: 0 };
 let floorAnnounceTimer = 0;
+const FLOOR_ANNOUNCE_TOTAL = 4.0; // two-step intro: "LEVEL N" then the level name
 
 let flickerTimers = [];
 let muzzleFlashLight = null, muzzleFlashTimer = 0;
@@ -582,7 +637,7 @@ function createCeilingTexture(theme) {
 /* ═══════════════════════════════════════════
    MAZE GENERATION
    ═══════════════════════════════════════════ */
-function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } }
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } }
 
 function generateMaze(w, h) {
   mazeGrid = [];
@@ -608,8 +663,8 @@ function generateMaze(w, h) {
 
   const extra = Math.floor(w * h * 0.15);
   for (let i = 0; i < extra; i++) {
-    const rx = 1 + Math.floor(Math.random() * (w * 2 - 1));
-    const ry = 1 + Math.floor(Math.random() * (h * 2 - 1));
+    const rx = 1 + Math.floor(rng() * (w * 2 - 1));
+    const ry = 1 + Math.floor(rng() * (h * 2 - 1));
     if (mazeGrid[ry][rx] === 0) {
       let nb = 0;
       if (ry > 0 && mazeGrid[ry - 1][rx]) nb++;
@@ -620,12 +675,12 @@ function generateMaze(w, h) {
     }
   }
 
-  const numRooms = 3 + Math.floor(Math.random() * 3);
+  const numRooms = 3 + Math.floor(rng() * 3);
   for (let r = 0; r < numRooms; r++) {
-    const rw = 2 + Math.floor(Math.random() * 3);
-    const rh = 2 + Math.floor(Math.random() * 3);
-    const rx = 1 + Math.floor(Math.random() * (w * 2 - rw - 1));
-    const ry = 1 + Math.floor(Math.random() * (h * 2 - rh - 1));
+    const rw = 2 + Math.floor(rng() * 3);
+    const rh = 2 + Math.floor(rng() * 3);
+    const rx = 1 + Math.floor(rng() * (w * 2 - rw - 1));
+    const ry = 1 + Math.floor(rng() * (h * 2 - rh - 1));
     for (let dy = 0; dy < rh; dy++) for (let dx = 0; dx < rw; dx++) {
       if (ry + dy < h * 2 + 1 && rx + dx < w * 2 + 1) mazeGrid[ry + dy][rx + dx] = 1;
     }
@@ -646,12 +701,183 @@ function generateBossArena(size) {
   // Add some pillars for cover
   const pillarPositions = [];
   for (let i = 0; i < 6; i++) {
-    const px = 2 + Math.floor(Math.random() * (s - 4));
-    const py = 2 + Math.floor(Math.random() * (s - 4));
+    const px = 2 + Math.floor(rng() * (s - 4));
+    const py = 2 + Math.floor(rng() * (s - 4));
     // Don't place in center spawn area
     if (Math.abs(px - Math.floor(s/2)) < 2 && Math.abs(py - Math.floor(s/2)) < 2) continue;
     mazeGrid[py][px] = 0;
     pillarPositions.push({x: px, y: py});
+  }
+}
+
+/* ═══════════════════════════════════════════
+   PLUGGABLE LEVEL GENERATION
+   Each theme selects a generator via theme.archetype. Boss floors are
+   handled separately (generateBossArena) before this is called. Add new
+   archetypes ('caves', 'office', ...) as additional cases here.
+   ═══════════════════════════════════════════ */
+function generateLevel(theme, w, h) {
+  switch (theme.archetype) {
+    case 'open':
+      generateOpen(w, h);
+      break;
+    case 'field':
+      generateField(w, h);
+      break;
+    case 'linear':
+      generateLinear(w, h);
+      break;
+    case 'rooms':
+    default:
+      generateMaze(w, h);
+      break;
+  }
+}
+
+// 'open' archetype — Backrooms suburbs: open ground with scattered isolated
+// "house" blocks (walls) and streets between them. Same mazeGrid contract as
+// generateMaze (0 = wall, 1 = floor) so the existing mazeWalls collision and
+// exit-zone placement work unchanged. Deterministic via the seeded rng().
+function generateOpen(w, h) {
+  const gw = w * 2 + 1, gh = h * 2 + 1;
+
+  // 1. Whole grid is open floor...
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 1; }
+  // ...with a solid wall border around the edge.
+  for (let x = 0; x < gw; x++) { mazeGrid[0][x] = 0; mazeGrid[gh - 1][x] = 0; }
+  for (let y = 0; y < gh; y++) { mazeGrid[y][0] = 0; mazeGrid[y][gw - 1] = 0; }
+
+  // Keep-out spots that must stay open: player spawn (1,1) and the exit corner
+  // that buildMazeScene searches from (gw-2, gh-2).
+  const keepClear = [{ x: 1, y: 1 }, { x: gw - 2, y: gh - 2 }];
+  const CLEAR_PAD = 2;
+  function hitsKeepout(hx, hy, hw, hh) {
+    for (const s of keepClear) {
+      if (s.x >= hx - CLEAR_PAD && s.x <= hx + hw - 1 + CLEAR_PAD &&
+          s.y >= hy - CLEAR_PAD && s.y <= hy + hh - 1 + CLEAR_PAD) return true;
+    }
+    return false;
+  }
+
+  // 2. Scatter several rectangular house blocks (wall=0). Houses are isolated
+  //    with a >=1-cell street gap, so the surrounding open ground stays connected.
+  const numHouses = 5 + Math.floor(rng() * 5); // 5..9
+  const placed = [];
+  let attempts = 0;
+  while (placed.length < numHouses && attempts < numHouses * 25) {
+    attempts++;
+    const hw = 3 + Math.floor(rng() * 3); // 3..5 cells
+    const hh = 3 + Math.floor(rng() * 3); // 3..5 cells
+    // Leave a 2-cell margin from the border so streets ring every house.
+    const spanX = gw - hw - 4, spanY = gh - hh - 4;
+    if (spanX < 1 || spanY < 1) break; // grid too small for this house size
+    const hx = 2 + Math.floor(rng() * spanX);
+    const hy = 2 + Math.floor(rng() * spanY);
+    if (hitsKeepout(hx, hy, hw, hh)) continue;
+    // Require a 1-cell street gap from already-placed houses (inflate by 1 and test overlap).
+    let clash = false;
+    for (const p of placed) {
+      if (hx - 1 < p.x + p.w && hx + hw + 1 > p.x && hy - 1 < p.y + p.h && hy + hh + 1 > p.y) { clash = true; break; }
+    }
+    if (clash) continue;
+    for (let dy = 0; dy < hh; dy++) for (let dx = 0; dx < hw; dx++) mazeGrid[hy + dy][hx + dx] = 0;
+    placed.push({ x: hx, y: hy, w: hw, h: hh });
+  }
+}
+
+// 'field' archetype — Backrooms wheat field: a near-empty expanse of open ground
+// with only a FEW tiny scattered obstacles (the occasional shed/object). Emptier
+// and more open than 'open'. Same mazeGrid contract (0 = wall, 1 = floor) and the
+// same flood-fill-safe approach as generateOpen: every obstacle is isolated with a
+// >=1-cell gap, so the surrounding open ground stays fully connected. Deterministic
+// via the seeded rng().
+function generateField(w, h) {
+  const gw = w * 2 + 1, gh = h * 2 + 1;
+
+  // 1. Whole grid is open floor...
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 1; }
+  // ...with a solid wall border around the edge.
+  for (let x = 0; x < gw; x++) { mazeGrid[0][x] = 0; mazeGrid[gh - 1][x] = 0; }
+  for (let y = 0; y < gh; y++) { mazeGrid[y][0] = 0; mazeGrid[y][gw - 1] = 0; }
+
+  // Keep-out spots that must stay open: player spawn (1,1) and the exit corner
+  // that buildMazeScene searches from (gw-2, gh-2).
+  const keepClear = [{ x: 1, y: 1 }, { x: gw - 2, y: gh - 2 }];
+  const CLEAR_PAD = 2;
+  function hitsKeepout(hx, hy, hw, hh) {
+    for (const s of keepClear) {
+      if (s.x >= hx - CLEAR_PAD && s.x <= hx + hw - 1 + CLEAR_PAD &&
+          s.y >= hy - CLEAR_PAD && s.y <= hy + hh - 1 + CLEAR_PAD) return true;
+    }
+    return false;
+  }
+
+  // 2. Scatter only a FEW tiny obstacles (wall=0), 1x1 or 2x2. Each is isolated
+  //    with a >=1-cell gap, so the open ground stays one connected region.
+  const numObstacles = 2 + Math.floor(rng() * 3); // 2..4 tiny clusters
+  const placed = [];
+  let attempts = 0;
+  while (placed.length < numObstacles && attempts < numObstacles * 25) {
+    attempts++;
+    const sz = 1 + Math.floor(rng() * 2); // 1..2 cells (square)
+    const hw = sz, hh = sz;
+    // Leave a 2-cell margin from the border so open ground rings every obstacle.
+    const spanX = gw - hw - 4, spanY = gh - hh - 4;
+    if (spanX < 1 || spanY < 1) break; // grid too small
+    const hx = 2 + Math.floor(rng() * spanX);
+    const hy = 2 + Math.floor(rng() * spanY);
+    if (hitsKeepout(hx, hy, hw, hh)) continue;
+    // Require a 1-cell gap from already-placed obstacles (inflate by 1 and test overlap).
+    let clash = false;
+    for (const p of placed) {
+      if (hx - 1 < p.x + p.w && hx + hw + 1 > p.x && hy - 1 < p.y + p.h && hy + hh + 1 > p.y) { clash = true; break; }
+    }
+    if (clash) continue;
+    for (let dy = 0; dy < hh; dy++) for (let dx = 0; dx < hw; dx++) mazeGrid[hy + dy][hx + dx] = 0;
+    placed.push({ x: hx, y: hy, w: hw, h: hh });
+  }
+}
+
+// 'linear' archetype — Backrooms endless bus: one long claustrophobic corridor.
+// A center aisle runs the full LENGTH of the grid with rows of "seat" blocks down
+// both sides. The grid is forced NARROW (fixed width) and LONG (length scales with
+// h), ignoring the square w/h the caller passes. Same mazeGrid contract (0 = wall,
+// 1 = floor). Flood-fill safe: the 3-wide center aisle (x = 3,4,5) is never touched
+// by seats, so it's connected end to end. Deterministic via the seeded rng().
+function generateLinear(w, h) {
+  const gw = 5;                              // NARROW bus: x 0..4, interior 1..3
+  const len = Math.min(Math.max(h, 8), 16);  // length scales with h, clamped
+  const gh = len * 3 + 1;                    // shorter corridor (~25..49 cells, was len*6+1)
+
+  // 1. Whole grid open floor...
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 1; }
+  // ...with a solid wall border (the bus body shell) around the outside.
+  for (let x = 0; x < gw; x++) { mazeGrid[0][x] = 0; mazeGrid[gh - 1][x] = 0; }
+  for (let y = 0; y < gh; y++) { mazeGrid[y][0] = 0; mazeGrid[y][gw - 1] = 0; }
+
+  // 2. Seat benches line BOTH walls in short rows with small gaps, leaving only the
+  //    1-cell CENTER AISLE (x = 2) open end-to-end — a tight bus tunnel. Left bench is
+  //    x = 1, right bench x = gw-2 (= 3); both sit right against the border walls
+  //    (x = 0 / x = 4) so the walls feel close. Front rows (spawn at 1,1) and back rows
+  //    (exit at gw-2,gh-2) are kept clear so both ends stay open. Aisle x=2 is never
+  //    touched, so the corridor is flood-fill connected end to end.
+  // CONTINUOUS, REGULAR seat rhythm down BOTH walls, mirrored left↔right, so the whole
+  // corridor reads like a bus aisle top to bottom. Fixed period (no randomness, no
+  // patchy stretches): a SEAT_LEN-cell seat block, then a GAP-cell legroom gap, repeated
+  // from FRONT to BACK on x=1 (left) and x=gw-2 (right). Only the front (spawn) and back
+  // (exit) get a small clearance; everything between is seated.
+  const FRONT = 3;            // rows 1..2 clear for spawn / driver area
+  const BACK = gh - 3;        // last 2 rows clear for the rear-door exit
+  const SEAT_LEN = 2;         // each seat block is 2 cells deep
+  const GAP = 1;              // single-cell legroom gap between blocks
+  for (let y = FRONT; y + SEAT_LEN <= BACK; y += SEAT_LEN + GAP) {
+    for (let dy = 0; dy < SEAT_LEN; dy++) {
+      mazeGrid[y + dy][1] = 0;          // left bench (against x=0 wall)
+      mazeGrid[y + dy][gw - 2] = 0;     // right bench (x=3, against x=4 wall) — mirrored
+    }
   }
 }
 
@@ -812,9 +1038,30 @@ function createFlashlight() {
   flashlight = new THREE.SpotLight(0xfff5e0, 1.2, 40, Math.PI * 0.18, 0.4, 1.5);
   flashlight.position.set(0, -0.05, -0.1);
   flashlight.target.position.set(0, -0.05, -10);
+  // Shadows OFF deliberately: a shadow-casting spotlight allocates + renders a shadow
+  // map on first use (a lag spike) and costs an extra depth pass every frame after.
+  // The flashlight is a cosmetic cone, not a shadow-caster, so we skip all of that.
+  flashlight.castShadow = false;
   camera.add(flashlight);
   camera.add(flashlight.target);
   flashlight.visible = flashlightOn;
+  // NOTE: the shader warm-up is NOT done here. createFlashlight() runs BEFORE the
+  // scene's point lights are added, so compiling now would cache the wrong variant
+  // (0 point lights). warmUpFlashlight() is called at the END of buildMazeScene,
+  // once the real point-light count is in place.
+}
+
+// Pre-compile the flashlight's shader variants so the first in-game toggle is instant.
+// Must run AFTER every scene PointLight is added, so the compiled programs match real
+// gameplay: N point lights with the spot ON and with it OFF. We compile BOTH states
+// (an actual render, not just renderer.compile, to defeat drivers that defer the real
+// shader compile until the first draw call — that deferral was the lingering 2nd spike).
+function warmUpFlashlight() {
+  if (!renderer || !flashlight) return;
+  const prev = flashlight.visible;
+  flashlight.visible = true;  renderer.render(scene, camera); // spot-ON variant
+  flashlight.visible = false; renderer.render(scene, camera); // spot-OFF variant
+  flashlight.visible = prev;
 }
 
 function toggleFlashlight() {
@@ -918,25 +1165,79 @@ function buildMazeScene() {
   createFlashlight();
 
   const lightSpacing = Math.max(4, 6 - Math.floor(theme.id === 3 ? -1 : (theme.darknessLevel || 0) * 2));
-  for (let y = 2; y < gh; y += lightSpacing) for (let x = 2; x < gw; x += lightSpacing) {
-    if (mazeGrid[y][x] === 1) {
-      const pl = new THREE.PointLight(theme.lightColor, theme.lightIntensity * darkMult, CELL * 5);
-      pl.position.set(x * CELL + CELL / 2, WALL_H - 0.2, y * CELL + CELL / 2);
-      scene.add(pl);
-      lights.push(pl);
+  // The maze generator only carves floor cells at odd/odd coordinates (plus odd/even
+  // passages); it never carves even/even cells. With an even lightSpacing the sample
+  // grid lands exclusively on even/even cells, so for Level 0 (spacing 6) every sample
+  // hits a wall and no lights get placed. Snap each sample to the nearest open floor
+  // cell so lighting is robust regardless of layout/seed.
+  const litCells = new Set();
+  // Fixture meshes are INSTANCED (one draw call for all of them) instead of one
+  // separate Mesh per light — geometry + material are identical, so a single
+  // InstancedMesh replaces what used to be 16-38 extra draw calls.
+  const fixGeo = new THREE.BoxGeometry(0.8, 0.05, 0.22);
+  const fixMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, emissive: theme.lightColor, emissiveIntensity: 0.4 * darkMult
+  });
+  const fixtureMatrices = [];
 
-      const fixGeo = new THREE.BoxGeometry(0.8, 0.05, 0.22);
-      const emissiveColor = theme.lightColor;
-      const fixMat = new THREE.MeshStandardMaterial({
-        color: 0xffffff, emissive: emissiveColor, emissiveIntensity: 0.4 * darkMult
-      });
-      const fix = new THREE.Mesh(fixGeo, fixMat);
-      fix.position.copy(pl.position);
-      fix.position.y = WALL_H - 0.03;
-      scene.add(fix);
+  // Place one ceiling PointLight + record its fixture instance at the given floor cell.
+  const placeCeilingLight = (lx, ly) => {
+    const key = ly + ',' + lx;
+    if (litCells.has(key)) return;     // avoid stacking two lights on one snapped cell
+    litCells.add(key);
 
-      flickerTimers.push({ light: pl, base: pl.intensity, timer: Math.random() * 5, nextFlicker: 1 + Math.random() * 5 });
+    const pl = new THREE.PointLight(theme.lightColor, theme.lightIntensity * darkMult, CELL * 5);
+    pl.position.set(lx * CELL + CELL / 2, WALL_H - 0.2, ly * CELL + CELL / 2);
+    scene.add(pl);
+    lights.push(pl);
+
+    const m = new THREE.Matrix4();
+    m.setPosition(lx * CELL + CELL / 2, WALL_H - 0.03, ly * CELL + CELL / 2);
+    fixtureMatrices.push(m);
+
+    flickerTimers.push({ light: pl, base: pl.intensity, timer: Math.random() * 5, nextFlicker: 1 + Math.random() * 5 });
+  };
+
+  if (theme.archetype === 'linear') {
+    // LINEAR corridor: decouple light count from corridor length. Place a single row
+    // of evenly-spaced lights down the CENTER aisle, HARD-CAPPED so a long bus never
+    // seeds dozens of lights (was 24-38). Step grows with length to honor the cap.
+    const MAX_LINEAR_LIGHTS = 12;
+    const aisleX = Math.floor(gw / 2);          // center aisle column (x=2 for gw=5)
+    const first = 3, last = gh - 3;
+    const span = Math.max(1, last - first);
+    const step = Math.max(lightSpacing, Math.ceil(span / MAX_LINEAR_LIGHTS));
+    for (let y = first; y <= last; y += step) {
+      // snap to the nearest floor cell at/near the aisle column on this row
+      let ly = -1, lx = aisleX;
+      for (let r = 0; r <= 2 && ly === -1; r++) {
+        for (let dx = -r; dx <= r && ly === -1; dx++) {
+          const nx = aisleX + dx;
+          if (nx >= 0 && nx < gw && mazeGrid[y][nx] === 1) { ly = y; lx = nx; break; }
+        }
+      }
+      if (ly !== -1) placeCeilingLight(lx, ly);
     }
+  } else {
+    for (let y = 2; y < gh; y += lightSpacing) for (let x = 2; x < gw; x += lightSpacing) {
+      let ly = -1, lx = -1;
+      for (let r = 0; r <= 2 && ly === -1; r++) {
+        for (let dy = -r; dy <= r && ly === -1; dy++) for (let dx = -r; dx <= r; dx++) {
+          const ny = y + dy, nx = x + dx;
+          if (ny >= 0 && ny < gh && nx >= 0 && nx < gw && mazeGrid[ny][nx] === 1) {
+            ly = ny; lx = nx; break;
+          }
+        }
+      }
+      if (ly !== -1) placeCeilingLight(lx, ly);
+    }
+  }
+
+  if (fixtureMatrices.length > 0) {
+    const fixMesh = new THREE.InstancedMesh(fixGeo, fixMat, fixtureMatrices.length);
+    fixtureMatrices.forEach((m, i) => fixMesh.setMatrixAt(i, m));
+    fixMesh.instanceMatrix.needsUpdate = true;
+    scene.add(fixMesh);
   }
 
   // Fog
@@ -983,6 +1284,10 @@ function buildMazeScene() {
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
   player.vel.set(0, 0, 0);
   player.onGround = true;
+
+  // Now that every PointLight is in the scene, pre-warm the flashlight's shader
+  // variants so the first F-press is instant (see warmUpFlashlight).
+  warmUpFlashlight();
 
   // Reset anti-linger
   floorTimer = 0;
@@ -1171,8 +1476,21 @@ function playerShoot() {
   let hitEnemy = null, hitDist = Infinity;
   for (const e of enemies) {
     if (!e.alive) continue;
-    const boxSize = new THREE.Vector3(e.scale * 1.5, e.height * 1.1, e.scale * 1.5);
-    const box = new THREE.Box3().setFromCenterAndSize(e.pos.clone().setY(e.height * 0.5), boxSize);
+    let boxSize, boxCenter;
+    if (e.mesh.isGroup) {
+      // 3D wire figure: armature is ~2.5m tall and ~0.7m wide at the arms.
+      // Use the true VISUAL height (NOT e.height, which is gameplay-only) so
+      // head/torso shots register. Box spans ~floor up to ~2.5m, widened to
+      // 0.9m so the outstretched arms are coverable.
+      const visH = 2.5 * WIRE_VISUAL_SCALE;
+      boxSize = new THREE.Vector3(0.9, visH, 0.9);
+      boxCenter = e.pos.clone().setY(visH * 0.5);
+    } else {
+      // sprite mobs: unchanged
+      boxSize = new THREE.Vector3(e.scale * 1.5, e.height * 1.1, e.scale * 1.5);
+      boxCenter = e.pos.clone().setY(e.height * 0.5);
+    }
+    const box = new THREE.Box3().setFromCenterAndSize(boxCenter, boxSize);
     const hit = ray.ray.intersectBox(box, new THREE.Vector3());
     if (hit) {
       const d = camera.position.distanceTo(hit);
@@ -1190,8 +1508,7 @@ function playerShoot() {
 
     // HIT FLASH: briefly flash enemy red
     hitEnemy.hitFlashTimer = 0.15;
-    hitEnemy.mesh.material.emissive.set(0xff0000);
-    hitEnemy.mesh.material.emissiveIntensity = 1.5;
+    setMobFlash(hitEnemy, true);
 
     if (hitEnemy.hp <= 0) {
       hitEnemy.alive = false;
@@ -1313,11 +1630,12 @@ function advanceFloor() {
 
   const theme = getTheme(currentFloor);
 
+  seedFloor(currentFloor);
   if (theme.isBoss) {
     generateBossArena(theme.mazeSize);
   } else {
     const size = theme.mazeSize + Math.floor(currentFloor / LEVEL_THEMES.length);
-    generateMaze(Math.min(size, 20), Math.min(size, 20));
+    generateLevel(theme, Math.min(size, 20), Math.min(size, 20));
   }
 
   buildMazeScene();
@@ -1335,10 +1653,12 @@ function advanceFloor() {
 function showFloorAnnounce() {
   const theme = getTheme(currentFloor);
   const el = document.getElementById('floorAnnounce');
-  document.getElementById('faLevel').textContent = 'Level ' + currentFloor;
+  // Player-friendly counting: internal index 0 displays as "LEVEL 1". This is
+  // display-only — currentFloor and all generation/boss/level-select logic are
+  // unchanged; only the text shown to the player differs.
+  document.getElementById('faLevel').textContent = 'LEVEL ' + (currentFloor + 1);
   document.getElementById('faName').textContent = theme.name;
   document.getElementById('faSubtitle').textContent = theme.subtitle || '';
-  el.style.opacity = '1';
 
   if (theme.isBoss) {
     document.getElementById('faLevel').style.color = '#ff4444';
@@ -1348,7 +1668,14 @@ function showFloorAnnounce() {
     document.getElementById('faName').style.color = '#8a7f55';
   }
 
-  floorAnnounceTimer = 3.5;
+  // Container stays fully on; the per-frame logic in updateHUDTimers crossfades
+  // the two steps via the child elements' opacity. Start with everything hidden.
+  el.style.opacity = '1';
+  document.getElementById('faLevel').style.opacity = '0';
+  document.getElementById('faName').style.opacity = '0';
+  document.getElementById('faSubtitle').style.opacity = '0';
+
+  floorAnnounceTimer = FLOOR_ANNOUNCE_TOTAL;
 }
 
 /* ═══════════════════════════════════════════
@@ -1441,8 +1768,10 @@ function updateMinimap() {
 
   // Player direction
   const dirLen = 8;
-  const dx2 = px + Math.sin(-player.yaw) * dirLen;
-  const dz2 = pz + Math.cos(-player.yaw) * dirLen;
+  // Match the world-space forward vector used in updatePlayer:
+  // forward = (-sin(yaw), -cos(yaw)) in (x, z), and the minimap maps world x->x, z->y directly.
+  const dx2 = px - Math.sin(player.yaw) * dirLen;
+  const dz2 = pz - Math.cos(player.yaw) * dirLen;
   ctx.beginPath();
   ctx.moveTo(px, pz);
   ctx.lineTo(dx2, dz2);
@@ -1510,8 +1839,17 @@ function updateHUDTimers(dt) {
 
   if (floorAnnounceTimer > 0) {
     floorAnnounceTimer -= dt;
-    const el = document.getElementById('floorAnnounce');
-    if (floorAnnounceTimer <= 1.5) el.style.opacity = (floorAnnounceTimer / 1.5).toString();
+    const elapsed = FLOOR_ANNOUNCE_TOTAL - floorAnnounceTimer;
+    // ramp(a,b): 0 before a, 1 after b, linear in between — used to build smooth fades.
+    const ramp = (a, b) => Math.max(0, Math.min(1, (elapsed - a) / (b - a)));
+    // Step 1 "LEVEL N": fade in 0.0-0.4s, hold, fade out 1.5-1.9s.
+    const lvlOp = ramp(0, 0.4) * (1 - ramp(1.5, 1.9));
+    // Step 2 level name + subtitle: fade in 1.9-2.3s, hold, fade out 3.5-4.0s.
+    const nameOp = ramp(1.9, 2.3) * (1 - ramp(3.5, 4.0));
+    document.getElementById('faLevel').style.opacity = lvlOp.toFixed(3);
+    document.getElementById('faName').style.opacity = nameOp.toFixed(3);
+    document.getElementById('faSubtitle').style.opacity = nameOp.toFixed(3);
+    if (floorAnnounceTimer <= 0) document.getElementById('floorAnnounce').style.opacity = '0';
   }
 }
 
@@ -1545,7 +1883,7 @@ function updateLights(dt) {
    ═══════════════════════════════════════════ */
 function startGame() {
   initAudio();
-  startAmbientHum();
+  startAmbient();
 
   player.health = shopStats.maxHealth;
   player.stamina = MAX_STAMINA;
@@ -1558,7 +1896,8 @@ function startGame() {
   player.pitch = 0;
   player.isADS = false;
   player.currentFOV = DEFAULT_FOV;
-  currentFloor = 0; currentWave = 1;
+  currentFloor = devStartFloor; currentWave = 1; // DEV: devStartFloor is 0 for a normal start
+  player.floorReached = currentFloor;
   flashlightOn = false;
   adsLerp = 0;
   bossEntity = null;
@@ -1575,8 +1914,14 @@ function startGame() {
   };
   for (const k in shopUpgrades) shopUpgrades[k].bought = false;
 
-  const theme = getTheme(0);
-  generateMaze(theme.mazeSize, theme.mazeSize);
+  const theme = getTheme(currentFloor);
+  seedFloor(currentFloor);
+  if (theme.isBoss) {
+    generateBossArena(theme.mazeSize);
+  } else {
+    const size = theme.mazeSize + Math.floor(currentFloor / LEVEL_THEMES.length);
+    generateLevel(theme, Math.min(size, 20), Math.min(size, 20));
+  }
   buildMazeScene();
 
   document.getElementById('startMenu').style.display = 'none';
@@ -1590,7 +1935,11 @@ function startGame() {
   updateHUD();
   updateFlashlightHUD();
   showFloorAnnounce();
-  setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
+  if (theme.isBoss) {
+    setTimeout(() => { if (gameState === 'playing') spawnBoss(); }, 2000);
+  } else {
+    setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
+  }
 }
 
 function pauseGame() {
@@ -1628,12 +1977,67 @@ function quitToMenu() {
 }
 
 /* ═══════════════════════════════════════════
+   DEV TOOLS — enemy type labels (toggle: L)
+   Self-contained debug overlay. Labels are created
+   lazily (only while debugLabels is on) so there is
+   zero cost during normal play. Zero-asset: text is
+   drawn to a canvas, no external fonts/images.
+   ═══════════════════════════════════════════ */
+window.debugLabels = false; // on window so it's inspectable/toggleable from the console
+
+// Build a camera-facing text sprite (white text, dark outline).
+function makeDebugLabel(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 256, 64);
+  ctx.font = 'bold 34px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = '#000000';
+  ctx.strokeText(text, 128, 32); // dark outline for readability
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, 128, 32);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  // depthTest off so the label is readable even through the mob/walls
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(1.4, 0.35, 1); // world units
+  sprite.renderOrder = 999;
+  return sprite;
+}
+
+// Remove a single holder's label (enemy or boss) and free its texture.
+function removeDebugLabel(holder) {
+  if (holder && holder.debugLabel) {
+    scene.remove(holder.debugLabel);
+    holder.debugLabel.material.map.dispose();
+    holder.debugLabel.material.dispose();
+    holder.debugLabel = null;
+  }
+}
+
+// Tear down every label (called when the feature is toggled off).
+function clearDebugLabels() {
+  for (const e of enemies) removeDebugLabel(e);
+  removeDebugLabel(bossEntity);
+}
+
+/* ═══════════════════════════════════════════
    INPUT
    ═══════════════════════════════════════════ */
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyR' && gameState === 'playing') playerReload();
   if (e.code === 'KeyF' && gameState === 'playing') toggleFlashlight();
+  if (e.code === 'KeyL' && gameState === 'playing') {
+    window.debugLabels = !window.debugLabels;     // DEV: toggle enemy type labels
+    console.log('debug labels:', window.debugLabels); // confirms the L handler fired
+    if (!window.debugLabels) clearDebugLabels();  // tear down immediately when off
+  }
   if (e.code === 'Escape') {
     e.preventDefault();
     if (gameState === 'playing') pauseGame();
@@ -1682,6 +2086,45 @@ document.getElementById('btnControls').addEventListener('click', () => {
 document.getElementById('btnResume').addEventListener('click', resumeGame);
 document.getElementById('btnQuit').addEventListener('click', quitToMenu);
 document.getElementById('btnRestart').addEventListener('click', startGame);
+
+/* ════ DEV TOOL: level-select buttons. Builds one button per LEVEL_THEMES
+   entry; clicking sets devStartFloor, which startGame() uses as the starting
+   floor. Delete this block + the #devLevelSelect markup/CSS to remove. ════ */
+(function buildDevLevelSelect() {
+  const wrap = document.getElementById('devLevelButtons');
+  const label = document.getElementById('devSelectedFloor');
+  if (!wrap) return;
+  LEVEL_THEMES.forEach((theme, i) => {
+    const b = document.createElement('button');
+    b.className = 'dev-ls-btn' + (theme.isBoss ? ' boss' : '') + (i === devStartFloor ? ' selected' : '');
+    b.textContent = i;
+    b.title = theme.name + (theme.archetype ? ' [' + theme.archetype + ']' : '');
+    b.addEventListener('click', () => {
+      devStartFloor = i;
+      label.textContent = i;
+      wrap.querySelectorAll('.dev-ls-btn').forEach(el => el.classList.remove('selected'));
+      b.classList.add('selected');
+    });
+    wrap.appendChild(b);
+  });
+})();
+
+// Volume sliders → audio gain nodes (sliders are 0–100, gains are 0–1)
+document.getElementById('sliderVolMaster').addEventListener('input', e => {
+  volMaster = e.target.value / 100;
+  if (masterGain) masterGain.gain.value = volMaster;
+  document.getElementById('lblVolMaster').textContent = e.target.value + '%';
+});
+document.getElementById('sliderVolSFX').addEventListener('input', e => {
+  volSFX = e.target.value / 100;
+  if (sfxGain) sfxGain.gain.value = volSFX;
+  document.getElementById('lblVolSFX').textContent = e.target.value + '%';
+});
+document.getElementById('sliderVolAmbient').addEventListener('input', e => {
+  volAmbient = e.target.value / 100;
+  if (ambientGain) ambientGain.gain.value = volAmbient;
+  document.getElementById('lblVolAmbient').textContent = e.target.value + '%';
+});
 
 /* ═══════════════════════════════════════════
    SHOP SYSTEM
@@ -1751,6 +2194,9 @@ document.getElementById('btnShopClose').addEventListener('click', () => {
    INIT & LOOP
    ═══════════════════════════════════════════ */
 function init() {
+  initSpriteTextures();
+  preloadMobModels(); // load real GLB mob models once; spawns clone from cache
+
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d0a04);
 
@@ -1780,9 +2226,25 @@ function init() {
   animate();
 }
 
+// FPS counter — sampled over a rolling window so the readout is steady, not jittery
+let _fpsFrames = 0, _fpsAccum = 0, _fpsValue = 0;
+function updateFpsCounter(dt) {
+  _fpsFrames++;
+  _fpsAccum += dt;
+  if (_fpsAccum >= 0.5) { // refresh twice a second
+    _fpsValue = Math.round(_fpsFrames / _fpsAccum);
+    _fpsFrames = 0; _fpsAccum = 0;
+    const el = document.getElementById('hudFps');
+    if (el) el.textContent = 'FPS: ' + _fpsValue;
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();        // true frame time (for the FPS readout)
+  const dt = Math.min(rawDt, 0.05);      // clamped for stable physics/gameplay
+
+  updateFpsCounter(rawDt);
 
   if (gameState === 'playing') {
     updatePlayer(dt);
@@ -1793,7 +2255,7 @@ function animate() {
     updateMinimap();
     updateLights(dt);
     updateHUDTimers(dt);
-    updateAmbientHum(dt);
+    updateAmbient(dt);
     updateBulletTrails(dt);
     updateHUD();
   }

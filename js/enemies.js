@@ -165,6 +165,223 @@ const MOB_TYPES = {
 };
 
 /* ═══════════════════════════════════════════
+   MOB VISUALS — swappable seam
+   buildMobModel() is the ONLY place mob bodies
+   are defined. A model-loader can later replace
+   the internals of a case without touching AI,
+   spawning, stats, hit-flash or death code.
+   ═══════════════════════════════════════════ */
+// Visual-only height multiplier for the wire figure. Its armature is built
+// ~2.5m tall (head clump ends at y=2.5), so a scale of 1.0 renders it at full
+// intended height. This is DELIBERATELY decoupled from the crawler's mt.scale
+// (0.65 / 1.1), which was tuned for the old small sprite and only governs
+// gameplay stats/hitbox — NOT the rendered model height.
+const WIRE_VISUAL_SCALE = 1.0;
+
+/* ═══════════════════════════════════════════
+   REAL 3D MODEL PIPELINE (GLTF) — first test on TWO mob slots
+   Models are PRELOADED once at startup into modelCache, then each spawn CLONES
+   the cached scene (geometry stays shared; materials are cloned per-instance so
+   hit-flash / death-fade don't leak across mobs). If a model isn't loaded yet or
+   failed, buildMobModel falls back to the existing placeholder/sprite.
+   ═══════════════════════════════════════════ */
+const MODEL_DEFS = {
+  // crawler family → tall "bacteria" mob; stalker family → humanoid skinstealer.
+  // faceOffset: added to the atan2 facing angle so the model's FRONT (not back)
+  // points at the player. Most GLB mobs face -Z by default → Math.PI. Flip to 0
+  // (or tweak) per-model if a model turns out to already face +Z.
+  crawler:        { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
+  danger_crawler: { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
+  stalker:        { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI },
+  danger_stalker: { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI }
+};
+const modelCache = {}; // url -> { scene, rigged } on success, or null on failure
+
+// Preload every unique GLB ONCE (call during init/loading). Non-blocking: spawns
+// before a model finishes loading just use the fallback placeholder.
+function preloadMobModels() {
+  if (typeof THREE.GLTFLoader === 'undefined') {
+    console.warn('[models] GLTFLoader not present — mobs will use placeholders.');
+    return;
+  }
+  const loader = new THREE.GLTFLoader();
+  const urls = Array.from(new Set(Object.values(MODEL_DEFS).map(d => d.url)));
+  urls.forEach(url => {
+    loader.load(
+      url,
+      gltf => {
+        let rigged = false;
+        gltf.scene.traverse(o => { if (o.isSkinnedMesh) rigged = true; });
+        modelCache[url] = { scene: gltf.scene, rigged };
+        console.log('[models] loaded', url, rigged ? '(rigged)' : '(static)');
+      },
+      undefined,
+      err => { modelCache[url] = null; console.warn('[models] FAILED', url, '— using placeholder.', err); }
+    );
+  });
+}
+
+// Build a ready-to-place instance of a cached model, or null if unavailable.
+// Returns an outer Group whose base scale stays (1,1,1) so the existing isGroup
+// death-squash (scale.y = WIRE_VISUAL_SCALE * squashY) keeps working; the inner
+// object carries the auto-computed scale + grounding offset.
+function instanceMobModel(type) {
+  const def = MODEL_DEFS[type];
+  if (!def) return null;
+  const entry = modelCache[def.url];
+  if (!entry) return null; // not loaded yet, or load failed → caller falls back
+
+  // Clone: SkeletonUtils for rigged meshes (preserves skinning), else plain clone.
+  const inner = (entry.rigged && THREE.SkeletonUtils)
+    ? THREE.SkeletonUtils.clone(entry.scene)
+    : entry.scene.clone(true);
+
+  // Per-instance materials so setMobFlash/death-fade affect only this mob.
+  // NOTE: Material.clone() reference-copies .map and clones .color, so the clone
+  // preserves textures — it is NOT what makes the bacteria render white. That
+  // model's materials simply ship without a usable texture map, so they fall back
+  // to the default white base color. For the bacteria (crawler family) ONLY, force
+  // any map-less material dark so it matches the intended near-black look. Other
+  // models (skinstealer) and sprites are untouched.
+  const isBacteria = (type === 'crawler' || type === 'danger_crawler');
+  inner.traverse(o => {
+    if (o.isMesh && o.material) {
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+      if (isBacteria) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m => { if (!m.map && m.color) m.color.setHex(0x0a0a0a); });
+      }
+    }
+  });
+
+  // Auto-scale to the intended height: measure native bounding box, then
+  // scale = targetHeight / measuredHeight (uniform, preserves proportions).
+  inner.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(inner);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const s = size.y > 0.0001 ? def.height / size.y : 1;
+  inner.scale.setScalar(s);
+
+  // Re-measure at final scale, then center horizontally (x/z) and drop feet to y=0.
+  inner.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(inner);
+  inner.position.x -= (box2.min.x + box2.max.x) / 2;
+  inner.position.z -= (box2.min.z + box2.max.z) / 2;
+  inner.position.y -= box2.min.y;
+
+  const outer = new THREE.Group();
+  outer.add(inner);
+  // Mark as a real loaded model (vs. the wire-figure fallback, which is also a Group)
+  // so updateEnemies knows to face it at the player. faceOffset corrects models whose
+  // default orientation shows their back when rotation.y points at the player.
+  outer.userData.isModel = true;
+  outer.userData.faceOffset = (def.faceOffset !== undefined) ? def.faceOffset : Math.PI;
+  return outer;
+}
+
+function buildMobModel(type, scale) {
+  // SLOT 1 — bacteria model for the crawler family (placeholder fallback).
+  if (type === 'crawler' || type === 'danger_crawler') {
+    return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE);
+  }
+  // SLOT 2 — skinstealer model for the stalker family (sprite fallback).
+  if (type === 'stalker' || type === 'danger_stalker') {
+    return instanceMobModel(type) || buildSpriteMob(type, scale);
+  }
+  // Everything else (phantom, ...) unchanged: original sprite.
+  return buildSpriteMob(type, scale);
+}
+
+// Original sprite mob — unchanged behavior, extracted so it can serve as both the
+// default path and the stalker fallback.
+function buildSpriteMob(type, scale) {
+  const tex = spriteTextures[type];
+  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(scale * 2.5, scale * 2.5, 1);
+
+  // faint red atmosphere light (as before)
+  const eyeLight = new THREE.PointLight(0xff2200, 0.2, 4);
+  eyeLight.position.set(0, 0, 0.5);
+  sprite.add(eyeLight);
+
+  return sprite;
+}
+
+// TEMPORARY cheap placeholder for the wire figure — a simple tall humanoid that
+// reads as "tall figure looming over the player" in just a handful of draw calls.
+// All body parts SHARE one dark material (6 body meshes + 1 glowing eye = 7 meshes
+// total) instead of the old 80-tube / 80-material build. This is a stand-in until
+// real 3D models are loaded through the same buildMobModel() seam; keep the name,
+// the ~2.5m height, feet-at-y=0, and the userData.core/coreLight refs so the
+// existing hit-flash and death/fade code keep working unchanged.
+function buildWiremonster(scale) {
+  const group = new THREE.Group();
+
+  // ONE shared material for every body part — a few draw calls, not 80.
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.6, metalness: 0.3 });
+
+  // Tapered torso (wider at the hips, narrow at the shoulders): y 0.90 -> 2.05
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.24, 1.15, 8), bodyMat);
+  torso.position.y = 1.475;
+  group.add(torso);
+
+  // Two thin legs: y 0.00 -> 0.95
+  const legGeo = new THREE.CylinderGeometry(0.07, 0.06, 0.95, 6);
+  const legL = new THREE.Mesh(legGeo, bodyMat); legL.position.set(-0.13, 0.475, 0); group.add(legL);
+  const legR = new THREE.Mesh(legGeo, bodyMat); legR.position.set( 0.13, 0.475, 0); group.add(legR);
+
+  // Two thin arms hanging at the sides: y ~1.07 -> 1.93
+  const armGeo = new THREE.CylinderGeometry(0.05, 0.045, 0.85, 6);
+  const armL = new THREE.Mesh(armGeo, bodyMat); armL.position.set(-0.30, 1.50, 0); group.add(armL);
+  const armR = new THREE.Mesh(armGeo, bodyMat); armR.position.set( 0.30, 1.50, 0); group.add(armR);
+
+  // Sphere head: top ~2.45m → towers over the 1.6m player
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.20, 10, 8), bodyMat);
+  head.position.y = 2.25;
+  group.add(head);
+
+  // Glowing red core "eye" on the head (own basic material so flash code skips it
+  // and it always reads as a glow). Kept as userData.core for death/flash refs.
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff4040 })
+  );
+  core.position.set(0, 2.28, 0.17);
+  group.add(core);
+
+  const coreLight = new THREE.PointLight(0xff2020, 0.6, 3);
+  coreLight.position.copy(core.position);
+  group.add(coreLight);
+
+  group.userData.core = core;
+  group.userData.coreLight = coreLight;
+  group.userData.coreBaseIntensity = 0.6;
+
+  group.scale.setScalar(scale);
+  return group;
+}
+
+// Hit-flash that works for both Group (3D) and Sprite (default) mobs
+function setMobFlash(enemy, on) {
+  const mesh = enemy.mesh;
+  if (mesh.isGroup) {
+    mesh.traverse(o => {
+      if (o.material && o.material.emissive) {
+        o.material.emissive.setHex(on ? 0xff0000 : 0x000000);
+      }
+    });
+    if (mesh.userData.coreLight) {
+      const base = mesh.userData.coreBaseIntensity || 0.6;
+      mesh.userData.coreLight.intensity = on ? base * 4 : base;
+    }
+  } else {
+    // sprite mobs: tint the sprite material (SpriteMaterial has no emissive)
+    mesh.material.color.setHex(on ? 0xff0000 : 0xffffff);
+  }
+}
+
+/* ═══════════════════════════════════════════
    SPAWN ENEMY
    ═══════════════════════════════════════════ */
 function spawnEnemy(type, forcePos) {
@@ -192,19 +409,13 @@ function spawnEnemy(type, forcePos) {
   }
   if (bestDist === 0) return;
 
-  const tex = spriteTextures[type];
-  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthWrite: false });
-  const mesh = new THREE.Sprite(mat);
-  
-  mesh.scale.set(mt.scale * 2.5, mt.scale * 2.5, 1);
-  const spriteH = mt.scale * 2.5;
-  mesh.position.set(bestX, spriteH / 2, bestZ);
-  scene.add(mesh);
+  // Visuals come from the swappable seam; enemy.scale === mt.scale
+  const mesh = buildMobModel(type, mt.scale);
 
-  // Add a faint red light to the sprite center for atmosphere
-  const eyeLight = new THREE.PointLight(0xff2200, 0.2, 4);
-  eyeLight.position.set(0, 0, 0.5);
-  mesh.add(eyeLight);
+  const spriteH = mt.scale * 2.5;
+  // Grounded 3D mobs (wire figure) are built feet-at-y=0; sprite mobs stay center-anchored.
+  mesh.position.set(bestX, mesh.isGroup ? 0 : spriteH / 2, bestZ);
+  scene.add(mesh);
 
   const scaleMult = 1 + (currentFloor % LEVEL_THEMES.length) * 0.05;
   const enemy = {
@@ -245,10 +456,10 @@ function spawnBoss() {
   const bh = 2.0 * sc;
   const bw = 0.6 * sc, bd = 0.5 * sc;
 
-  let texName = 'boss_warden';
-  if (currentFloor > 5) texName = 'boss_amalgam';
-  if (currentFloor > 10) texName = 'boss_hive';
-  
+  // Texture is tied to the boss FLOOR's theme (theme.bossTex), not raw currentFloor,
+  // so each boss always shows its own art on every loop. Fallback to warden if unset.
+  const texName = theme.bossTex || 'boss_warden';
+
   const tex = spriteTextures[texName];
   const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthWrite: false });
   const mesh = new THREE.Sprite(mat);
@@ -265,6 +476,7 @@ function spawnBoss() {
 
   bossEntity = {
     mesh,
+    name: theme.bossName, // used by dev label overlay
     pos: new THREE.Vector3(bx, bh / 2, bz),
     height: bh,
     scale: sc,
@@ -587,11 +799,25 @@ function updateEnemies(dt) {
     const e = enemies[i];
 
     if (!e.alive) {
+      removeDebugLabel(e); // DEV: dead mobs drop their type label
       e.deathTimer += dt;
-      e.mesh.material.opacity = Math.max(0, 1 - e.deathTimer * 2.5);
-      e.mesh.material.transparent = true;
-      e.mesh.scale.y = Math.max(0.01, 1 - e.deathTimer * 3);
-      e.mesh.position.y = (e.scale * 2.5) / 2 * e.mesh.scale.y;
+      const fade = Math.max(0, 1 - e.deathTimer * 2.5);
+      const squashY = Math.max(0.01, 1 - e.deathTimer * 3);
+      if (e.mesh.isGroup) {
+        // 3D mob: fade every child material, squash relative to base uniform scale
+        e.mesh.traverse(o => {
+          if (o.material) { o.material.transparent = true; o.material.opacity = fade; }
+        });
+        // Squash relative to the wire figure's VISUAL base scale (not gameplay e.scale).
+        e.mesh.scale.y = WIRE_VISUAL_SCALE * squashY;
+        e.mesh.position.y = 0; // feet planted; figure collapses down into the floor
+      } else {
+        // sprite mob: original behavior
+        e.mesh.material.opacity = fade;
+        e.mesh.material.transparent = true;
+        e.mesh.scale.y = squashY;
+        e.mesh.position.y = (e.scale * 2.5) / 2 * squashY;
+      }
       if (e.deathTimer > 0.7) {
         scene.remove(e.mesh);
         enemies.splice(i, 1);
@@ -603,7 +829,7 @@ function updateEnemies(dt) {
     if (e.hitFlashTimer > 0) {
       e.hitFlashTimer -= dt;
       if (e.hitFlashTimer <= 0) {
-        e.mesh.material.color.setHex(0xffffff);
+        setMobFlash(e, false);
       }
     }
 
@@ -657,8 +883,26 @@ function updateEnemies(dt) {
       yPos += Math.sin(Date.now() * 0.003 + e.pos.x) * 0.4;
     }
     e.mesh.position.set(e.pos.x, yPos, e.pos.z);
-    if (e.type === 'crawler' || e.type === 'danger_crawler') {
-      e.mesh.position.y = (e.scale * 2.5) / 2 + Math.sin(clock.getElapsedTime() * 14) * 0.06;
+    if (e.mesh.isGroup) {
+      // grounded wire mob: bob around floor level so feet stay near y=0
+      e.mesh.position.y = 0.05 + Math.sin(clock.getElapsedTime() * 14) * 0.05;
+      // Loaded 3D models: face the player. Y-axis only (no tilt) so feet stay
+      // planted and the bob above is preserved. dx/dz are player − mob (lines above);
+      // faceOffset (default Math.PI) corrects models that default to facing away.
+      // Sprites auto-face the camera, so they're skipped (isModel only set on models).
+      if (e.mesh.userData.isModel) {
+        e.mesh.rotation.y = Math.atan2(dx, dz) + (e.mesh.userData.faceOffset || 0);
+      }
+    }
+
+    // DEV: floating type label above the mob's head (toggled with L).
+    // Created lazily so there's no cost unless the overlay is on.
+    if (window.debugLabels) {
+      if (!e.debugLabel) { e.debugLabel = makeDebugLabel(e.type); scene.add(e.debugLabel); }
+      // 3D group mobs render ~2.5m tall → sit the label at ~2.7m;
+      // sprite mobs sit just above their sprite top (e.scale * 2.5).
+      const labelY = e.mesh.isGroup ? 2.7 : (e.scale * 2.5) + 0.3;
+      e.debugLabel.position.set(e.pos.x, labelY, e.pos.z);
     }
 
     if (dist < e.attackRange) {
@@ -670,5 +914,16 @@ function updateEnemies(dt) {
     } else {
       e.attackTimer = Math.max(0, e.attackTimer - dt * 0.5);
     }
+  }
+
+  // DEV: boss type label, shown above the boss while the overlay is on.
+  if (window.debugLabels && bossEntity && bossEntity.alive) {
+    if (!bossEntity.debugLabel) {
+      bossEntity.debugLabel = makeDebugLabel(bossEntity.name || 'BOSS');
+      scene.add(bossEntity.debugLabel);
+    }
+    bossEntity.debugLabel.position.set(bossEntity.pos.x, bossEntity.height + 0.6, bossEntity.pos.z);
+  } else if (bossEntity && bossEntity.debugLabel) {
+    removeDebugLabel(bossEntity); // boss dead/gone → drop its label
   }
 }
