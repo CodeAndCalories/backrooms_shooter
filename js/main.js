@@ -429,6 +429,24 @@ const FLOOR_ANNOUNCE_TOTAL = 4.0; // two-step intro: "LEVEL N" then the level na
 let flickerTimers = [];
 let muzzleFlashLight = null, muzzleFlashTimer = 0;
 
+/* ── FIXED LIGHT BUDGET ──
+   three.js (r128) bakes the scene's point-light COUNT into every shader
+   program's cache key, so any floor (or mid-fight event) that changes the
+   number of PointLights forces a recompile of every material — the per-floor
+   PROG climb and transition hitch on the dev HUD. Every floor therefore
+   carries the SAME fixed set of point lights:
+     CEILING_LIGHT_BUDGET ceiling slots (real ones lit, the rest parked dark
+     below the floor) + 1 exit slot + 1 boss slot + BOSS_PROJ_LIGHT_COUNT
+     projectile slots + the muzzle flash on the camera = 32 total.
+   Combat/exit lights only ever change INTENSITY (the muzzle-flash pattern),
+   never the count, so programs compiled on floor 0 are reused forever. */
+const CEILING_LIGHT_BUDGET = 26;  // covers the worst real placement (5x5 sample grid = 25)
+const BOSS_PROJ_LIGHT_COUNT = 3;  // max concurrent lit boss projectiles
+let bossLight = null;             // persistent slot — lit only while a boss is alive
+let bossProjLights = [];          // persistent slots — intensity 0 marks a free slot
+let programKeepalive = null;      // camera-riding micro-meshes pinning shader programs (see createProgramKeepalive)
+let flashlightWarmupToken = 0;    // invalidates in-flight async warm-up frames on rebuild
+
 // Flashlight
 let flashlight = null, flashlightOn = false;
 
@@ -670,6 +688,36 @@ function createCeilingTexture(theme) {
 }
 
 /* ═══════════════════════════════════════════
+   THEME TEXTURE CACHE
+   The 3 procedural CanvasTextures (wall/floor/ceiling) depend ONLY on the
+   theme, so they're generated once per theme id and reused on every revisit
+   (loops, restarts, level select) — skipping ~5-15ms of canvas work AND the
+   first-render GPU upload per floor. 16 themes ≈ 9 MB VRAM ceiling, bounded.
+
+   OWNERSHIP: cached textures are SHARED, not floor-owned. Each is tagged
+   userData.themeCached = true, and the floor-teardown dispose in
+   buildMazeScene skips any .map carrying that tag. If you add a new
+   per-floor texture, leave the tag off and teardown will dispose it; if you
+   add a new shared/cached one, tag it the same way. Never call .dispose()
+   on a tagged texture — the cache holds it for the whole session.
+   ═══════════════════════════════════════════ */
+const themeTextureCache = new Map(); // theme.id -> { wall, floor, ceil }
+
+function getThemeTextures(theme) {
+  let entry = themeTextureCache.get(theme.id);
+  if (!entry) {
+    entry = {
+      wall: createWallTexture(theme),
+      floor: createFloorTexture(theme),
+      ceil: createCeilingTexture(theme)
+    };
+    // Exempt from floor teardown. NOTE: r128 textures have no built-in
+    // .userData (added in a later three.js release) — create it explicitly.
+    for (const k in entry) entry[k].userData = { themeCached: true };
+    themeTextureCache.set(theme.id, entry);
+  }
+  return entry;
+}
 
 /* ═══════════════════════════════════════════
    MAZE GENERATION
@@ -1171,12 +1219,67 @@ function createFlashlight() {
 // gameplay: N point lights with the spot ON and with it OFF. We compile BOTH states
 // (an actual render, not just renderer.compile, to defeat drivers that defer the real
 // shader compile until the first draw call — that deferral was the lingering 2nd spike).
+//
+// The two renders are NO LONGER done synchronously in the transition frame: each is
+// scheduled on its own requestAnimationFrame, so the old one-frame double-compile
+// hitch becomes two half-hitches on the next two frames — hidden behind the 4-second
+// floor-announce card that goes up in the same transition. Each warm-up render is
+// scissored to a single pixel: the draw calls still execute (forcing the driver-side
+// compile) but they cost almost nothing and can't flash a flashlight-ON frame at the
+// player (animate() renders earlier in the same rAF cycle and keeps the canvas).
 function warmUpFlashlight() {
   if (!renderer || !flashlight) return;
-  const prev = flashlight.visible;
-  flashlight.visible = true;  renderer.render(scene, camera); // spot-ON variant
-  flashlight.visible = false; renderer.render(scene, camera); // spot-OFF variant
-  flashlight.visible = prev;
+  const token = ++flashlightWarmupToken; // a rebuild before both frames run cancels the stale ones
+
+  const warmRender = (spotVisible) => {
+    const prev = flashlight.visible;
+    flashlight.visible = spotVisible;
+    renderer.setScissorTest(true);
+    renderer.setScissor(0, 0, 1, 1);
+    renderer.render(scene, camera);
+    renderer.setScissorTest(false);
+    flashlight.visible = prev;
+  };
+
+  requestAnimationFrame(() => {
+    if (token !== flashlightWarmupToken || !flashlight) return;
+    warmRender(true);                       // announce frame 1: spot-ON variant
+    requestAnimationFrame(() => {
+      if (token !== flashlightWarmupToken || !flashlight) return;
+      warmRender(false);                    // announce frame 2: spot-OFF variant
+    });
+  });
+}
+
+// ── PROGRAM KEEPALIVE ──
+// three.js destroys a shader program when the last material using it is disposed
+// (usedTimes hits 0). buildMazeScene disposes every world material on teardown, so
+// even with a fixed light count the textured "standard" programs would die and
+// recompile every floor. These four micro-meshes (0.1mm, parked in front of the
+// camera, never disposed) each pin one heavy program family alive for the session:
+//   1. MeshStandardMaterial + map               (floors/ceilings/decorations)
+//   2. MeshStandardMaterial + map, DoubleSide   (walls)
+//   3. SpriteMaterial + map                     (mobs)
+//   4. SpriteMaterial + map + alphaTest 0.1     (bosses)
+// (MeshStandardMaterial WITHOUT a map is already pinned by the never-disposed
+// ammoPickupMat.) They ride the camera — scene.remove(camera) runs before the
+// teardown traverse, so they're spared — and cost 4 sub-pixel draw calls a frame.
+function createProgramKeepalive() {
+  programKeepalive = new THREE.Group();
+  const tex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  tex.needsUpdate = true;
+  const quad = new THREE.PlaneGeometry(1, 1);
+  const pin = (obj) => {
+    obj.scale.setScalar(0.0001);
+    obj.position.set(0, 0, -0.5);
+    obj.frustumCulled = false; // must actually DRAW every frame, never get culled
+    programKeepalive.add(obj);
+  };
+  pin(new THREE.Mesh(quad, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05 })));
+  pin(new THREE.Mesh(quad, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })));
+  pin(new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })));
+  pin(new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.1, depthWrite: false })));
+  camera.add(programKeepalive);
 }
 
 function toggleFlashlight() {
@@ -1313,12 +1416,18 @@ function buildMazeScene() {
 
   // Everything still in the scene is floor-owned world geometry (walls, floor,
   // ceiling, fixtures, decorations, exit). Dispose it all — including material
-  // .map textures: that's where the 3 per-floor CanvasTextures live.
+  // .map textures — EXCEPT textures tagged userData.themeCached: those are the
+  // wall/floor/ceiling CanvasTextures, which are SHARED via themeTextureCache
+  // (one set per theme id, alive for the whole session), not floor-owned.
   scene.traverse(o => {
     if (o.geometry && !o.isSprite) o.geometry.dispose();
     if (o.material) {
       const mats = Array.isArray(o.material) ? o.material : [o.material];
-      mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
+      mats.forEach(m => {
+        // r128 textures lack a default .userData — guard before reading the tag
+        if (m.map && !(m.map.userData && m.map.userData.themeCached)) m.map.dispose();
+        m.dispose();
+      });
     }
   });
 
@@ -1337,9 +1446,9 @@ function buildMazeScene() {
   // (wall-mount height) so floor lighting is identical to before.
   const roomH = theme.isBoss ? Math.max(WALL_H, theme.bossScale * 2.0 + 0.8) : WALL_H;
 
-  const wallTex = createWallTexture(theme);
-  const floorTex = createFloorTexture(theme);
-  const ceilTex = createCeilingTexture(theme);
+  // Cached per theme id — generated on first visit, reused (same GPU texture,
+  // no re-upload) on every revisit. SHARED, not floor-owned: see themeTextureCache.
+  const { wall: wallTex, floor: floorTex, ceil: ceilTex } = getThemeTextures(theme);
 
   const wallMat = new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide });
   const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.9, metalness: 0.02 });
@@ -1407,6 +1516,7 @@ function buildMazeScene() {
   scene.add(camera);
   createGun();
   createFlashlight();
+  if (!programKeepalive) createProgramKeepalive(); // once per session; survives floor teardowns on the camera
 
   const lightSpacing = Math.max(4, 6 - Math.floor(theme.id === 3 ? -1 : (theme.darknessLevel || 0) * 2));
   // The maze generator only carves floor cells at odd/odd coordinates (plus odd/even
@@ -1426,6 +1536,7 @@ function buildMazeScene() {
 
   // Place one ceiling PointLight + record its fixture instance at the given floor cell.
   const placeCeilingLight = (lx, ly) => {
+    if (lights.length >= CEILING_LIGHT_BUDGET) return; // hard cap — the budget is FIXED
     const key = ly + ',' + lx;
     if (litCells.has(key)) return;     // avoid stacking two lights on one snapped cell
     litCells.add(key);
@@ -1463,7 +1574,12 @@ function buildMazeScene() {
       if (ly !== -1) placeCeilingLight(lx, ly);
     }
   } else {
-    for (let y = 2; y < gh; y += lightSpacing) for (let x = 2; x < gw; x += lightSpacing) {
+    // Inflate the spacing on oversized late-loop floors so the sample grid can
+    // never exceed the fixed ceiling-light budget (instead of letting the hard
+    // cap in placeCeilingLight leave the far corner of a 41x41 grid unlit).
+    let gridSpacing = lightSpacing;
+    while (Math.ceil((gh - 2) / gridSpacing) * Math.ceil((gw - 2) / gridSpacing) > CEILING_LIGHT_BUDGET) gridSpacing++;
+    for (let y = 2; y < gh; y += gridSpacing) for (let x = 2; x < gw; x += gridSpacing) {
       let ly = -1, lx = -1;
       for (let r = 0; r <= 2 && ly === -1; r++) {
         for (let dy = -r; dy <= r && ly === -1; dy++) for (let dx = -r; dx <= r; dx++) {
@@ -1484,9 +1600,44 @@ function buildMazeScene() {
     scene.add(fixMesh);
   }
 
+  // Pad the ceiling lights up to the FIXED budget: dead slots at intensity 0,
+  // parked below the floor. They add nothing visually but keep the scene's
+  // point-light count identical on every floor, so the shader programs compiled
+  // on floor 0 are reused for the whole session. They must stay visible=true —
+  // invisible lights drop out of three.js's light count (and the cache key).
+  while (lights.length < CEILING_LIGHT_BUDGET) {
+    const pad = new THREE.PointLight(0xffffff, 0, 0.01);
+    pad.position.set(0, -100, 0);
+    scene.add(pad);
+    lights.push(pad);
+  }
+
+  // Persistent combat light slots — same idea as the muzzle flash: the boss glow
+  // and projectile lights exist on EVERY floor at intensity 0 and are only ever
+  // brightened/parked by enemies.js, never added/removed, so boss fights can't
+  // change the light count mid-fight either.
+  bossLight = new THREE.PointLight(0xff2200, 0, 10);
+  bossLight.position.set(0, -100, 0);
+  scene.add(bossLight);
+  bossProjLights = [];
+  for (let i = 0; i < BOSS_PROJ_LIGHT_COUNT; i++) {
+    const l = new THREE.PointLight(0xff4400, 0, 5);
+    l.position.set(0, -100, 0);
+    scene.add(l);
+    bossProjLights.push(l);
+  }
+
   // Fog
   scene.fog = new THREE.Fog(theme.fogColor, theme.fogNear, theme.fogFar);
   scene.background = new THREE.Color(theme.bgColor);
+
+  // Exit light is a persistent slot too: created on every floor — boss floors
+  // park it dark until createBossExit (enemies.js) brightens it — so the exit
+  // appearing after a boss kill can't change the light count.
+  const exitColor = 0x44ff88;
+  exitLight = new THREE.PointLight(exitColor, 0, CELL * 4);
+  exitLight.position.set(0, -100, 0);
+  scene.add(exitLight);
 
   // Exit zone (not on boss levels — boss must be killed first)
   if (!theme.isBoss) {
@@ -1503,15 +1654,13 @@ function buildMazeScene() {
     exitZone = { x: ex * CELL + CELL / 2, z: ey * CELL + CELL / 2, radius: CELL * 1.2 };
 
     const exitGeo = new THREE.CylinderGeometry(1.0, 1.0, 0.06, 20);
-    const exitColor = 0x44ff88;
     const exitMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.6, transparent: true, opacity: 0.5 });
     exitMesh = new THREE.Mesh(exitGeo, exitMat);
     exitMesh.position.set(exitZone.x, 0.06, exitZone.z);
     scene.add(exitMesh);
 
-    exitLight = new THREE.PointLight(exitColor, 0.8, CELL * 4);
+    exitLight.intensity = 0.8;
     exitLight.position.set(exitZone.x, 2, exitZone.z);
-    scene.add(exitLight);
 
     const beaconGeo = new THREE.CylinderGeometry(0.05, 0.05, WALL_H, 8);
     const beaconMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.5, transparent: true, opacity: 0.3 });
@@ -1521,7 +1670,6 @@ function buildMazeScene() {
   } else {
     exitZone = null;
     exitMesh = null;
-    exitLight = null;
   }
 
   // Ammo pickups — seeded rng(), so keep this call AFTER generation and at a
@@ -1533,8 +1681,10 @@ function buildMazeScene() {
   player.vel.set(0, 0, 0);
   player.onGround = true;
 
-  // Now that every PointLight is in the scene, pre-warm the flashlight's shader
-  // variants so the first F-press is instant (see warmUpFlashlight).
+  // Now that every PointLight is in the scene, schedule the flashlight shader
+  // warm-up. It no longer renders synchronously here: the two warm-up renders are
+  // spread over the next two animation frames, hidden behind the 4s floor-announce
+  // card that goes up in this same transition (see warmUpFlashlight).
   warmUpFlashlight();
 
   // Floor-specific music: start the Level Fun loop on floor 5, stop it on every other
@@ -1551,6 +1701,10 @@ function buildMazeScene() {
   // otherwise match the previous floor's).
   resetSeenGrid();
   minimapSig = '';
+
+  // MP: the teardown above disposed any remote-player avatars with the old
+  // world — tell net.js to drop its dead references (rebuilt on next 'pos').
+  netOnSceneRebuilt();
 }
 
 function addDecorations(theme, gw, gh) {
@@ -2292,6 +2446,9 @@ function updateLights(dt) {
    ═══════════════════════════════════════════ */
 function startGame() {
   if (!modelsReady) return; // preload gate backstop — loading screen still covers the menu
+  // MP: a connected CLIENT never starts its own run — the host's game_start
+  // message drives it (net.js shows "waiting for host" and calls back in here).
+  if (netGateStart()) return;
 
   initAudio();
   startAmbient();
@@ -2327,6 +2484,9 @@ function startGame() {
 
   const theme = getTheme(currentFloor);
   seedFloor(currentFloor);
+  // MP: the HOST announces the run (floor + seed) so connected clients start
+  // the identical level via this same deterministic path. No-op solo/client.
+  netOnHostStart(currentFloor, floorSeed);
   if (theme.isBoss) {
     generateBossArena(theme.mazeSize);
   } else {
@@ -2804,6 +2964,9 @@ function animate() {
     updateAmmoPickups(dt);
     updateHUD();
   }
+
+  // MP: position send (15Hz) + remote avatar smoothing. Immediate no-op solo.
+  netUpdate(dt);
 
   renderer.render(scene, camera);
   updateRendererStats(rawDt);

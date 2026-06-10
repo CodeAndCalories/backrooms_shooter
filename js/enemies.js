@@ -565,9 +565,13 @@ function spawnBoss() {
   mesh.position.set(bx, bh / 2, bz);
   scene.add(mesh);
 
-  const bossLight = new THREE.PointLight(0xff2200, 0.6, 10);
-  bossLight.position.set(0, 0, 0.5);
-  mesh.add(bossLight);
+  // Brighten the persistent boss-light slot (created at intensity 0 by
+  // buildMazeScene on every floor). Reusing an existing light instead of adding
+  // one keeps the scene's point-light count fixed — adding a light here used to
+  // change the shader cache key and recompile every material mid-floor.
+  // updateBoss tracks the boss position each frame; death parks the slot again.
+  bossLight.intensity = 0.6;
+  bossLight.position.set(bx, bh / 2, bz);
 
   const totalHp = theme.bossHp * (1 + Math.floor(currentFloor / LEVEL_THEMES.length) * 0.3);
 
@@ -660,6 +664,9 @@ function updateBoss(dt) {
 
   b.mesh.position.set(b.pos.x, b.height / 2, b.pos.z);
   b.mesh.rotation.y = Math.atan2(dx, dz);
+  // The boss glow is a persistent scene-level slot (not a child of the mesh, so
+  // removing the mesh on death can't change the light count) — follow the boss.
+  if (bossLight) bossLight.position.set(b.pos.x, b.height / 2, b.pos.z);
 
   // Melee attack
   if (dist < b.attackRange) {
@@ -711,12 +718,22 @@ function throwBossProjectile(boss) {
   projMesh.position.set(boss.pos.x, 1.5, boss.pos.z);
   scene.add(projMesh);
 
-  const projLight = new THREE.PointLight(0xff4400, 0.5, 5);
-  projMesh.add(projLight);
+  // Grab a free slot from the persistent projectile-light pool (intensity 0 =
+  // free; created by buildMazeScene on every floor). If every slot is lit the
+  // projectile flies unlit (its emissive material still glows) — better than
+  // adding a new light, which would change the scene's point-light count and
+  // recompile every shader mid-fight. updateBossProjectiles tracks position
+  // and releases the slot when the projectile dies.
+  const projLight = bossProjLights.find(l => l.intensity === 0) || null;
+  if (projLight) {
+    projLight.intensity = 0.5;
+    projLight.position.copy(projMesh.position);
+  }
 
   const speed = 12 + boss.currentPhase * 3;
   bossProjectiles.push({
     mesh: projMesh,
+    light: projLight,
     vel: new THREE.Vector3(dx / dist * speed, 0, dz / dist * speed),
     pos: projMesh.position.clone(),
     life: 5,
@@ -730,6 +747,7 @@ function updateBossProjectiles(dt) {
     p.life -= dt;
     p.pos.add(p.vel.clone().multiplyScalar(dt));
     p.mesh.position.copy(p.pos);
+    if (p.light) p.light.position.copy(p.pos); // pooled slot, not a mesh child
     p.mesh.rotation.x += dt * 8;
     p.mesh.rotation.z += dt * 6;
 
@@ -741,6 +759,7 @@ function updateBossProjectiles(dt) {
       damagePlayer(p.damage, p.pos);
       p.mesh.geometry.dispose(); p.mesh.material.dispose(); // per-projectile resources
       scene.remove(p.mesh);
+      if (p.light) { p.light.intensity = 0; p.light.position.set(0, -100, 0); } // free the pooled slot
       bossProjectiles.splice(i, 1);
       continue;
     }
@@ -754,6 +773,7 @@ function updateBossProjectiles(dt) {
     if (p.life <= 0 || hitWall) {
       p.mesh.geometry.dispose(); p.mesh.material.dispose(); // per-projectile resources
       scene.remove(p.mesh);
+      if (p.light) { p.light.intensity = 0; p.light.position.set(0, -100, 0); } // free the pooled slot
       bossProjectiles.splice(i, 1);
     }
   }
@@ -772,6 +792,9 @@ function damageBoss(amount) {
     bossEntity.alive = false;
     bossEntity.deathTimer = 0;
     playBossRoar();
+
+    // Park the persistent boss-light slot (never remove it — fixed light count).
+    if (bossLight) { bossLight.intensity = 0; bossLight.position.set(0, -100, 0); }
 
     // Boss death animation
     const b = bossEntity;
@@ -816,9 +839,11 @@ function createBossExit() {
   exitMesh.position.set(exitZone.x, 0.06, exitZone.z);
   scene.add(exitMesh);
 
-  exitLight = new THREE.PointLight(exitColor, 1.2, CELL * 6);
+  // Brighten the persistent exit-light slot buildMazeScene parked at intensity 0
+  // on this boss floor — reusing it keeps the scene's point-light count fixed.
+  exitLight.intensity = 1.2;
+  exitLight.distance = CELL * 6;
   exitLight.position.set(exitZone.x, 2, exitZone.z);
-  scene.add(exitLight);
 
   const beaconGeo = new THREE.CylinderGeometry(0.08, 0.08, WALL_H, 8);
   const beaconMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.6, transparent: true, opacity: 0.4 });

@@ -41,6 +41,21 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .pls-btn.boss:hover:not(.locked){background:rgba(255,68,34,0.12);color:#ff6644;border-color:#ff6644;}
 .pls-btn.selected{background:rgba(212,195,106,0.22);color:#fff;border-color:#d4c36a;box-shadow:0 0 10px rgba(212,195,106,0.4);}
 .pls-btn.locked{color:#555;border-color:#2a2a2a;opacity:0.55;cursor:not-allowed;}
+
+/* ── CO-OP (BETA) panel — Phase 1 connection skeleton (js/net.js) ── */
+.coop-beta-tag{font-size:0.55em;color:#ff8844;letter-spacing:2px;vertical-align:super;}
+#coopPanel{margin-top:14px;padding:14px 18px;border:1px solid #6a5a2a;border-radius:4px;max-width:460px;background:rgba(0,0,0,0.3);text-align:center;}
+.coop-title{color:#d4c36a;font-size:0.8em;letter-spacing:4px;margin-bottom:12px;text-transform:uppercase;}
+.coop-room-code{color:#fff;font-size:1.8em;letter-spacing:10px;margin:4px 0 12px;text-shadow:0 0 18px rgba(212,195,106,0.6);user-select:all;}
+.coop-row{display:flex;gap:8px;justify-content:center;align-items:center;}
+.coop-or{color:#8a7f55;font-size:0.7em;letter-spacing:1px;}
+.coop-btn{background:none;border:1px solid #d4c36a33;color:#8a7f55;height:32px;padding:0 16px;font-family:'Courier New',monospace;font-size:0.85em;letter-spacing:2px;cursor:pointer;transition:all 0.2s;text-transform:uppercase;}
+.coop-btn:hover{background:rgba(212,195,106,0.12);color:#d4c36a;border-color:#d4c36a;}
+.coop-input{background:rgba(0,0,0,0.6);border:1px solid #d4c36a33;color:#d4c36a;height:32px;width:90px;padding:0 8px;font-family:'Courier New',monospace;font-size:0.95em;letter-spacing:3px;text-align:center;text-transform:uppercase;}
+.coop-input:focus{outline:none;border-color:#d4c36a;}
+.coop-input::placeholder{color:#665e3a;letter-spacing:2px;}
+.coop-status{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
+
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}
 

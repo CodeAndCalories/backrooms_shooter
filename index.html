@@ -19,6 +19,20 @@
   <div class="menu-subtitle">If you're not careful and noclip out of reality...</div>
   <button class="menu-btn" id="btnStart">Noclip In</button>
   <button class="menu-btn" id="btnControls">Controls</button>
+  <button class="menu-btn" id="btnCoop">Co-op <span class="coop-beta-tag">beta</span></button>
+
+  <!-- ════ CO-OP (BETA) — Phase 1 connection panel. Wired by js/net.js; no game-start logic yet. ════ -->
+  <div id="coopPanel" style="display:none;">
+    <div class="coop-title">Co-op (Beta)</div>
+    <div class="coop-room-code" id="coopRoomCode" style="display:none;"></div>
+    <div class="coop-row">
+      <button class="coop-btn" id="btnHostGame">Host</button>
+      <span class="coop-or">or</span>
+      <input class="coop-input" id="coopCodeInput" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false">
+      <button class="coop-btn" id="btnJoinGame">Join</button>
+    </div>
+    <div class="coop-status" id="coopStatus">Play with up to 5 players</div>
+  </div>
   <div id="controlsInfo" style="display:none;color:#8a7f55;margin-top:20px;font-size:0.8em;line-height:2.2;letter-spacing:1px;text-align:center;">
     WASD — Move &nbsp;|&nbsp; SHIFT — Sprint &nbsp;|&nbsp; SPACE — Jump<br>
     MOUSE — Look &nbsp;|&nbsp; LEFT CLICK — Shoot &nbsp;|&nbsp; R — Reload<br>
@@ -170,8 +184,12 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 
+<!-- PeerJS (multiplayer signaling + WebRTC data channels) — pinned 1.5.4, verified on cdnjs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+
 <!-- Modular Game Scripts (load order matters) -->
 <script src="js/audio.js"></script>
+<script src="js/net.js"></script>
 <script src="js/enemies.js"></script>
 <script src="js/main.js"></script>
 
