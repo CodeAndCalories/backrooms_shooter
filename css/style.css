@@ -55,6 +55,9 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .coop-input:focus{outline:none;border-color:#d4c36a;}
 .coop-input::placeholder{color:#665e3a;letter-spacing:2px;}
 .coop-status{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
+/* CO-OP down/revive banner (js/net.js toggles + fills the text) */
+#downedMsg{position:absolute;top:62%;left:50%;transform:translateX(-50%);color:#ff4444;font-size:1.1em;letter-spacing:4px;text-transform:uppercase;text-shadow:0 0 25px rgba(255,0,0,0.7);animation:downedPulse 1.6s ease-in-out infinite;}
+@keyframes downedPulse{0%,100%{opacity:0.65;}50%{opacity:1;}}
 
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}

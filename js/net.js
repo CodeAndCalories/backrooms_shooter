@@ -101,6 +101,9 @@ function netWireConnection(conn, label) {
       // Drop the leaver's avatar here and on every remaining client.
       netAvatarRemove(conn.peer);
       sendToAll('player_left', { id: conn.peer });
+      // A downed player leaving may make the wipe-check true for the rest.
+      netDownPeers.delete(conn.peer);
+      netCheckPartyOver();
     }
     if (netState.role === 'client') {
       // Host gone → drop back to inert solo so the game behaves exactly as before.
@@ -142,6 +145,12 @@ function netReset() {
   netRoster = {};
   netNextSlot = 1;
   netPendingStart = null;
+  // Phase-3 state: drop all enemy/boss/projectile mirrors (client side).
+  netOnSceneTeardown();
+  // Phase-4 state: back to solo rules — no down state, no downed overlay.
+  netDownPeers.clear();
+  if (typeof player !== 'undefined') { player.isDown = false; player.reviveProgress = 0; }
+  netShowDownedMsg(false);
 }
 
 /* ── host / join ── */
@@ -281,8 +290,14 @@ function netGateStart() {
 onMessage('game_start', (d) => {
   if (netState.role !== 'client' || !d) return;
   console.log(`[net] game_start received (floor ${d.floor}, seed ${d.seed})`);
-  netPendingStart = d;
-  netTryStart(); // may defer until modelsReady (retried from netUpdate)
+  if (gameState === 'playing') {
+    // Mid-run: the host advanced floors — rebuild in place (Phase-3 interim:
+    // floor transitions are host-triggered only).
+    netClientLoadFloor(d.floor, d.seed);
+  } else {
+    netPendingStart = d;
+    netTryStart(); // may defer until modelsReady (retried from netUpdate)
+  }
 });
 
 function netTryStart() {
@@ -323,6 +338,8 @@ function netUpdate(dt) {
   if (netPendingStart) netTryStart();
   if (netState.role === 'solo') return;
 
+  netUpdateDownState(dt); // down/revive progress (no-op unless this player is down)
+
   // Outbound: my eye position + yaw at NET_POS_HZ while actually playing.
   if (gameState === 'playing') {
     netPosAccum += dt;
@@ -331,6 +348,15 @@ function netUpdate(dt) {
       const p = { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw };
       if (netState.role === 'host') { p.id = netState.myId; sendToAll('pos', p); }
       else sendToHost('pos', p);
+    }
+
+    // Host: authoritative enemy snapshot at NET_SNAPSHOT_HZ (Phase 3).
+    if (netState.role === 'host' && netState.peers.length > 0) {
+      netSnapAccum += dt;
+      if (netSnapAccum >= 1 / NET_SNAPSHOT_HZ) {
+        netSnapAccum = 0;
+        sendToAll('enemies', netBuildSnapshot());
+      }
     }
   }
 
@@ -415,6 +441,11 @@ function netAvatarBuild(av) {
   scene.add(group);
   av.group = group;
   av.builtSlot = slot;
+  // Down/revive (Phase 4): keep refs for the dark-red "down" tint, and re-apply
+  // it if this avatar was rebuilt (e.g. new floor) while its player is down.
+  av.bodyMat = bodyMat;
+  av.baseColor = color;
+  if (av.down) netSetAvatarDown(av.id, true);
 }
 
 // Camera-facing name tag — same canvas-text approach as the dev debug labels,
@@ -467,8 +498,586 @@ function netAvatarsClear() {
 // Called at the end of buildMazeScene (main.js): the floor teardown already
 // disposed every avatar mesh along with the old world, so just drop the dead
 // references — the next pos from each player rebuilds them in the new scene.
+// A new floor also REVIVES everyone (down state doesn't carry across floors).
 function netOnSceneRebuilt() {
-  for (const av of netAvatars.values()) av.group = null;
+  for (const av of netAvatars.values()) { av.group = null; av.bodyMat = null; av.down = false; }
+  netDownPeers.clear();
+  player.isDown = false;
+  player.reviveProgress = 0;
+  netShowDownedMsg(false);
+  netExitReqT = -10;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PHASE 3 — HOST-AUTHORITATIVE ENEMIES
+   The HOST is the only machine simulating enemies/bosses (solo runs
+   the same code as always). Clients render mirrors of what the host
+   broadcasts and send their shots to the host for resolution.
+
+   Message flow (on top of Phase 1/2):
+     host   --enemies {w,e,b,p}---> clients   10Hz snapshot (below)
+     client --shoot {ox..dz}------> host      host raycasts + applies damage
+     host   --damaged {a,x,z}-----> one client enemy hit THAT player
+
+   Snapshot format ('enemies', compact arrays, living things only):
+     w: currentWave                                  (client HUD)
+     e: [ [id, typeIdx, x, z, hp, maxHp], ... ]      per living enemy
+     b: [hp, maxHp, phase, x, z]                     only while a boss is alive
+     p: [ [x, z], ... ]                              boss projectiles (y is fixed)
+   A mirrored id missing from a snapshot = that enemy died → client
+   plays the death animation. hp drop between snapshots = hit flash.
+   ═══════════════════════════════════════════════════════════════ */
+
+const NET_SNAPSHOT_HZ = 10;
+// Wire-format type indices — order must match on every game version.
+const NET_TYPE_LIST = ['stalker', 'crawler', 'phantom', 'danger_stalker', 'danger_crawler', 'spider', 'partygoer'];
+const netR2 = (v) => Math.round(v * 100) / 100; // 2-decimal wire rounding
+
+let netEnemyIdCounter = 0;     // host: stable per-spawn enemy ids (spawnEnemy)
+let netSnapAccum = 0;          // host: snapshot send-rate accumulator
+const netMobs = new Map();     // client: id -> mirror { id, type, mesh, scale, tx, tz, hp, maxHp, flashT, dying, deathT }
+let netBossMirror = null;      // client: { mesh, height, hp, maxHp, tx, tz, flashT, dying, deathT }
+let netProjMirrors = [];       // client: [{ mesh, light, tx, tz, fresh }]
+
+function netIsClient() { return netState.role === 'client'; }
+
+/* ── host-side targeting helpers (also the SOLO path: 1-entry list) ── */
+
+// Every player the host knows: itself + each connected client (positions come
+// from the Phase-2 pos stream via netAvatars). conn === null means "the local
+// player" — netDealDamage uses that to pick damagePlayer vs a 'damaged' message.
+function netAllPlayers() {
+  const list = [];
+  // DOWNED players are invisible to enemy AI (no chasing/attacking a body).
+  // Solo: player.isDown is always false, so this is the same 1-entry list.
+  if (!player.isDown) list.push({ x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, conn: null });
+  if (netState.role === 'host') {
+    for (const conn of netState.peers) {
+      const av = netAvatars.get(conn.peer);
+      if (av && conn.open && !netDownPeers.has(conn.peer)) {
+        list.push({ x: av.target.x, y: av.target.y, z: av.target.z, yaw: av.target.yaw, conn });
+      }
+    }
+  }
+  // Everyone down (party-over is imminent) — return the local player so the
+  // AI callers always have a target to do math against.
+  if (list.length === 0) list.push({ x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, conn: null });
+  return list;
+}
+
+function netNearestOf(players, x, z) {
+  let best = players[0], bestD2 = Infinity;
+  for (const pl of players) {
+    const dx = pl.x - x, dz = pl.z - z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < bestD2) { bestD2 = d2; best = pl; }
+  }
+  return best;
+}
+
+// Host: route enemy damage to whichever player got hit. Local target → the
+// existing damagePlayer; remote target → 'damaged' message, applied by that
+// client via ITS damagePlayer (vignette, directional indicator, death).
+function netDealDamage(tgt, amount, fromPos) {
+  if (tgt && tgt.conn) {
+    sendTo(tgt.conn, 'damaged', { a: Math.round(amount * 10) / 10, x: netR2(fromPos.x), z: netR2(fromPos.z) });
+  } else {
+    damagePlayer(amount, fromPos);
+  }
+}
+
+onMessage('damaged', (d) => {
+  if (netIsClient() && gameState === 'playing' && d) damagePlayer(d.a, { x: d.x, z: d.z });
+});
+
+/* ── client shooting → host resolution ── */
+
+function netSendShoot(origin, dir) {
+  sendToHost('shoot', {
+    ox: netR2(origin.x), oy: netR2(origin.y), oz: netR2(origin.z),
+    dx: Math.round(dir.x * 1000) / 1000, dy: Math.round(dir.y * 1000) / 1000, dz: Math.round(dir.z * 1000) / 1000,
+    m: shopStats.damageMult // this client's shop damage multiplier (client-trusted; fine for friend co-op)
+  });
+}
+
+onMessage('shoot', (d, fromConn) => {
+  // main.js — host's authoritative raycast; fromConn = who fired (kill credit)
+  if (netState.role === 'host' && gameState === 'playing' && d) netResolveRemoteShot(d, fromConn);
+});
+
+/* ── host snapshot broadcast (called from netUpdate) ── */
+
+function netBuildSnapshot() {
+  const snap = { w: currentWave, k: floorKills, e: [] };
+  for (const e of enemies) {
+    if (!e.alive) continue; // dying mobs are clients' business once the id vanishes
+    snap.e.push([e.id, NET_TYPE_LIST.indexOf(e.type), netR2(e.pos.x), netR2(e.pos.z), Math.ceil(e.hp), Math.ceil(e.maxHp)]);
+  }
+  if (bossEntity && bossEntity.alive) {
+    snap.b = [Math.ceil(bossEntity.hp), Math.ceil(bossEntity.maxHp), bossEntity.currentPhase, netR2(bossEntity.pos.x), netR2(bossEntity.pos.z)];
+    snap.p = bossProjectiles.map(pr => [netR2(pr.pos.x), netR2(pr.pos.z)]);
+  }
+  return snap;
+}
+
+/* ── client mirror: snapshot reception ── */
+
+onMessage('enemies', (snap) => {
+  if (!netIsClient() || !snap || gameState !== 'playing') return;
+  if (typeof snap.w === 'number') currentWave = snap.w; // wave readout on the client HUD
+  if (typeof snap.k === 'number') floorKills = snap.k;  // party kill-gate progress (HUD + exit check)
+
+  const seen = new Set();
+  for (const t of (snap.e || [])) {
+    const [id, ti, x, z, hp, maxHp] = t;
+    seen.add(id);
+    let m = netMobs.get(id);
+    if (!m) m = netMobSpawn(id, NET_TYPE_LIST[ti], x, z, hp, maxHp);
+    if (!m) continue;
+    m.tx = x; m.tz = z;
+    if (hp < m.hp) { m.flashT = 0.15; setMobFlash(m, true); } // hp dropped → someone hit it
+    m.hp = hp; m.maxHp = maxHp;
+  }
+  // Mirrored id no longer in the snapshot → it died on the host.
+  for (const m of netMobs.values()) {
+    if (!seen.has(m.id) && !m.dying) { m.dying = true; m.deathT = 0; playEnemyDeath(); }
+  }
+
+  netBossSnapshot(snap.b || null, snap.p || []);
+});
+
+// Spawn a VISUAL-ONLY mirror via the same buildMobModel seam real spawns use.
+// No AI fields — the host owns behavior; this thing only gets moved and killed.
+function netMobSpawn(id, type, x, z, hp, maxHp) {
+  const mt = MOB_TYPES[type];
+  if (!mt || typeof scene === 'undefined' || !scene) return null;
+  const mesh = buildMobModel(type, mt.scale);
+  const sH = mt.scale * 2.5;
+  mesh.position.set(x, mesh.isGroup ? 0 : sH / 2, z);
+  scene.add(mesh);
+  const m = { id, type, mesh, scale: mt.scale, tx: x, tz: z, hp, maxHp, flashT: 0, dying: false, deathT: 0 };
+  netMobs.set(id, m);
+  return m;
+}
+
+/* ── client mirror: boss + projectiles ── */
+
+function netBossSnapshot(b, projs) {
+  if (b) {
+    if (!netBossMirror) netBossMirrorBuild(b);
+    const m = netBossMirror;
+    if (m) {
+      if (b[0] < m.hp) { m.flashT = 0.12; m.mesh.material.color.setHex(0xff0000); }
+      m.hp = b[0]; m.maxHp = b[1]; m.tx = b[3]; m.tz = b[4];
+      document.getElementById('bossHpFill').style.width = (m.hp / m.maxHp * 100) + '%';
+    }
+  } else if (netBossMirror && !netBossMirror.dying) {
+    netBossMirror.dying = true;
+    netBossMirror.deathT = 0;
+    document.getElementById('bossHpContainer').style.opacity = '0';
+    playBossRoar();
+  }
+
+  // Projectile mirrors reconcile by INDEX (transient, fast, visually fine).
+  while (netProjMirrors.length < projs.length) netProjMirrorAdd();
+  while (netProjMirrors.length > projs.length) netProjMirrorRemove();
+  for (let i = 0; i < projs.length; i++) {
+    const pr = netProjMirrors[i];
+    pr.tx = projs[i][0]; pr.tz = projs[i][1];
+    if (pr.fresh) { pr.mesh.position.set(pr.tx, 1.5, pr.tz); pr.fresh = false; } // snap on first sighting
+  }
+}
+
+// Visual twin of spawnBoss's sprite (spawnBoss itself is host-gated).
+function netBossMirrorBuild(b) {
+  if (typeof scene === 'undefined' || !scene) return;
+  const theme = getTheme(currentFloor);
+  if (!theme.isBoss) return; // we haven't loaded the boss floor yet — next snapshot retries
+  const bh = 2.0 * theme.bossScale;
+  const tex = spriteTextures[theme.bossTex || 'boss_warden'];
+  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, alphaTest: 0.1, depthWrite: false });
+  const mesh = new THREE.Sprite(mat);
+  mesh.scale.set(bh, bh, 1);
+  mesh.position.set(b[3], bh / 2, b[4]);
+  scene.add(mesh);
+  netBossMirror = { mesh, height: bh, hp: b[0], maxHp: b[1], tx: b[3], tz: b[4], flashT: 0, dying: false, deathT: 0 };
+  document.getElementById('bossHpName').textContent = theme.bossName;
+  document.getElementById('bossHpContainer').style.opacity = '1';
+  if (bossLight) bossLight.intensity = 0.6; // persistent slot — same glow as the host sees
+  playBossRoar();
+}
+
+function netProjMirrorAdd() {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.25, 8, 8),
+    new THREE.MeshStandardMaterial({ color: 0xff4400, emissive: 0xff2200, emissiveIntensity: 2.0, roughness: 0.3 })
+  );
+  scene.add(mesh);
+  const light = bossProjLights.find(l => l.intensity === 0) || null; // persistent pool, same as the host
+  if (light) light.intensity = 0.5;
+  netProjMirrors.push({ mesh, light, tx: 0, tz: 0, fresh: true });
+}
+
+function netProjMirrorRemove() {
+  const pr = netProjMirrors.pop();
+  if (!pr) return;
+  pr.mesh.geometry.dispose(); pr.mesh.material.dispose();
+  scene.remove(pr.mesh);
+  if (pr.light) { pr.light.intensity = 0; pr.light.position.set(0, -100, 0); }
+}
+
+/* ── client mirror: per-frame animation (replaces updateEnemies & co.) ── */
+
+function netClientUpdate(dt) {
+  const t = clock.getElapsedTime();
+  // Everyone this client can see, for mob FACING (computed locally per frame —
+  // cheap, and "face whoever is closest" looks right without syncing rotation).
+  const ppl = [{ x: player.pos.x, z: player.pos.z }];
+  for (const av of netAvatars.values()) {
+    if (av.group) ppl.push({ x: av.group.position.x, z: av.group.position.z });
+  }
+
+  for (const m of netMobs.values()) {
+    if (m.dying) {
+      // Same fade/squash the host plays in updateEnemies' death branch.
+      m.deathT += dt;
+      const fade = Math.max(0, 1 - m.deathT * 2.5);
+      const squashY = Math.max(0.01, 1 - m.deathT * 3);
+      if (m.mesh.isGroup) {
+        m.mesh.traverse(o => { if (o.material) { o.material.transparent = true; o.material.opacity = fade; } });
+        m.mesh.scale.y = WIRE_VISUAL_SCALE * squashY;
+        m.mesh.position.y = 0;
+      } else {
+        m.mesh.material.opacity = fade;
+        m.mesh.material.transparent = true;
+        m.mesh.scale.y = squashY;
+        m.mesh.position.y = (m.scale * 2.5) / 2 * squashY;
+      }
+      if (m.deathT > 0.7) { disposeMobVisual(m.mesh); scene.remove(m.mesh); netMobs.delete(m.id); }
+      continue;
+    }
+
+    if (m.flashT > 0) { m.flashT -= dt; if (m.flashT <= 0) setMobFlash(m, false); }
+
+    // Lerp toward the latest snapshot (like player avatars), then re-apply the
+    // exact y/bob/facing presentation rules from updateEnemies.
+    m.mesh.position.x += (m.tx - m.mesh.position.x) * NET_AVATAR_LERP;
+    m.mesh.position.z += (m.tz - m.mesh.position.z) * NET_AVATAR_LERP;
+    if (m.mesh.isGroup) {
+      if (m.mesh.userData.float !== undefined) {
+        m.mesh.position.y = m.mesh.userData.float + Math.sin(t * 2 + m.tx) * 0.18;
+      } else {
+        m.mesh.position.y = 0.05 + Math.sin(t * 14) * 0.05;
+      }
+      if (m.mesh.userData.isModel) {
+        const near = netNearestOf(ppl, m.mesh.position.x, m.mesh.position.z);
+        m.mesh.rotation.y = Math.atan2(near.x - m.mesh.position.x, near.z - m.mesh.position.z) + (m.mesh.userData.faceOffset || 0);
+      }
+    } else {
+      let yPos = (m.scale * 2.5) / 2;
+      if (m.type === 'phantom') yPos += Math.sin(Date.now() * 0.003 + m.mesh.position.x) * 0.4;
+      m.mesh.position.y = yPos;
+    }
+  }
+
+  // Boss mirror
+  if (netBossMirror) {
+    const m = netBossMirror;
+    if (m.dying) {
+      // same collapse as the host's boss deathAnim
+      m.deathT += dt;
+      m.mesh.material.opacity = Math.max(0, 1 - m.deathT * 1.5);
+      m.mesh.material.transparent = true;
+      const squash = Math.max(0.01, 1 - m.deathT * 2);
+      m.mesh.scale.y = m.height * squash;
+      m.mesh.position.y = m.height / 2 * squash;
+      if (bossLight) { bossLight.intensity = 0; bossLight.position.set(0, -100, 0); }
+      if (m.deathT >= 1) { disposeMobVisual(m.mesh); scene.remove(m.mesh); netBossMirror = null; }
+    } else {
+      if (m.flashT > 0) { m.flashT -= dt; if (m.flashT <= 0) m.mesh.material.color.setHex(0xffffff); }
+      m.mesh.position.x += (m.tx - m.mesh.position.x) * NET_AVATAR_LERP;
+      m.mesh.position.z += (m.tz - m.mesh.position.z) * NET_AVATAR_LERP;
+      m.mesh.position.y = m.height / 2;
+      if (bossLight) bossLight.position.set(m.mesh.position.x, m.height / 2, m.mesh.position.z);
+    }
+  }
+
+  // Projectile mirrors (faster lerp — they fly quick)
+  for (const pr of netProjMirrors) {
+    pr.mesh.position.x += (pr.tx - pr.mesh.position.x) * 0.25;
+    pr.mesh.position.z += (pr.tz - pr.mesh.position.z) * 0.25;
+    pr.mesh.position.y = 1.5;
+    pr.mesh.rotation.x += dt * 8;
+    pr.mesh.rotation.z += dt * 6;
+    if (pr.light) pr.light.position.copy(pr.mesh.position);
+  }
+}
+
+/* ── mirror cleanup ── */
+
+// Dispose every client-side mirror PROPERLY (disposeMobVisual guards shared GLB
+// geometry). Called from buildMazeScene's teardown BEFORE its scene.traverse —
+// if the traverse got to a model mirror first it would dispose the SHARED model
+// geometry and break every future spawn of that mob type.
+function netOnSceneTeardown() {
+  if (typeof scene === 'undefined' || !scene) return;
+  for (const m of netMobs.values()) { disposeMobVisual(m.mesh); scene.remove(m.mesh); }
+  netMobs.clear();
+  if (netBossMirror) { disposeMobVisual(netBossMirror.mesh); scene.remove(netBossMirror.mesh); netBossMirror = null; }
+  while (netProjMirrors.length > 0) netProjMirrorRemove();
+}
+
+// Host advanced floors mid-run → rebuild this client on the same floor, with
+// the same between-floor bonuses advanceFloor grants the host. Interim Phase-3
+// behavior: floor advance is host-triggered only.
+function netClientLoadFloor(floor, seed) {
+  console.log(`[net] host advanced to floor ${floor} — rebuilding`);
+  currentFloor = floor;
+  currentWave = 1;
+  player.floorReached = currentFloor;
+  player.health = Math.min(shopStats.maxHealth, player.health + 35);
+  player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize * 3);
+  generateCurrentFloor();
+  buildMazeScene(); // its teardown clears all mirrors via netOnSceneTeardown
+  updateHUD();
+  showFloorAnnounce();
+  if (typeof floorSeed !== 'undefined' && floorSeed !== seed) {
+    console.warn(`[net] SEED MISMATCH on floor ${floor}: host ${seed} vs local ${floorSeed}`);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PHASE 4 — SHARED PROGRESSION + DOWN/REVIVE
+   Adds to the protocol:
+     host   --reward {money,kills}---> one/all   kill credit to the killer;
+                                                 floor-clear/boss pay to all
+     any    --pickup_taken {id}-----> relayed    grabbed ammo vanishes everywhere
+     host   --pickup_spawn {id,x,z}-> clients    authoritative kill-drops
+     client --exit_reached----------> host       kill-gated advance, any player
+     client --down / revived--------> host       down-state bookkeeping
+     host   --down_state {id,down}--> clients    avatar tint + revive eligibility
+     host   --party_over------------> clients    everyone down → wipe
+   The 'enemies' snapshot gains `k` = party kills this floor (kill-gate HUD).
+   ═══════════════════════════════════════════════════════════════ */
+
+const NET_REVIVE_RANGE = 2.5; // m — teammate must stand this close to revive
+const NET_REVIVE_TIME = 3.0;  // s of continuous proximity
+const netDownPeers = new Set(); // host: peer ids currently down (host's own state = player.isDown)
+
+/* ── rewards (money/kills are PER PLAYER; the fight is shared) ── */
+
+// Host: pay every connected client (host pays itself at the call site).
+function netRewardAll(money, kills) {
+  if (netState.role === 'host') sendToAll('reward', { money, kills });
+}
+
+onMessage('reward', (d) => {
+  if (!netIsClient() || !d) return;
+  playerMoney += d.money || 0;
+  player.kills += d.kills || 0;
+  updateHUD();
+});
+
+/* ── kill-gated exit ── */
+
+// Solo: always open (unchanged solo behavior). Boss floors: the boss IS the
+// gate (the exit only exists after it dies). Co-op normal floors: the party's
+// combined kills must reach killTarget (host counts; clients mirror via snap.k).
+function netExitGateOpen() {
+  if (netState.role === 'solo') return true;
+  if (getTheme(currentFloor).isBoss) return true;
+  return floorKills >= killTarget;
+}
+
+// Post-boss exit (the one createBossExit spawns on the host when its boss
+// dies). Clients rebuild it locally from the same grid-deterministic function;
+// the broadcast x/z only sanity-checks that both machines agree on the spot.
+function netBroadcastBossExit(x, z) {
+  if (netState.role === 'host') sendToAll('boss_exit', { x: netR2(x), z: netR2(z) });
+}
+
+onMessage('boss_exit', (d) => {
+  if (!netIsClient() || !d || gameState !== 'playing' || exitZone) return;
+  createBossExit(); // enemies.js — same deterministic zone + visuals as the host
+  if (exitZone && (Math.abs(exitZone.x - d.x) > 1 || Math.abs(exitZone.z - d.z) > 1)) {
+    console.warn(`[net] boss exit mismatch: host (${d.x},${d.z}) vs local (${exitZone.x},${exitZone.z}) — grids differ?`);
+  }
+  console.log('[net] boss down — exit is open');
+});
+
+let netExitReqT = -10;
+function netRequestAdvance() {
+  const now = clock.getElapsedTime();
+  if (now - netExitReqT < 1) return; // standing in the exit → don't spam
+  netExitReqT = now;
+  sendToHost('exit_reached', {});
+}
+
+onMessage('exit_reached', () => {
+  if (netState.role !== 'host' || gameState !== 'playing') return;
+  if (!exitZone || !netExitGateOpen()) return; // host re-validates the gate
+  console.log('[net] a client reached the exit — advancing the party');
+  advanceFloor();
+});
+
+/* ── ammo pickup sync ── */
+
+function netAnnouncePickupTaken(id) {
+  if (netState.role === 'solo' || id === undefined) return;
+  if (netState.role === 'host') sendToAll('pickup_taken', { id });
+  else sendToHost('pickup_taken', { id });
+}
+
+onMessage('pickup_taken', (d, fromConn) => {
+  if (netState.role === 'solo' || !d) return;
+  removeAmmoPickupById(d.id); // main.js — removes mesh + entry, grants nothing
+  if (netState.role === 'host') {
+    // relay so the OTHER clients lose it too
+    for (const conn of netState.peers) {
+      if (conn !== fromConn && conn.open) conn.send({ t: 'pickup_taken', d: { id: d.id } });
+    }
+  }
+});
+
+// Kill-drop pickups are host-authoritative (applyEnemyHit rolls the dice).
+function netBroadcastPickupSpawn(id, x, z) {
+  if (netState.role === 'host') sendToAll('pickup_spawn', { id, x: netR2(x), z: netR2(z) });
+}
+
+onMessage('pickup_spawn', (d) => {
+  if (netIsClient() && d && gameState === 'playing') createAmmoPickup(d.x, d.z, d.id);
+});
+
+/* ── minimap blip sources (host/solo: real lists; client: mirrors) ── */
+
+function netMinimapBlips() {
+  const out = [];
+  if (netIsClient()) {
+    for (const m of netMobs.values()) if (!m.dying) out.push(m.mesh.position);
+  } else {
+    for (const e of enemies) if (e.alive) out.push(e.pos);
+  }
+  return out;
+}
+
+function netMinimapBoss() {
+  if (netIsClient()) return (netBossMirror && !netBossMirror.dying) ? netBossMirror.mesh.position : null;
+  return (bossEntity && bossEntity.alive) ? bossEntity.pos : null;
+}
+
+/* ── down / revive / party wipe (co-op only — damagePlayer routes here) ── */
+
+function netGoDown() {
+  if (player.isDown) return;
+  player.isDown = true;
+  player.reviveProgress = 0;
+  player.isADS = false;
+  console.log('[net] you are DOWN — a teammate can revive you');
+  netShowDownedMsg(true, 0);
+  if (netState.role === 'host') {
+    sendToAll('down_state', { id: netState.myId, down: true });
+    netCheckPartyOver();
+  } else {
+    sendToHost('down', {});
+  }
+}
+
+function netRevive() {
+  player.isDown = false;
+  player.reviveProgress = 0;
+  player.health = Math.ceil(shopStats.maxHealth * 0.5); // back up at half HP
+  netShowDownedMsg(false);
+  updateHUD();
+  console.log('[net] revived!');
+  if (netState.role === 'host') sendToAll('down_state', { id: netState.myId, down: false });
+  else sendToHost('revived', {});
+}
+
+onMessage('down', (d, fromConn) => {
+  if (netState.role !== 'host') return;
+  console.log(`[net] ${fromConn.peer} is down`);
+  netDownPeers.add(fromConn.peer);
+  netSetAvatarDown(fromConn.peer, true);
+  sendToAll('down_state', { id: fromConn.peer, down: true });
+  netCheckPartyOver();
+});
+
+onMessage('revived', (d, fromConn) => {
+  if (netState.role !== 'host') return;
+  console.log(`[net] ${fromConn.peer} was revived`);
+  netDownPeers.delete(fromConn.peer);
+  netSetAvatarDown(fromConn.peer, false);
+  sendToAll('down_state', { id: fromConn.peer, down: false });
+});
+
+// Clients learn everyone's down state for avatar tint + "can they revive me".
+onMessage('down_state', (d) => {
+  if (!netIsClient() || !d) return;
+  netSetAvatarDown(d.id, d.down);
+});
+
+function netSetAvatarDown(id, down) {
+  const av = netAvatars.get(id);
+  if (!av) return;
+  av.down = !!down;
+  if (av.bodyMat) { // dark-red tint while down
+    av.bodyMat.color.setHex(down ? 0x551515 : av.baseColor);
+    av.bodyMat.emissive.setHex(down ? 0x551515 : av.baseColor);
+  }
+}
+
+// Host: every player down at once = party wipe. Host machine keeps simulating
+// while ITS player is down (gameState stays 'playing'), so this is the only
+// co-op end state.
+function netCheckPartyOver() {
+  if (netState.role !== 'host' || gameState !== 'playing') return;
+  if (!player.isDown) return;
+  for (const conn of netState.peers) {
+    if (conn.open && !netDownPeers.has(conn.peer)) return; // someone's still up
+  }
+  console.log('[net] party wiped — game over for everyone');
+  sendToAll('party_over', {});
+  netShowDownedMsg(false);
+  gameOver();
+}
+
+onMessage('party_over', () => {
+  if (!netIsClient()) return;
+  console.log('[net] party wiped');
+  netShowDownedMsg(false);
+  player.isDown = false;
+  gameOver();
+});
+
+function netShowDownedMsg(on, prog) {
+  const el = document.getElementById('downedMsg');
+  if (!el) return;
+  if (!on) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.textContent = (prog > 0)
+    ? `REVIVING… ${Math.floor(prog * 100)}%`
+    : 'YOU ARE DOWN — a teammate can revive you';
+}
+
+// While down, any teammate who is NOT down standing within range fills the
+// revive bar; it drains (half speed) when they step away. Runs on the DOWNED
+// player's machine — it has everyone's positions via the avatars.
+function netUpdateDownState(dt) {
+  if (!player.isDown || gameState !== 'playing') return;
+  let nearHelper = false;
+  for (const av of netAvatars.values()) {
+    if (av.down) continue;
+    const dx = av.target.x - player.pos.x, dz = av.target.z - player.pos.z;
+    if (dx * dx + dz * dz < NET_REVIVE_RANGE * NET_REVIVE_RANGE) { nearHelper = true; break; }
+  }
+  if (nearHelper) {
+    player.reviveProgress += dt;
+    if (player.reviveProgress >= NET_REVIVE_TIME) netRevive();
+    else netShowDownedMsg(true, player.reviveProgress / NET_REVIVE_TIME);
+  } else if (player.reviveProgress > 0) {
+    player.reviveProgress = Math.max(0, player.reviveProgress - dt * 0.5);
+    netShowDownedMsg(true, player.reviveProgress / NET_REVIVE_TIME);
+  }
 }
 
 /* ── CO-OP (BETA) menu panel ──

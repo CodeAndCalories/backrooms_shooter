@@ -378,12 +378,20 @@ let player = {
   onGround: true,
   health: MAX_HEALTH, stamina: MAX_STAMINA,
   isSprinting: false,
+  // MP down/revive (Phase 4, co-op only): at 0 HP a co-op player goes DOWN
+  // (no move/shoot) instead of game over; a teammate nearby for ~3s revives.
+  isDown: false, reviveProgress: 0,
   clipAmmo: CLIP_SIZE, reserveAmmo: RESERVE_MAX,
   isReloading: false, reloadTimer: 0, fireTimer: 0,
   kills: 0, floorReached: 0,
   isADS: false, currentFOV: DEFAULT_FOV
 };
 let currentFloor = 0, currentWave = 1, waveMobsLeft = 0;
+// MP kill-gate (Phase 4): the party's COMBINED kills this floor vs the target
+// that unlocks the exit. Reset per floor in buildMazeScene. Authoritative on
+// the host; mirrored to clients via the enemy snapshot's `k` field. Solo play
+// ignores the gate entirely (netExitGateOpen → true).
+let floorKills = 0, killTarget = 0;
 // The floor startGame() begins on. Written by EITHER the dev level-select (PART 1,
 // unrestricted, ?dev=1 only) or the player level-select (PART 2, unlock-gated). 0 = Level 1.
 let selectedStartFloor = 0;
@@ -1309,9 +1317,13 @@ function updateFlashlightHUD() {
    (multiplayer-ready); enemy death drops use Math.random (combat isn't
    deterministic anyway).
    ═══════════════════════════════════════════ */
-let ammoPickups = []; // { mesh, x, z, baseY, phase }
+let ammoPickups = []; // { id, mesh, x, z, baseY, phase }
 const AMMO_PICKUP_RADIUS = 1.1;      // world units — walk-over distance
 const AMMO_DROP_CHANCE = 0.2;        // chance a killed enemy drops one
+// MP: stable per-floor pickup ids. Seeded floor spawns consume the counter in
+// the same order on every machine (same seed → same ids); host-authoritative
+// kill-drops continue the sequence and ship their id in 'pickup_spawn'.
+let ammoPickupNextId = 0;            // reset per floor in buildMazeScene
 
 const ammoPickupGeo = new THREE.BoxGeometry(0.32, 0.22, 0.2);
 const ammoPickupMat = new THREE.MeshStandardMaterial({
@@ -1319,12 +1331,21 @@ const ammoPickupMat = new THREE.MeshStandardMaterial({
   roughness: 0.4, metalness: 0.3
 });
 
-function createAmmoPickup(wx, wz) {
+function createAmmoPickup(wx, wz, id) {
   const mesh = new THREE.Mesh(ammoPickupGeo, ammoPickupMat);
   const baseY = 0.18;
   mesh.position.set(wx, baseY, wz);
   scene.add(mesh);
-  ammoPickups.push({ mesh, x: wx, z: wz, baseY, phase: ammoPickups.length * 1.7 });
+  ammoPickups.push({ id, mesh, x: wx, z: wz, baseY, phase: ammoPickups.length * 1.7 });
+}
+
+// MP: a pickup consumed elsewhere (another player walked over it) vanishes
+// here too — no ammo granted, it just disappears.
+function removeAmmoPickupById(id) {
+  const i = ammoPickups.findIndex(p => p.id === id);
+  if (i === -1) return;
+  scene.remove(ammoPickups[i].mesh);
+  ammoPickups.splice(i, 1);
 }
 
 // 2-4 per floor at random OPEN cells, away from the player spawn. Called from
@@ -1343,7 +1364,8 @@ function spawnAmmoPickups() {
       if (mazeGrid[ry][rx] !== 1 || used.has(key)) continue;
       if (Math.abs(rx - 1) + Math.abs(ry - 1) < 3) continue;
       used.add(key);
-      createAmmoPickup(rx * CELL + CELL / 2, ry * CELL + CELL / 2);
+      // Seeded order → every machine assigns the SAME id to the same pickup.
+      createAmmoPickup(rx * CELL + CELL / 2, ry * CELL + CELL / 2, ++ammoPickupNextId);
       break;
     }
   }
@@ -1367,6 +1389,7 @@ function updateAmmoPickups(dt) {
       playPickup();
       scene.remove(p.mesh);
       ammoPickups.splice(i, 1);
+      netAnnouncePickupTaken(p.id); // MP: remove it on every other machine too
       updateHUD();
     }
   }
@@ -1409,6 +1432,9 @@ function buildMazeScene() {
   for (const e of enemies) { removeDebugLabel(e); disposeMobVisual(e.mesh); scene.remove(e.mesh); }
   if (bossEntity && bossEntity.mesh) { removeDebugLabel(bossEntity); disposeMobVisual(bossEntity.mesh); scene.remove(bossEntity.mesh); }
   for (const p of bossProjectiles) { p.mesh.geometry.dispose(); p.mesh.material.dispose(); scene.remove(p.mesh); }
+  // MP CLIENT: mirror mobs/boss/projectiles are mixed-ownership too (shared GLB
+  // geometry!) — they must go through disposeMobVisual BEFORE the traverse below.
+  netOnSceneTeardown();
   for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
   bulletTrails = [];
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
@@ -1674,7 +1700,14 @@ function buildMazeScene() {
 
   // Ammo pickups — seeded rng(), so keep this call AFTER generation and at a
   // fixed point in the build order (determinism per floor seed).
+  ammoPickupNextId = 0; // ids restart per floor, identically on every machine
   spawnAmmoPickups();
+
+  // MP kill-gate: party kills needed to open the exit ≈ the mobs of the first
+  // two waves at this floor (wave size = min(3 + floor + wave, 15)). Computed
+  // on every machine (same floor → same target); only enforced in co-op.
+  floorKills = 0;
+  killTarget = Math.min(3 + currentFloor + 1, 15) + Math.min(3 + currentFloor + 2, 15);
 
   // Place player
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
@@ -1825,6 +1858,7 @@ function isOpenArea(x, y, gw, gh) {
    PLAYER
    ═══════════════════════════════════════════ */
 function damagePlayer(amount, fromPos) {
+  if (player.isDown) return; // MP: a downed player can't be damaged further
   player.health -= amount;
   playDamage();
   damageVigTimer = 0.5;
@@ -1839,7 +1873,14 @@ function damagePlayer(amount, fromPos) {
     else dmgInd.left = 0.6;
   }
 
-  if (player.health <= 0) { player.health = 0; gameOver(); }
+  if (player.health <= 0) {
+    player.health = 0;
+    // MP (co-op): go DOWN instead of dying — a teammate can revive you, and
+    // only an all-players-down wipe ends the game (host broadcasts it).
+    // Solo: unchanged instant game over.
+    if (netState.role !== 'solo') netGoDown();
+    else gameOver();
+  }
 }
 
 function spawnBulletTrail(startPos, endPos) {
@@ -1871,6 +1912,7 @@ function updateBulletTrails(dt) {
 }
 
 function playerShoot() {
+  if (player.isDown) return; // MP: downed players can't shoot
   if (player.isReloading || player.fireTimer > 0 || player.clipAmmo <= 0) return;
   player.clipAmmo--;
   player.fireTimer = FIRE_RATE * shopStats.fireRateMult;
@@ -1896,10 +1938,23 @@ function playerShoot() {
   let trailEnd = camera.position.clone().add(dir.clone().multiplyScalar(GUN_RANGE));
   const effectiveDamage = GUN_DAMAGE * shopStats.damageMult;
 
+  // MP CLIENT: this machine has no authoritative enemies — everything above
+  // (ammo, recoil, flash, sound) already played for zero-latency feel; send the
+  // ray to the host, which resolves the hit. The outcome comes back via the
+  // next enemy snapshot (hp drop / death).
+  if (netIsClient()) {
+    netSendShoot(camera.position, dir);
+    spawnBulletTrail(gunTip, trailEnd);
+    if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
+      hudSetStyle('ammoWarning', 'opacity', '1');
+    }
+    updateHUD();
+    return;
+  }
+
   // Check boss hit
   if (bossEntity && bossEntity.alive) {
-    const bSphere = new THREE.Sphere(bossEntity.pos.clone().setY(bossEntity.height * 0.4), 0.8 * bossEntity.scale);
-    const bHit = ray.ray.intersectSphere(bSphere, new THREE.Vector3());
+    const bHit = raycastBoss(ray);
     if (bHit) {
       const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
       damageBoss(dmg);
@@ -1917,7 +1972,40 @@ function playerShoot() {
     }
   }
 
-  let hitEnemy = null, hitDist = Infinity;
+  const res = raycastEnemies(ray, camera.position);
+  if (res) {
+    trailEnd = res.point.clone();
+    const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
+    const killed = applyEnemyHit(res.enemy, dmg);
+    playHit();
+    hitmarkerTimer = 0.18;
+    hitmarkerKill = killed;
+    if (killed) player.kills++;
+  }
+
+  // Spawn bullet trail
+  spawnBulletTrail(gunTip, trailEnd);
+
+  if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
+    hudSetStyle('ammoWarning', 'opacity', '1');
+  }
+  updateHUD();
+}
+
+/* ── shared hitscan + hit application ──
+   Used by BOTH the local shot path (playerShoot) and remote client shots
+   (netResolveRemoteShot), so a client's bullet obeys the exact same hitboxes
+   and side effects as the host's. */
+
+// Boss hit test: same sphere playerShoot always used.
+function raycastBoss(ray) {
+  const bSphere = new THREE.Sphere(bossEntity.pos.clone().setY(bossEntity.height * 0.4), 0.8 * bossEntity.scale);
+  return ray.ray.intersectSphere(bSphere, new THREE.Vector3());
+}
+
+// Nearest living enemy whose hitbox the ray crosses → { enemy, point } or null.
+function raycastEnemies(ray, origin) {
+  let hitEnemy = null, hitDist = Infinity, hitPoint = null;
   for (const e of enemies) {
     if (!e.alive) continue;
     let boxSize, boxCenter;
@@ -1937,56 +2025,73 @@ function playerShoot() {
     const box = new THREE.Box3().setFromCenterAndSize(boxCenter, boxSize);
     const hit = ray.ray.intersectBox(box, new THREE.Vector3());
     if (hit) {
-      const d = camera.position.distanceTo(hit);
-      if (d < hitDist) { hitDist = d; hitEnemy = e; trailEnd = hit.clone(); }
+      const d = origin.distanceTo(hit);
+      if (d < hitDist) { hitDist = d; hitEnemy = e; hitPoint = hit.clone(); }
     }
   }
+  return hitEnemy ? { enemy: hitEnemy, point: hitPoint } : null;
+}
 
-  if (hitEnemy) {
-    const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
-    hitEnemy.hp -= dmg;
-    hitEnemy.stunTimer = 0.12;
-    playHit();
-    hitmarkerTimer = 0.18;
-    hitmarkerKill = false;
+// Apply damage + ALL its side effects (stun, flash, death, wave/economy).
+// Personal cosmetics (hitmarker, kill counter for LOCAL shots) stay with each
+// shooter. shooterConn identifies a remote shooter (null/undefined = the local
+// player) so the kill reward is credited to whoever actually got the kill.
+// Returns true if this hit killed the enemy.
+function applyEnemyHit(e, dmg, shooterConn) {
+  e.hp -= dmg;
+  e.stunTimer = 0.12;
+  e.hitFlashTimer = 0.15;
+  setMobFlash(e, true); // HIT FLASH: briefly flash enemy red
 
-    // HIT FLASH: briefly flash enemy red
-    hitEnemy.hitFlashTimer = 0.15;
-    setMobFlash(hitEnemy, true);
+  if (e.hp > 0) return false;
 
-    if (hitEnemy.hp <= 0) {
-      hitEnemy.alive = false;
-      hitEnemy.deathTimer = 0;
-      hitmarkerKill = true;
-      player.kills++;
-      waveMobsLeft--;
-      playerMoney += KILL_REWARD;
-      playEnemyDeath();
+  e.alive = false;
+  e.deathTimer = 0;
+  waveMobsLeft--;
+  floorKills++; // MP kill-gate: PARTY total, regardless of who got the kill
+  // Kill reward goes to the KILLER: remote shooter → 'reward' message (their
+  // machine adds money + kill count); local shooter → directly.
+  if (shooterConn) sendTo(shooterConn, 'reward', { money: KILL_REWARD, kills: 1 });
+  else playerMoney += KILL_REWARD;
+  playEnemyDeath();
 
-      // ~20% ammo drop where the enemy died (Math.random, not the seeded rng —
-      // combat outcomes aren't deterministic, so drops don't need to be either)
-      if (Math.random() < AMMO_DROP_CHANCE) {
-        createAmmoPickup(hitEnemy.pos.x, hitEnemy.pos.z);
-      }
-
-      if (waveMobsLeft <= 0 && !isBossFloor(currentFloor)) {
-        currentWave++;
-        updateHUD();
-        setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2500);
-      }
-    }
+  // ~20% ammo drop where the enemy died (Math.random, not the seeded rng —
+  // combat outcomes aren't deterministic, so drops don't need to be either).
+  // MP: drops are HOST-authoritative — broadcast so clients spawn the same one.
+  if (Math.random() < AMMO_DROP_CHANCE) {
+    const id = ++ammoPickupNextId;
+    createAmmoPickup(e.pos.x, e.pos.z, id);
+    netBroadcastPickupSpawn(id, e.pos.x, e.pos.z);
   }
 
-  // Spawn bullet trail
-  spawnBulletTrail(gunTip, trailEnd);
-
-  if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-    hudSetStyle('ammoWarning', 'opacity', '1');
+  if (waveMobsLeft <= 0 && !isBossFloor(currentFloor)) {
+    currentWave++;
+    updateHUD();
+    setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2500);
   }
-  updateHUD();
+  return true;
+}
+
+// MP HOST: authoritatively resolve a client's 'shoot' ray against THIS
+// machine's enemies — same hitboxes, same hit logic. The client's shop damage
+// multiplier rides along in d.m (client-trusted: fine for friend co-op, must
+// move host-side if this ever goes public).
+function netResolveRemoteShot(d, fromConn) {
+  const origin = new THREE.Vector3(d.ox, d.oy, d.oz);
+  const dir = new THREE.Vector3(d.dx, d.dy, d.dz).normalize();
+  const ray = new THREE.Raycaster(origin, dir, 0.1, GUN_RANGE);
+  const dmg = GUN_DAMAGE * (d.m || 1) * (0.9 + Math.random() * 0.3);
+
+  if (bossEntity && bossEntity.alive && raycastBoss(ray)) {
+    damageBoss(dmg);
+    return;
+  }
+  const res = raycastEnemies(ray, origin);
+  if (res) applyEnemyHit(res.enemy, dmg, fromConn);
 }
 
 function playerReload() {
+  if (player.isDown) return; // MP: downed players can't reload
   if (player.isReloading || player.clipAmmo === shopStats.clipSize || player.reserveAmmo <= 0) return;
   player.isReloading = true;
   player.reloadTimer = RELOAD_TIME;
@@ -2010,6 +2115,7 @@ function updatePlayer(dt) {
   if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
   if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(right);
   if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(right);
+  if (player.isDown) moveDir.set(0, 0, 0); // MP: downed = rooted (look only)
 
   const isMoving = moveDir.length() > 0.01;
   if (isMoving) moveDir.normalize();
@@ -2031,7 +2137,7 @@ function updatePlayer(dt) {
   if (canX) player.pos.x = newX;
   if (canZ) player.pos.z = newZ;
 
-  if (keys['Space'] && player.onGround) { player.vel.y = JUMP_V; player.onGround = false; }
+  if (keys['Space'] && player.onGround && !player.isDown) { player.vel.y = JUMP_V; player.onGround = false; }
   player.vel.y -= GRAVITY * dt;
   player.pos.y += player.vel.y * dt;
   if (player.pos.y <= 1.6) { player.pos.y = 1.6; player.vel.y = 0; player.onGround = true; }
@@ -2066,27 +2172,26 @@ function updatePlayer(dt) {
 
   updateGun(dt, isMoving, player.isSprinting);
 
-  // Exit zone check
+  // Exit zone check — MP: gated on the party's combined kills (netExitGateOpen;
+  // always open solo). ANY player can trigger the advance: a client asks the
+  // host ('exit_reached'), the host executes + rebroadcasts game_start.
   if (exitZone) {
     const edx = player.pos.x - exitZone.x, edz = player.pos.z - exitZone.z;
-    if (Math.sqrt(edx * edx + edz * edz) < exitZone.radius) advanceFloor();
+    if (Math.sqrt(edx * edx + edz * edz) < exitZone.radius && netExitGateOpen()) {
+      if (netIsClient()) netRequestAdvance();
+      else advanceFloor();
+    }
   }
 }
 
 /* ═══════════════════════════════════════════
    FLOOR PROGRESSION
    ═══════════════════════════════════════════ */
-function advanceFloor() {
-  markFloorBeaten(currentFloor); // PART 2: reaching the exit = this floor cleared → unlocks the next
-  playerMoney += FLOOR_CLEAR_REWARD;
-  currentFloor++;
-  currentWave = 1;
-  player.floorReached = currentFloor;
-  player.health = Math.min(shopStats.maxHealth, player.health + 35);
-  player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize * 3);
-
+// One shared path for "produce currentFloor's level data": theme + seed + maze.
+// Used by startGame, advanceFloor AND the MP client's host-driven floor load
+// (net.js), so all three are guaranteed to generate the identical level.
+function generateCurrentFloor() {
   const theme = getTheme(currentFloor);
-
   seedFloor(currentFloor);
   if (theme.isBoss) {
     generateBossArena(theme.mazeSize);
@@ -2094,6 +2199,26 @@ function advanceFloor() {
     const size = theme.mazeSize + Math.floor(currentFloor / LEVEL_THEMES.length);
     generateLevel(theme, Math.min(size, 20), Math.min(size, 20));
   }
+  return theme;
+}
+
+function advanceFloor() {
+  // MP: floor advance is HOST-authoritative. A client touching the exit does
+  // nothing — when the HOST advances, the game_start broadcast below rebuilds
+  // every client on the new floor (Phase-3 interim behavior).
+  if (netIsClient()) return;
+
+  markFloorBeaten(currentFloor); // PART 2: reaching the exit = this floor cleared → unlocks the next
+  playerMoney += FLOOR_CLEAR_REWARD;
+  netRewardAll(FLOOR_CLEAR_REWARD, 0); // MP: floor-clear pay goes to the WHOLE party
+  currentFloor++;
+  currentWave = 1;
+  player.floorReached = currentFloor;
+  player.health = Math.min(shopStats.maxHealth, player.health + 35);
+  player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize * 3);
+
+  const theme = generateCurrentFloor();
+  netOnHostStart(currentFloor, floorSeed); // MP: rebuild all clients on this floor
 
   buildMazeScene();
 
@@ -2215,12 +2340,16 @@ function updateMinimap(dt) {
   // so sub-visible jitter doesn't count as a change. Only VISIBLE blips are
   // included: in fog mode an enemy roaming unseen cells can't dirty the map,
   // and the exit joins the signature the moment it's discovered.
+  // MP: blip sources route through net helpers — host/solo read the real
+  // enemies/boss, clients read their mirrored lists. Same fog rules either way.
+  const blips = netMinimapBlips();
+  const bossBlip = netMinimapBoss();
   let sig = minimapMode + '|' + player.pos.x.toFixed(1) + ',' + player.pos.z.toFixed(1) + ',' + player.yaw.toFixed(2);
-  for (const e of enemies) {
-    if (e.alive && isCellSeen(e.pos.x, e.pos.z)) sig += '|' + e.pos.x.toFixed(1) + ',' + e.pos.z.toFixed(1);
+  for (const b of blips) {
+    if (isCellSeen(b.x, b.z)) sig += '|' + b.x.toFixed(1) + ',' + b.z.toFixed(1);
   }
-  if (bossEntity && bossEntity.alive && isCellSeen(bossEntity.pos.x, bossEntity.pos.z)) {
-    sig += '|B' + bossEntity.pos.x.toFixed(1) + ',' + bossEntity.pos.z.toFixed(1);
+  if (bossBlip && isCellSeen(bossBlip.x, bossBlip.z)) {
+    sig += '|B' + bossBlip.x.toFixed(1) + ',' + bossBlip.z.toFixed(1);
   }
   if (exitZone && isCellSeen(exitZone.x, exitZone.z)) sig += '|E' + exitZone.x + ',' + exitZone.z;
   if (sig === minimapSig) return;
@@ -2279,11 +2408,12 @@ function updateMinimap(dt) {
     ctx.stroke();
   }
 
-  // Enemy blips — only inside revealed cells
-  for (const e of enemies) {
-    if (!e.alive || !isCellSeen(e.pos.x, e.pos.z)) continue;
-    const ex = e.pos.x / CELL * cellW;
-    const ez = e.pos.z / CELL * cellH;
+  // Enemy blips — only inside revealed cells (real enemies on host/solo,
+  // mirrored enemies on MP clients — `blips` from the sig pass above)
+  for (const b of blips) {
+    if (!isCellSeen(b.x, b.z)) continue;
+    const ex = b.x / CELL * cellW;
+    const ez = b.z / CELL * cellH;
     ctx.beginPath();
     ctx.arc(ex, ez, 2, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255,50,30,0.75)';
@@ -2291,9 +2421,9 @@ function updateMinimap(dt) {
   }
 
   // Boss blip — only once its cell has been revealed
-  if (bossEntity && bossEntity.alive && isCellSeen(bossEntity.pos.x, bossEntity.pos.z)) {
-    const bx = bossEntity.pos.x / CELL * cellW;
-    const bz = bossEntity.pos.z / CELL * cellH;
+  if (bossBlip && isCellSeen(bossBlip.x, bossBlip.z)) {
+    const bx = bossBlip.x / CELL * cellW;
+    const bz = bossBlip.z / CELL * cellH;
     ctx.beginPath();
     ctx.arc(bx, bz, 5, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255,0,0,0.9)';
@@ -2361,7 +2491,13 @@ function updateHUD() {
   hudSetText('ammoReserve', '/ ' + player.reserveAmmo);
   hudSetText('hudFloor', 'Level ' + currentFloor);
   hudSetText('hudLevelName', theme.name);
-  hudSetText('hudWave', theme.isBoss ? 'BOSS' : 'Wave ' + currentWave);
+  // MP: append the party's kill-gate progress in co-op (host counts kills
+  // authoritatively; clients mirror via the snapshot's `k`).
+  let waveTxt = theme.isBoss ? 'BOSS' : 'Wave ' + currentWave;
+  if (netState.role !== 'solo' && !theme.isBoss) {
+    waveTxt += floorKills >= killTarget ? ' · EXIT OPEN' : ` · Kills ${floorKills}/${killTarget}`;
+  }
+  hudSetText('hudWave', waveTxt);
   hudSetText('hudKills', 'Kills: ' + player.kills);
   hudSetText('hudMoney', '$' + playerMoney);
 
@@ -2482,17 +2618,10 @@ function startGame() {
   };
   for (const k in shopUpgrades) shopUpgrades[k].bought = false;
 
-  const theme = getTheme(currentFloor);
-  seedFloor(currentFloor);
+  const theme = generateCurrentFloor();
   // MP: the HOST announces the run (floor + seed) so connected clients start
   // the identical level via this same deterministic path. No-op solo/client.
   netOnHostStart(currentFloor, floorSeed);
-  if (theme.isBoss) {
-    generateBossArena(theme.mazeSize);
-  } else {
-    const size = theme.mazeSize + Math.floor(currentFloor / LEVEL_THEMES.length);
-    generateLevel(theme, Math.min(size, 20), Math.min(size, 20));
-  }
   buildMazeScene();
 
   document.getElementById('startMenu').style.display = 'none';
@@ -2952,10 +3081,18 @@ function animate() {
 
   if (gameState === 'playing') {
     updatePlayer(dt);
-    updateEnemies(dt);
-    updateBoss(dt);
-    updateBossProjectiles(dt);
-    updateAntiLinger(dt);
+    if (netIsClient()) {
+      // MP CLIENT: the host owns ALL enemy/boss simulation. We only animate
+      // the mirrored visuals built from its snapshots — no AI, no spawning,
+      // no anti-linger here.
+      netClientUpdate(dt);
+    } else {
+      // host AND solo: the existing simulation, unchanged
+      updateEnemies(dt);
+      updateBoss(dt);
+      updateBossProjectiles(dt);
+      updateAntiLinger(dt);
+    }
     updateMinimap(dt);
     updateLights(dt);
     updateHUDTimers(dt);

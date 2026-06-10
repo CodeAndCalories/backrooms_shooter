@@ -476,6 +476,7 @@ function setMobFlash(enemy, on) {
    SPAWN ENEMY
    ═══════════════════════════════════════════ */
 function spawnEnemy(type, forcePos) {
+  if (netIsClient()) return; // MP: enemies exist ONLY on the host; clients render mirrors
   const mt = MOB_TYPES[type];
   if (!mt) return;
   const gh = mazeGrid.length, gw = mazeGrid[0].length;
@@ -488,12 +489,15 @@ function spawnEnemy(type, forcePos) {
     bestZ = forcePos.z;
     bestDist = 10;
   } else {
+    // Keep spawns clear of EVERY player (solo: 1-entry list, identical to before).
+    const players = netAllPlayers();
     for (let attempts = 0; attempts < 60; attempts++) {
       const ry = 1 + Math.floor(Math.random() * (gh - 2));
       const rx = 1 + Math.floor(Math.random() * (gw - 2));
       if (mazeGrid[ry][rx] === 1) {
         const wx = rx * CELL + CELL / 2, wz = ry * CELL + CELL / 2;
-        const d = Math.sqrt((wx - player.pos.x) ** 2 + (wz - player.pos.z) ** 2);
+        let d = Infinity;
+        for (const pl of players) d = Math.min(d, Math.sqrt((wx - pl.x) ** 2 + (wz - pl.z) ** 2));
         if (d > CELL * 4 && d > bestDist) { bestDist = d; bestX = wx; bestZ = wz; }
       }
     }
@@ -510,6 +514,7 @@ function spawnEnemy(type, forcePos) {
 
   const scaleMult = 1 + (currentFloor % LEVEL_THEMES.length) * 0.05;
   const enemy = {
+    id: ++netEnemyIdCounter, // MP: stable id, keys the client-side mirrors
     type, mesh,
     height: mt.height,
     scale: mt.scale,
@@ -536,6 +541,7 @@ function spawnEnemy(type, forcePos) {
    BOSS SYSTEM
    ═══════════════════════════════════════════ */
 function spawnBoss() {
+  if (netIsClient()) return; // MP: the boss is simulated on the host; clients mirror it
   const theme = getTheme(currentFloor);
   if (!theme.isBoss) return;
 
@@ -622,8 +628,10 @@ function updateBoss(dt) {
     }
   }
 
-  const dx = player.pos.x - b.pos.x;
-  const dz = player.pos.z - b.pos.z;
+  // MP: chase/attack the NEAREST player (solo: 1-entry list → the local player).
+  const tgt = netNearestOf(netAllPlayers(), b.pos.x, b.pos.z);
+  const dx = tgt.x - b.pos.x;
+  const dz = tgt.z - b.pos.z;
   const dist = Math.sqrt(dx * dx + dz * dz);
 
   // Phase check — gets faster and more aggressive at lower HP
@@ -668,12 +676,12 @@ function updateBoss(dt) {
   // removing the mesh on death can't change the light count) — follow the boss.
   if (bossLight) bossLight.position.set(b.pos.x, b.height / 2, b.pos.z);
 
-  // Melee attack
+  // Melee attack — routed to whichever player it's chasing (local or remote)
   if (dist < b.attackRange) {
     b.attackTimer -= dt;
     if (b.attackTimer <= 0) {
       b.attackTimer = b.attackCooldown / phaseMult;
-      damagePlayer(b.damage * phaseMult, b.pos);
+      netDealDamage(tgt, b.damage * phaseMult, b.pos);
     }
   }
 
@@ -704,8 +712,10 @@ function updateBoss(dt) {
 
 function throwBossProjectile(boss) {
   playProjectileThrow();
-  const dx = player.pos.x - boss.pos.x;
-  const dz = player.pos.z - boss.pos.z;
+  // MP: aim at the nearest player (solo: the local player, as before)
+  const tgt = netNearestOf(netAllPlayers(), boss.pos.x, boss.pos.z);
+  const dx = tgt.x - boss.pos.x;
+  const dz = tgt.z - boss.pos.z;
   const dist = Math.sqrt(dx * dx + dz * dz);
   if (dist < 0.1) return;
 
@@ -742,6 +752,8 @@ function throwBossProjectile(boss) {
 }
 
 function updateBossProjectiles(dt) {
+  // MP: projectiles can hit ANY player; the host knows everyone's position.
+  const players = netAllPlayers();
   for (let i = bossProjectiles.length - 1; i >= 0; i--) {
     const p = bossProjectiles[i];
     p.life -= dt;
@@ -751,12 +763,16 @@ function updateBossProjectiles(dt) {
     p.mesh.rotation.x += dt * 8;
     p.mesh.rotation.z += dt * 6;
 
-    // Hit player
-    const dx = p.pos.x - player.pos.x;
-    const dz = p.pos.z - player.pos.z;
-    const dy = p.pos.y - player.pos.y;
-    if (Math.sqrt(dx * dx + dz * dz + dy * dy) < 1.0) {
-      damagePlayer(p.damage, p.pos);
+    // Hit a player (local damage or 'damaged' message, via netDealDamage)
+    let hitPlayer = null;
+    for (const pl of players) {
+      const dx = p.pos.x - pl.x;
+      const dz = p.pos.z - pl.z;
+      const dy = p.pos.y - pl.y;
+      if (Math.sqrt(dx * dx + dz * dz + dy * dy) < 1.0) { hitPlayer = pl; break; }
+    }
+    if (hitPlayer) {
+      netDealDamage(hitPlayer, p.damage, p.pos);
       p.mesh.geometry.dispose(); p.mesh.material.dispose(); // per-projectile resources
       scene.remove(p.mesh);
       if (p.light) { p.light.intensity = 0; p.light.position.set(0, -100, 0); } // free the pooled slot
@@ -821,12 +837,16 @@ function damageBoss(amount) {
 
     player.kills++;
     playerMoney += BOSS_KILL_REWARD;
+    netRewardAll(BOSS_KILL_REWARD, 1); // MP: boss bounty (+the kill) goes to every client too
     playEnemyDeath();
   }
 
   updateHUD();
 }
 
+// Builds the post-boss exit (zone + visuals). Runs on the HOST when its boss
+// dies (deathAnim below), and on CLIENTS via the 'boss_exit' broadcast — the
+// position is derived from the (identical) grid, so both compute the same spot.
 function createBossExit() {
   const gh = mazeGrid.length, gw = mazeGrid[0].length;
   const ex = Math.floor(gw / 2), ey = gh - 2;
@@ -850,12 +870,18 @@ function createBossExit() {
   const beacon = new THREE.Mesh(beaconGeo, beaconMat);
   beacon.position.set(exitZone.x, WALL_H / 2, exitZone.z);
   scene.add(beacon);
+
+  // MP: tell clients the boss exit exists so they build it too (same zone +
+  // visuals via this same function) — then ANY player touching it advances the
+  // party through the existing exit_reached → host-validated path.
+  netBroadcastBossExit(exitZone.x, exitZone.z);
 }
 
 /* ═══════════════════════════════════════════
    WAVE AND LINGER SYSTEM
    ═══════════════════════════════════════════ */
 function spawnWave() {
+  if (netIsClient()) return; // MP: waves are host-only (clients mirror the result)
   const theme = getTheme(currentFloor);
   if (theme.isBoss) return; // Boss levels don't have waves
 
@@ -888,10 +914,14 @@ function spawnDangerMob() {
     ? ['partygoer']
     : ['danger_stalker', 'danger_crawler'];
 
-  const behindAngle = player.yaw + Math.PI + (Math.random() - 0.5) * 1.0;
+  // MP: ambush a random connected player (the linger pressure is shared);
+  // solo the list has one entry, so behavior is exactly as before.
+  const players = netAllPlayers();
+  const p = players.length > 1 ? players[Math.floor(Math.random() * players.length)] : players[0];
+  const behindAngle = p.yaw + Math.PI + (Math.random() - 0.5) * 1.0;
   const spawnDist = CELL * 5 + Math.random() * CELL * 3;
-  const sx = player.pos.x + Math.sin(behindAngle) * spawnDist;
-  const sz = player.pos.z + Math.cos(behindAngle) * spawnDist;
+  const sx = p.x + Math.sin(behindAngle) * spawnDist;
+  const sz = p.z + Math.cos(behindAngle) * spawnDist;
 
   // Find nearest valid cell
   const gh = mazeGrid.length, gw = mazeGrid[0].length;
@@ -937,6 +967,10 @@ function updateAntiLinger(dt) {
    ENEMY AI / UPDATE
    ═══════════════════════════════════════════ */
 function updateEnemies(dt) {
+  // MP: every enemy chases/attacks its NEAREST player — host + each connected
+  // client (positions from the pos stream). Solo: a 1-entry list (the local
+  // player), so targeting math is identical to before.
+  const players = netAllPlayers();
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
 
@@ -978,8 +1012,9 @@ function updateEnemies(dt) {
 
     if (e.stunTimer > 0) { e.stunTimer -= dt; continue; }
 
-    const dx = player.pos.x - e.pos.x;
-    const dz = player.pos.z - e.pos.z;
+    const tgt = netNearestOf(players, e.pos.x, e.pos.z);
+    const dx = tgt.x - e.pos.x;
+    const dz = tgt.z - e.pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
 
     let moveX = 0, moveZ = 0;
@@ -1058,7 +1093,7 @@ function updateEnemies(dt) {
       e.attackTimer -= dt;
       if (e.attackTimer <= 0) {
         e.attackTimer = e.attackCooldown;
-        damagePlayer(e.damage, e.pos);
+        netDealDamage(tgt, e.damage, e.pos); // hits whichever player it's chasing
       }
     } else {
       e.attackTimer = Math.max(0, e.attackTimer - dt * 0.5);
