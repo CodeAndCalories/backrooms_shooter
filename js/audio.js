@@ -33,63 +33,62 @@ function playGunshot() {
     const t = audioCtx.currentTime;
     const sr = audioCtx.sampleRate;
 
-    // 1. CRACK — sharp high-frequency transient. A very short noise burst pushed
-    //    through a highpass, with a near-instant attack and a fast (~25ms) decay.
-    //    This is what makes it read as a "crack" instead of a "thump".
-    const crackLen = sr * 0.05;
+    // 1. CRACK — the loud, bright, broadband transient that makes a gun a gun. White
+    //    noise, near-instant attack, ~10ms decay, aggressively high-passed with TWO
+    //    boosted high bands (a 5kHz snap peak + a 7kHz air shelf) so the top end
+    //    dominates. Much louder than before so the crack — not the low-end — is the
+    //    sound you hear.
+    const crackLen = sr * 0.04;
     const crackBuf = audioCtx.createBuffer(1, crackLen, sr);
-    const crackData = crackBuf.getChannelData(0);
+    const cd = crackBuf.getChannelData(0);
     for (let i = 0; i < crackLen; i++) {
-      crackData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.008)); // ~8ms decay
+      cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.010)); // ~10ms decay
     }
     const crack = audioCtx.createBufferSource();
     crack.buffer = crackBuf;
     const crackHP = audioCtx.createBiquadFilter();
-    crackHP.type = 'highpass';
-    crackHP.frequency.value = 3000;          // keep only the bright top end
-    const crackPeak = audioCtx.createBiquadFilter();
-    crackPeak.type = 'peaking';              // emphasize the snap band
-    crackPeak.frequency.value = 5000;
-    crackPeak.Q.value = 0.8;
-    crackPeak.gain.value = 8;
+    crackHP.type = 'highpass'; crackHP.frequency.value = 3500; crackHP.Q.value = 0.7;
+    const peak1 = audioCtx.createBiquadFilter();
+    peak1.type = 'peaking'; peak1.frequency.value = 5000; peak1.Q.value = 0.9; peak1.gain.value = 11;
+    const peak2 = audioCtx.createBiquadFilter();
+    peak2.type = 'highshelf'; peak2.frequency.value = 7000; peak2.gain.value = 9; // extra "air"/snap
     const crackGain = audioCtx.createGain();
-    crackGain.gain.setValueAtTime(3.0, t);   // loud, instant
-    crackGain.gain.exponentialRampToValueAtTime(0.01, t + 0.03);
-    crack.connect(crackHP); crackHP.connect(crackPeak); crackPeak.connect(crackGain);
+    crackGain.gain.setValueAtTime(5.5, t);   // much louder, instant
+    crackGain.gain.exponentialRampToValueAtTime(0.01, t + 0.035);
+    crack.connect(crackHP); crackHP.connect(peak1); peak1.connect(peak2); peak2.connect(crackGain);
     crackGain.connect(sfxGain);
     crack.start(t);
 
-    // 2. BODY — a bit of midrange punch so it has weight behind the crack.
-    //    Shorter and snappier than before (decays by ~90ms instead of ~250ms).
-    const bodyLen = sr * 0.12;
+    // 2. BODY — a short mid "bark" so it isn't pure hiss. A BANDPASS around 1.6kHz
+    //    (not a lowpass sweeping down to 400Hz — that downward sweep is exactly what
+    //    made the old shot read as a drum). Short and modest.
+    const bodyLen = sr * 0.06;
     const bodyBuf = audioCtx.createBuffer(1, bodyLen, sr);
-    const bodyData = bodyBuf.getChannelData(0);
+    const bd = bodyBuf.getChannelData(0);
     for (let i = 0; i < bodyLen; i++) {
-      bodyData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.025));
+      bd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.018));
     }
     const body = audioCtx.createBufferSource();
     body.buffer = bodyBuf;
-    const bodyLP = audioCtx.createBiquadFilter();
-    bodyLP.type = 'lowpass';
-    bodyLP.frequency.setValueAtTime(6000, t);
-    bodyLP.frequency.exponentialRampToValueAtTime(400, t + 0.08); // quick darkening
+    const bodyBP = audioCtx.createBiquadFilter();
+    bodyBP.type = 'bandpass'; bodyBP.frequency.value = 1600; bodyBP.Q.value = 0.8;
     const bodyGain = audioCtx.createGain();
-    bodyGain.gain.setValueAtTime(1.6, t);
-    bodyGain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
-    body.connect(bodyLP); bodyLP.connect(bodyGain); bodyGain.connect(sfxGain);
+    bodyGain.gain.setValueAtTime(0.8, t);
+    bodyGain.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    body.connect(bodyBP); bodyBP.connect(bodyGain); bodyGain.connect(sfxGain);
     body.start(t);
 
-    // 3. LOW-END — keep a touch of sub for chest-thump, but short so it doesn't
-    //    smear the transient into a soft "whump".
+    // 3. PUNCH — a tiny, fast click for weight. Short (~35ms) and NOT sub-bass: it
+    //    bottoms out at 90Hz, not 40Hz, so it adds a "pop" without the boomy drum tail.
     const osc = audioCtx.createOscillator();
     const oscGain = audioCtx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(180, t);
-    osc.frequency.exponentialRampToValueAtTime(40, t + 0.06);
-    oscGain.gain.setValueAtTime(0.7, t);     // lower than before — supports, not dominates
-    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(220, t);
+    osc.frequency.exponentialRampToValueAtTime(90, t + 0.03);
+    oscGain.gain.setValueAtTime(0.35, t);    // small — supports, never dominates
+    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.035);
     osc.connect(oscGain); oscGain.connect(sfxGain);
-    osc.start(t); osc.stop(t + 0.07);
+    osc.start(t); osc.stop(t + 0.04);
   });
 }
 
@@ -291,4 +290,74 @@ function updateAmbient(dt) {
       humGain.gain.linearRampToValueAtTime(0.018, audioCtx.currentTime + 0.06 + Math.random() * 0.1);
     }
   }
+}
+
+/* ═══════════════════════════════════════════
+   LEVEL FUN MUSIC (floor 5 only)
+   A slow, detuned, off-key music-box melody over a low detuned drone — a creepy
+   birthday-party loop. Everything routes through ambientGain so the Ambient volume
+   slider controls it. Started/stopped by updateFloorMusic() on every floor change.
+   ═══════════════════════════════════════════ */
+let levelFunMusic = null; // { droneA, droneB, seqTimer } while playing, else null
+
+function startLevelFunMusic() {
+  if (!audioCtx || levelFunMusic) return; // no context, or already playing
+  const out = ambientGain;                // ← routes through the Ambient bus / slider
+
+  // Low drone: two slightly-detuned oscillators through a lowpass. The detune makes them
+  // beat slowly against each other for an uneasy, wavering floor under the melody.
+  const droneA = audioCtx.createOscillator();
+  const droneB = audioCtx.createOscillator();
+  droneA.type = 'sine';     droneA.frequency.value = 55;          // ~A1
+  droneB.type = 'triangle'; droneB.frequency.value = 55 * 1.006;  // detuned → slow beat
+  const droneFilter = audioCtx.createBiquadFilter();
+  droneFilter.type = 'lowpass'; droneFilter.frequency.value = 200;
+  const droneGain = audioCtx.createGain(); droneGain.gain.value = 0.10;
+  droneA.connect(droneFilter); droneB.connect(droneFilter);
+  droneFilter.connect(droneGain); droneGain.connect(out);
+  droneA.start(); droneB.start();
+
+  // Off-key music-box motif (Hz). 0 = a rest. Deliberately uneasy little tune.
+  const melody = [659.25, 622.25, 523.25, 466.16, 523.25, 622.25, 587.33, 0, 440.0, 523.25, 493.88, 0];
+  const noteEvery = 520; // ms between notes — slow, like a winding-down box
+  let step = 0;
+
+  const playNote = (freq) => {
+    if (!freq) return;                       // rest
+    const t = audioCtx.currentTime;
+    const detune = -12 - Math.random() * 28; // cents — always a touch FLAT, and wavering
+    const o1 = audioCtx.createOscillator(); o1.type = 'triangle'; // music-box-ish body
+    const o2 = audioCtx.createOscillator(); o2.type = 'sine';     // octave-up shimmer
+    o1.frequency.value = freq;     o1.detune.value = detune;
+    o2.frequency.value = freq * 2; o2.detune.value = detune;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.16, t + 0.005); // fast pluck attack
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9); // bell-like decay
+    const g2 = audioCtx.createGain(); g2.gain.value = 0.4; // shimmer quieter than fundamental
+    o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(out);
+    o1.start(t); o2.start(t);
+    o1.stop(t + 1.0); o2.stop(t + 1.0);
+  };
+
+  const seqTimer = setInterval(() => { playNote(melody[step % melody.length]); step++; }, noteEvery);
+  playNote(melody[0]); step = 1; // first note now, so there's no silent gap before the loop
+
+  levelFunMusic = { droneA, droneB, seqTimer };
+}
+
+function stopLevelFunMusic() {
+  if (!levelFunMusic) return;
+  clearInterval(levelFunMusic.seqTimer);
+  try { levelFunMusic.droneA.stop(); } catch (e) {}
+  try { levelFunMusic.droneB.stop(); } catch (e) {}
+  levelFunMusic = null;
+}
+
+// Called on every floor entry (from buildMazeScene): play the Level Fun loop on floor 5,
+// stop it everywhere else. Theme-keyed (id 5), so it also works on later loops.
+function updateFloorMusic() {
+  if (!audioCtx) return;
+  if (getTheme(currentFloor).id === 5) startLevelFunMusic();
+  else stopLevelFunMusic();
 }

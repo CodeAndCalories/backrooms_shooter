@@ -143,14 +143,14 @@ const LEVEL_THEMES = [
     subtitle: "Come play with us! We have cake! =) =) =)",
     wallColor: '#ff88aa', wallColor2: '#88ddff',
     floorColor: '#ffdd66', floorColor2: '#ff9944',
-    ceilColor: '#ddffdd',
+    ceilColor: '#8fae8f',                         // dimmed, sickly green ceiling — party-gone-wrong
     fogColor: 0x180810, fogNear: 1, fogFar: 22,
     lightColor: 0xff66cc, lightIntensity: 0.75,
     ambientColor: 0xff88aa, ambientIntensity: 0.08,
     bgColor: 0x100608,
     mazeSize: 12,
     floorType: 'party',
-    decorations: 'balloons',
+    decorations: 'party',                         // balloons + candle-lit cake tables (see addDecorations)
     enemyTint: 0.8,
     darknessLevel: 0.0
   },
@@ -192,7 +192,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 8,
-    archetype: 'rooms',
+    archetype: 'chambers', // interconnected stone rooms — test floor for the chambers generator
     name: "The Crypt",
     subtitle: "Ancient stone. The walls weep something dark.",
     wallColor: '#484040', wallColor2: '#383030',
@@ -384,7 +384,38 @@ let player = {
   isADS: false, currentFOV: DEFAULT_FOV
 };
 let currentFloor = 0, currentWave = 1, waveMobsLeft = 0;
-let devStartFloor = 0; // DEV TOOL: floor chosen in the start-menu level select (0 = normal start)
+// The floor startGame() begins on. Written by EITHER the dev level-select (PART 1,
+// unrestricted, ?dev=1 only) or the player level-select (PART 2, unlock-gated). 0 = Level 1.
+let selectedStartFloor = 0;
+
+/* ═══════════════════════════════════════════
+   PART 1 — DEV MODE GATE
+   Dev tools (L-key debug labels, FPS counter, unrestricted level-select) only
+   activate when the URL contains ?dev=1. Friends loading the plain URL get none.
+   ═══════════════════════════════════════════ */
+const DEV_MODE = new URLSearchParams(location.search).get('dev') === '1';
+
+/* ═══════════════════════════════════════════
+   PART 2 — PLAYER PROGRESSION (unlock gating, persisted)
+   Tracks which floors the player has cleared in localStorage so the player-facing
+   level-select can gate replays. Floor 0 (Level 1) is always unlocked; floor i
+   unlocks once floor i-1 has been beaten. Wholly separate from PART 1's dev tools.
+   ═══════════════════════════════════════════ */
+const PROGRESS_KEY = 'backrooms_beaten_floors';
+function loadBeatenFloors() {
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) { return new Set(); }
+}
+let beatenFloors = loadBeatenFloors();
+function markFloorBeaten(i) {
+  if (beatenFloors.has(i)) return;
+  beatenFloors.add(i);
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...beatenFloors])); } catch (e) {}
+}
+// Floor 0 is always playable; any other floor needs the previous one beaten.
+function isFloorUnlocked(i) { return i === 0 || beatenFloors.has(i - 1); }
 let keys = {}, mouseDown = false, rightMouseDown = false;
 let mazeWalls = [], mazeGrid = [];
 let enemies = [], lights = [];
@@ -727,10 +758,77 @@ function generateLevel(theme, w, h) {
     case 'linear':
       generateLinear(w, h);
       break;
+    case 'chambers':
+      generateChambers(w, h);
+      break;
     case 'rooms':
     default:
       generateMaze(w, h);
       break;
+  }
+}
+
+// 'chambers' archetype — interconnected ROOMS instead of maze corridors. The grid is
+// split into a small grid of large rectangular rooms (2x2 or 3x2); each room is open
+// floor walled off from its neighbours, and every adjacent pair of rooms is linked by
+// 1-2 doorway gaps punched through the shared wall. Connecting EVERY adjacent pair makes
+// the room-adjacency graph a fully-connected grid → guaranteed flood-fill connected.
+// Same mazeGrid contract (0=wall, 1=floor); spawn (1,1) and exit (gw-2,gh-2) land inside
+// the first/last rooms. Deterministic via rng().
+function generateChambers(w, h) {
+  const gw = w * 2 + 1, gh = h * 2 + 1;
+
+  // 1. Solid everywhere; rooms get carved out below.
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
+
+  // 2. Room grid: 2 or 3 columns, 2 rows → 2x2 or 3x2 big rooms.
+  const cols = 2 + (rng() < 0.5 ? 1 : 0);
+  const rows = 2;
+  const innerW = gw - 2, innerH = gh - 2;                 // playable band is indices 1..gw-2 / 1..gh-2
+  const colW = Math.floor((innerW - (cols - 1)) / cols);  // room width  (1-cell wall between cols)
+  const rowH = Math.floor((innerH - (rows - 1)) / rows);  // room height (1-cell wall between rows)
+
+  // Room interior rectangles. The last col/row stretches to gw-2 / gh-2 to absorb any
+  // remainder, so the exit cell (gw-2, gh-2) is always inside the bottom-right room.
+  const rooms = []; // rooms[r][c] = {x0,x1,y0,y1}
+  for (let r = 0; r < rows; r++) {
+    rooms[r] = [];
+    for (let c = 0; c < cols; c++) {
+      const x0 = 1 + c * (colW + 1);
+      const y0 = 1 + r * (rowH + 1);
+      const x1 = (c === cols - 1) ? gw - 2 : x0 + colW - 1;
+      const y1 = (r === rows - 1) ? gh - 2 : y0 + rowH - 1;
+      rooms[r][c] = { x0, x1, y0, y1 };
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) mazeGrid[y][x] = 1;
+    }
+  }
+
+  // Punch 1-2 doorway gaps (each 1-2 cells wide) through a shared wall. `along` lists the
+  // valid coordinates on the wall; `set(p)` carves the wall cell at parametric position p.
+  const punch = (lo, hi, set) => {
+    const doors = 1 + Math.floor(rng() * 2); // 1 or 2 doorways
+    for (let d = 0; d < doors; d++) {
+      const width = 1 + Math.floor(rng() * 2);            // 1-2 cells wide
+      const span = hi - lo;
+      const start = lo + Math.floor(rng() * Math.max(1, span - width + 1));
+      for (let k = 0; k < width && start + k <= hi; k++) set(start + k);
+    }
+  };
+
+  // 3. Connect every adjacent room pair (→ guaranteed connectivity).
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const room = rooms[r][c];
+      if (c < cols - 1) {                                  // shared wall with right neighbour
+        const wx = room.x1 + 1;                            // the wall column between them
+        punch(room.y0, room.y1, p => { mazeGrid[p][wx] = 1; });
+      }
+      if (r < rows - 1) {                                  // shared wall with room below
+        const wy = room.y1 + 1;                            // the wall row between them
+        punch(room.x0, room.x1, p => { mazeGrid[wy][p] = 1; });
+      }
+    }
   }
 }
 
@@ -1289,6 +1387,10 @@ function buildMazeScene() {
   // variants so the first F-press is instant (see warmUpFlashlight).
   warmUpFlashlight();
 
+  // Floor-specific music: start the Level Fun loop on floor 5, stop it on every other
+  // floor. Runs here because buildMazeScene is the one path hit on every floor entry.
+  updateFloorMusic();
+
   // Reset anti-linger
   floorTimer = 0;
   dangerLevel = 0;
@@ -1347,8 +1449,14 @@ function addDecorations(theme, gw, gh) {
         mazeWalls.push({ minX: x * CELL + CELL / 2 - 0.25, maxX: x * CELL + CELL / 2 + 0.25, minZ: y * CELL + CELL / 2 - 0.25, maxZ: y * CELL + CELL / 2 + 0.25 });
       }
     }
-  } else if (theme.decorations === 'balloons') {
+  } else if (theme.decorations === 'party') {
+    // CREEPY BIRTHDAY PARTY (Level Fun only). Floating balloons (harmless, no collision)
+    // + party tables, each set with a single candle-lit cake. Tables are solid and
+    // pushed into mazeWalls so player/mobs collide. Reuses the same placement idiom as
+    // the other decoration branches, scoped via Level Fun's decorations:'party'.
     const balloonColors = [0xff4466, 0x44aaff, 0xffdd00, 0x44ff88, 0xff88ff];
+
+    // Balloons — drift overhead.
     for (let y = 2; y < gh - 1; y += 4) for (let x = 2; x < gw - 1; x += 4) {
       if (mazeGrid[y][x] === 1 && Math.random() < 0.5) {
         const color = balloonColors[Math.floor(Math.random() * balloonColors.length)];
@@ -1362,6 +1470,32 @@ function addDecorations(theme, gw, gh) {
         const str = new THREE.Mesh(strGeo, new THREE.MeshStandardMaterial({ color: 0x888888 }));
         str.position.set(balloon.position.x, balloon.position.y / 2, balloon.position.z);
         scene.add(str);
+      }
+    }
+
+    // Party tables — pale-clothed round top on a single leg, topped with a glowing cake
+    // and a lit candle. Solid obstacles (added to mazeWalls).
+    const tableMat = new THREE.MeshStandardMaterial({ color: 0xede0c8, roughness: 0.85 }); // grimy tablecloth
+    const legMat   = new THREE.MeshStandardMaterial({ color: 0x6b5a44, roughness: 0.9 });
+    const cakeMat  = new THREE.MeshStandardMaterial({ color: 0xff9ec4, emissive: 0xff5599, emissiveIntensity: 0.25, roughness: 0.6 });
+    const flameMat = new THREE.MeshStandardMaterial({ color: 0xfff0c0, emissive: 0xffcc66, emissiveIntensity: 0.7 });
+    const TABLE_TOP_Y = 1.0, TABLE_R = 0.55;
+    for (let y = 3; y < gh - 2; y += 5) for (let x = 3; x < gw - 2; x += 5) {
+      if (isOpenArea(x, y, gw, gh) && Math.random() < 0.5) {
+        const cx = x * CELL + CELL / 2, cz = y * CELL + CELL / 2;
+        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, TABLE_TOP_Y, 8), legMat);
+        leg.position.set(cx, TABLE_TOP_Y / 2, cz);
+        scene.add(leg);
+        const top = new THREE.Mesh(new THREE.CylinderGeometry(TABLE_R, TABLE_R, 0.08, 16), tableMat);
+        top.position.set(cx, TABLE_TOP_Y, cz);
+        scene.add(top);
+        const cake = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.18, 12), cakeMat);
+        cake.position.set(cx, TABLE_TOP_Y + 0.13, cz);
+        scene.add(cake);
+        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.12, 6), flameMat);
+        candle.position.set(cx, TABLE_TOP_Y + 0.28, cz);
+        scene.add(candle);
+        mazeWalls.push({ minX: cx - TABLE_R, maxX: cx + TABLE_R, minZ: cz - TABLE_R, maxZ: cz + TABLE_R });
       }
     }
   }
@@ -1621,6 +1755,7 @@ function updatePlayer(dt) {
    FLOOR PROGRESSION
    ═══════════════════════════════════════════ */
 function advanceFloor() {
+  markFloorBeaten(currentFloor); // PART 2: reaching the exit = this floor cleared → unlocks the next
   playerMoney += FLOOR_CLEAR_REWARD;
   currentFloor++;
   currentWave = 1;
@@ -1896,7 +2031,7 @@ function startGame() {
   player.pitch = 0;
   player.isADS = false;
   player.currentFOV = DEFAULT_FOV;
-  currentFloor = devStartFloor; currentWave = 1; // DEV: devStartFloor is 0 for a normal start
+  currentFloor = selectedStartFloor; currentWave = 1; // 0 for a normal start; or a chosen unlocked/dev floor
   player.floorReached = currentFloor;
   flashlightOn = false;
   adsLerp = 0;
@@ -1958,6 +2093,7 @@ function resumeGame() {
 
 function gameOver() {
   gameState = 'gameover';
+  stopLevelFunMusic(); // don't let the Level Fun loop bleed into the game-over screen
   document.getElementById('hud').style.display = 'none';
   document.getElementById('gameOverMenu').style.display = 'flex';
   document.getElementById('bossHpContainer').style.opacity = '0';
@@ -1969,8 +2105,10 @@ function gameOver() {
 
 function quitToMenu() {
   gameState = 'menu';
+  stopLevelFunMusic(); // stop Level Fun loop when bailing to the menu
   document.getElementById('pauseMenu').style.display = 'none';
   document.getElementById('hud').style.display = 'none';
+  buildPlayerLevelSelect(); // PART 2: refresh unlocks earned this run
   document.getElementById('startMenu').style.display = 'flex';
   document.getElementById('bossHpContainer').style.opacity = '0';
   document.exitPointerLock();
@@ -2033,7 +2171,7 @@ document.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyR' && gameState === 'playing') playerReload();
   if (e.code === 'KeyF' && gameState === 'playing') toggleFlashlight();
-  if (e.code === 'KeyL' && gameState === 'playing') {
+  if (DEV_MODE && e.code === 'KeyL' && gameState === 'playing') { // PART 1: dev-only debug labels
     window.debugLabels = !window.debugLabels;     // DEV: toggle enemy type labels
     console.log('debug labels:', window.debugLabels); // confirms the L handler fired
     if (!window.debugLabels) clearDebugLabels();  // tear down immediately when off
@@ -2087,20 +2225,23 @@ document.getElementById('btnResume').addEventListener('click', resumeGame);
 document.getElementById('btnQuit').addEventListener('click', quitToMenu);
 document.getElementById('btnRestart').addEventListener('click', startGame);
 
-/* ════ DEV TOOL: level-select buttons. Builds one button per LEVEL_THEMES
-   entry; clicking sets devStartFloor, which startGame() uses as the starting
-   floor. Delete this block + the #devLevelSelect markup/CSS to remove. ════ */
+/* ════ PART 1 — DEV TOOL: unrestricted level-select (jump to ANY floor). Only built
+   when ?dev=1; otherwise the whole #devLevelSelect block is hidden so friends never
+   see it. Clicking sets selectedStartFloor, which startGame() uses as the start floor.
+   ════ */
 (function buildDevLevelSelect() {
+  const panel = document.getElementById('devLevelSelect');
+  if (!DEV_MODE) { if (panel) panel.style.display = 'none'; return; }
   const wrap = document.getElementById('devLevelButtons');
   const label = document.getElementById('devSelectedFloor');
   if (!wrap) return;
   LEVEL_THEMES.forEach((theme, i) => {
     const b = document.createElement('button');
-    b.className = 'dev-ls-btn' + (theme.isBoss ? ' boss' : '') + (i === devStartFloor ? ' selected' : '');
+    b.className = 'dev-ls-btn' + (theme.isBoss ? ' boss' : '') + (i === selectedStartFloor ? ' selected' : '');
     b.textContent = i;
     b.title = theme.name + (theme.archetype ? ' [' + theme.archetype + ']' : '');
     b.addEventListener('click', () => {
-      devStartFloor = i;
+      selectedStartFloor = i;
       label.textContent = i;
       wrap.querySelectorAll('.dev-ls-btn').forEach(el => el.classList.remove('selected'));
       b.classList.add('selected');
@@ -2108,6 +2249,42 @@ document.getElementById('btnRestart').addEventListener('click', startGame);
     wrap.appendChild(b);
   });
 })();
+
+/* ════ PART 2 — PLAYER level-select (always visible). Replays of BEATEN levels only:
+   floor 0 is unlocked from the start, each cleared floor unlocks the next. Locked
+   floors render greyed with a 🔒 and aren't clickable. Rebuilt whenever the start menu
+   is shown so newly-unlocked floors appear. Sets selectedStartFloor on click. ════ */
+function buildPlayerLevelSelect() {
+  const wrap = document.getElementById('playerLevelButtons');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  LEVEL_THEMES.forEach((theme, i) => {
+    const unlocked = isFloorUnlocked(i);
+    const b = document.createElement('button');
+    b.className = 'pls-btn'
+      + (theme.isBoss ? ' boss' : '')
+      + (unlocked ? '' : ' locked')
+      + (i === selectedStartFloor ? ' selected' : '');
+    b.textContent = unlocked ? (i + 1) : '🔒';   // friendly 1-based number; lock when gated
+    b.title = unlocked
+      ? ('Level ' + (i + 1) + ' — ' + theme.name + (theme.isBoss ? ' (Boss)' : ''))
+      : ('Locked — beat Level ' + i + ' to unlock');
+    if (unlocked) {
+      b.addEventListener('click', () => {
+        selectedStartFloor = i;
+        wrap.querySelectorAll('.pls-btn').forEach(el => el.classList.remove('selected'));
+        b.classList.add('selected');
+      });
+    } else {
+      b.disabled = true;
+    }
+    wrap.appendChild(b);
+  });
+}
+buildPlayerLevelSelect(); // initial build at load
+
+// PART 1: hide the FPS readout entirely unless ?dev=1 (the update is already gated).
+if (!DEV_MODE) { const _fps = document.getElementById('hudFps'); if (_fps) _fps.style.display = 'none'; }
 
 // Volume sliders → audio gain nodes (sliders are 0–100, gains are 0–1)
 document.getElementById('sliderVolMaster').addEventListener('input', e => {
@@ -2195,6 +2372,7 @@ document.getElementById('btnShopClose').addEventListener('click', () => {
    ═══════════════════════════════════════════ */
 function init() {
   initSpriteTextures();
+  loadBossSprites();  // swap procedural boss placeholders for custom PNGs (falls back if a PNG fails)
   preloadMobModels(); // load real GLB mob models once; spawns clone from cache
 
   scene = new THREE.Scene();
@@ -2229,6 +2407,7 @@ function init() {
 // FPS counter — sampled over a rolling window so the readout is steady, not jittery
 let _fpsFrames = 0, _fpsAccum = 0, _fpsValue = 0;
 function updateFpsCounter(dt) {
+  if (!DEV_MODE) return; // PART 1: FPS counter is a dev-only tool
   _fpsFrames++;
   _fpsAccum += dt;
   if (_fpsAccum >= 0.5) { // refresh twice a second

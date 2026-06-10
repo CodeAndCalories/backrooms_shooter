@@ -153,6 +153,36 @@ function initSpriteTextures() {
   }, 512, 512);
 }
 
+// Swap the 3 procedural boss placeholders for custom PNG art. Call at startup AFTER
+// initSpriteTextures() so the procedural texture stays cached as a graceful fallback:
+// if a PNG 404s or fails to decode we simply keep the placeholder. Loaded textures
+// overwrite spriteTextures under the SAME keys, so spawnBoss picks them up via
+// theme.bossTex with no other change. Async: a boss spawning before its PNG finishes
+// just uses the placeholder (boss floors are 1.5-2s after entry, long after init).
+function loadBossSprites() {
+  const loader = new THREE.TextureLoader();
+  const files = {
+    boss_warden:  'sprites/warden.png',
+    boss_amalgam: 'sprites/amalgam.png',
+    boss_hive:    'sprites/hivemind.png'
+  };
+  Object.keys(files).forEach(key => {
+    loader.load(
+      files[key],
+      tex => {
+        tex.encoding = THREE.sRGBEncoding;   // colors match renderer.outputEncoding (sRGB), not washed out
+        tex.magFilter = THREE.LinearFilter;  // smooth scaling of the detailed art
+        tex.minFilter = THREE.LinearFilter;  // no mipmaps → avoids non-power-of-two warnings
+        tex.generateMipmaps = false;
+        spriteTextures[key] = tex;           // replace the procedural placeholder
+        console.log('[sprites] boss texture loaded', key, files[key]);
+      },
+      undefined,
+      err => { console.warn('[sprites] FAILED', files[key], '— keeping procedural placeholder.', err); }
+    );
+  });
+}
+
 /* ═══════════════════════════════════════════
    MOB TYPES (UPDATED SCALING)
    ═══════════════════════════════════════════ */
@@ -161,7 +191,13 @@ const MOB_TYPES = {
   crawler:        { speed: 4.5, health: 50,  damage: 7,  color: 0x443333, scale: 0.65, height: 0.85, attackRange: 1.5, attackCooldown: 0.7, name: 'Crawler' },
   phantom:        { speed: 3.0, health: 75,  damage: 13, color: 0x222244, scale: 0.9,  height: 1.7,  attackRange: 2.0, attackCooldown: 1.1, name: 'Phantom', erratic: true },
   danger_stalker: { speed: 3.5, health: 160, damage: 14, color: 0x551111, scale: 2.0,  height: 4.0,  attackRange: 2.0, attackCooldown: 1.0, name: 'Danger Stalker' },
-  danger_crawler: { speed: 6.0, health: 70,  damage: 10, color: 0x553322, scale: 1.1,  height: 1.6,  attackRange: 1.6, attackCooldown: 0.5, name: 'Danger Crawler' }
+  danger_crawler: { speed: 6.0, health: 70,  damage: 10, color: 0x553322, scale: 1.1,  height: 1.6,  attackRange: 1.6, attackCooldown: 0.5, name: 'Danger Crawler' },
+  // Aranea spider — medium speed, moderate HP, straightforward melee. Sits between the
+  // tanky stalker and the fast/fragile crawler.
+  spider:         { speed: 3.5, health: 90,  damage: 11, color: 0x2a2a22, scale: 1.0,  height: 1.4,  attackRange: 1.6, attackCooldown: 1.0, name: 'Spider' },
+  // Partygoer — the signature mob of Level Fun. Human-sized, unhurried, moderately tanky
+  // melee (it shambles toward you and hits hard up close).
+  partygoer:      { speed: 2.8, health: 110, damage: 12, color: 0x884466, scale: 1.0,  height: 1.8,  attackRange: 1.7, attackCooldown: 1.2, name: 'Partygoer' }
 };
 
 /* ═══════════════════════════════════════════
@@ -193,7 +229,16 @@ const MODEL_DEFS = {
   crawler:        { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
   danger_crawler: { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
   stalker:        { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI },
-  danger_stalker: { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI }
+  danger_stalker: { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI },
+  // phantom → floating death-moths. `float` (m) = hover height of the model's CENTER;
+  // its presence also tells instanceMobModel to center the model vertically (not plant
+  // feet at y=0) so it bobs in the air rather than standing on the floor.
+  phantom:        { url: 'models/death_moths_backrooms.glb', height: 1.6, faceOffset: Math.PI, float: 1.5 },
+  // spider → rigged aranea. Grounded (feet at y=0), auto-scaled to ~1.4m, faces player.
+  spider:         { url: 'models/backrooms_aranea_membri_rigged_blender_3.01.glb', height: 1.4, faceOffset: Math.PI },
+  // partygoer → human-sized. Grounded, auto-scaled to ~1.8m. faceOffset 0: this model
+  // already faces +Z, so no 180° flip (Math.PI would turn its back to the player).
+  partygoer:      { url: 'models/partygoer_from_backrooms.glb', height: 1.8, faceOffset: 0 }
 };
 const modelCache = {}; // url -> { scene, rigged } on success, or null on failure
 
@@ -262,12 +307,17 @@ function instanceMobModel(type) {
   const s = size.y > 0.0001 ? def.height / size.y : 1;
   inner.scale.setScalar(s);
 
-  // Re-measure at final scale, then center horizontally (x/z) and drop feet to y=0.
+  // Re-measure at final scale, then center horizontally (x/z). Vertically: float models
+  // are centered on the group origin (so they hover), grounded models drop feet to y=0.
   inner.updateMatrixWorld(true);
   const box2 = new THREE.Box3().setFromObject(inner);
   inner.position.x -= (box2.min.x + box2.max.x) / 2;
   inner.position.z -= (box2.min.z + box2.max.z) / 2;
-  inner.position.y -= box2.min.y;
+  if (def.float !== undefined) {
+    inner.position.y -= (box2.min.y + box2.max.y) / 2; // center → hovers around group origin
+  } else {
+    inner.position.y -= box2.min.y;                    // feet planted at y=0
+  }
 
   const outer = new THREE.Group();
   outer.add(inner);
@@ -276,6 +326,8 @@ function instanceMobModel(type) {
   // default orientation shows their back when rotation.y points at the player.
   outer.userData.isModel = true;
   outer.userData.faceOffset = (def.faceOffset !== undefined) ? def.faceOffset : Math.PI;
+  // float (if set) = hover height for updateEnemies; absence means grounded.
+  if (def.float !== undefined) outer.userData.float = def.float;
   return outer;
 }
 
@@ -288,7 +340,20 @@ function buildMobModel(type, scale) {
   if (type === 'stalker' || type === 'danger_stalker') {
     return instanceMobModel(type) || buildSpriteMob(type, scale);
   }
-  // Everything else (phantom, ...) unchanged: original sprite.
+  // SLOT 3 — floating death-moths for the phantom (sprite fallback).
+  if (type === 'phantom') {
+    return instanceMobModel(type) || buildSpriteMob(type, scale);
+  }
+  // SLOT 4 — rigged aranea for the spider. No spider sprite exists, so fall back to the
+  // procedural wire figure (a grounded isGroup placeholder) if the GLB fails to load.
+  if (type === 'spider') {
+    return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE);
+  }
+  // SLOT 5 — partygoer model (Level Fun). Wire-figure fallback (no partygoer sprite).
+  if (type === 'partygoer') {
+    return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE);
+  }
+  // Everything else unchanged: original sprite.
   return buildSpriteMob(type, scale);
 }
 
@@ -461,7 +526,9 @@ function spawnBoss() {
   const texName = theme.bossTex || 'boss_warden';
 
   const tex = spriteTextures[texName];
-  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthWrite: false });
+  // transparent + alphaTest: discard near-transparent pixels so the PNG's edges are
+  // clean — no rectangle/halo around the boss. depthWrite:false keeps sprite sorting.
+  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, alphaTest: 0.1, depthWrite: false });
   const mesh = new THREE.Sprite(mat);
   
   mesh.scale.set(sc * 4.0, sc * 4.0, 1);
@@ -733,7 +800,18 @@ function spawnWave() {
 
   const count = Math.min(3 + currentFloor + currentWave, 15);
   waveMobsLeft = count;
-  const types = ['stalker', 'crawler', 'phantom'];
+  // Spider joins the wave rotation only from floor index 8 onward (the in-game "LEVEL 9"+),
+  // so it's a later-game threat. Lower SPIDER_MIN_FLOOR to make it appear earlier.
+  const SPIDER_MIN_FLOOR = 8;
+  const types = currentFloor >= SPIDER_MIN_FLOOR
+    ? ['stalker', 'crawler', 'phantom', 'spider']
+    : ['stalker', 'crawler', 'phantom'];
+  // Partygoer: spawns ONLY on Level Fun (floor 5) — weight it heavily so it makes up
+  // ~half the party. (Spawn uses round-robin over `types`, so repeating an entry raises
+  // its share.) Floor 5's base pool has 3 entries, so 3 partygoers → exactly half.
+  if (currentFloor === 5) {
+    types.push('partygoer', 'partygoer', 'partygoer');
+  }
   for (let i = 0; i < count; i++) {
     const t = types[i % types.length];
     setTimeout(() => {
@@ -884,12 +962,18 @@ function updateEnemies(dt) {
     }
     e.mesh.position.set(e.pos.x, yPos, e.pos.z);
     if (e.mesh.isGroup) {
-      // grounded wire mob: bob around floor level so feet stay near y=0
-      e.mesh.position.y = 0.05 + Math.sin(clock.getElapsedTime() * 14) * 0.05;
-      // Loaded 3D models: face the player. Y-axis only (no tilt) so feet stay
-      // planted and the bob above is preserved. dx/dz are player − mob (lines above);
-      // faceOffset (default Math.PI) corrects models that default to facing away.
-      // Sprites auto-face the camera, so they're skipped (isModel only set on models).
+      if (e.mesh.userData.float !== undefined) {
+        // floating model (phantom moths): hover at chest/head height with a slow,
+        // gentle vertical bob — never plant feet on the floor.
+        e.mesh.position.y = e.mesh.userData.float + Math.sin(clock.getElapsedTime() * 2 + e.pos.x) * 0.18;
+      } else {
+        // grounded mob: bob around floor level so feet stay near y=0
+        e.mesh.position.y = 0.05 + Math.sin(clock.getElapsedTime() * 14) * 0.05;
+      }
+      // Loaded 3D models: face the player. Y-axis only (no tilt), so the bob above is
+      // preserved. dx/dz are player − mob (lines above); faceOffset (default Math.PI)
+      // corrects models that default to facing away. Sprites auto-face the camera, so
+      // they're skipped (isModel is only set on real loaded models).
       if (e.mesh.userData.isModel) {
         e.mesh.rotation.y = Math.atan2(dx, dz) + (e.mesh.userData.faceOffset || 0);
       }

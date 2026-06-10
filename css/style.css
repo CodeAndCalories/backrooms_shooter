@@ -30,6 +30,17 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .dev-ls-btn.boss{color:#bb5544;border-color:#ff442233;}
 .dev-ls-btn.boss:hover{background:rgba(255,68,34,0.12);color:#ff6644;border-color:#ff6644;}
 .dev-ls-btn.selected{background:rgba(212,195,106,0.22);color:#fff;border-color:#d4c36a;box-shadow:0 0 10px rgba(212,195,106,0.4);}
+/* PART 2 — player level select (gold/Courier, matches menu) */
+#playerLevelSelect{margin-top:24px;padding:14px 18px;border:1px solid #6a5a2a;border-radius:4px;max-width:460px;background:rgba(0,0,0,0.3);}
+.pls-title{color:#d4c36a;font-size:0.8em;letter-spacing:4px;margin-bottom:12px;text-transform:uppercase;}
+.pls-buttons{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;}
+.pls-hint{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
+.pls-btn{background:none;border:1px solid #d4c36a33;color:#8a7f55;min-width:38px;height:32px;padding:0 8px;font-family:'Courier New',monospace;font-size:0.85em;cursor:pointer;transition:all 0.2s;}
+.pls-btn:hover:not(.locked){background:rgba(212,195,106,0.12);color:#d4c36a;border-color:#d4c36a;}
+.pls-btn.boss:not(.locked){color:#bb5544;border-color:#ff442233;}
+.pls-btn.boss:hover:not(.locked){background:rgba(255,68,34,0.12);color:#ff6644;border-color:#ff6644;}
+.pls-btn.selected{background:rgba(212,195,106,0.22);color:#fff;border-color:#d4c36a;box-shadow:0 0 10px rgba(212,195,106,0.4);}
+.pls-btn.locked{color:#555;border-color:#2a2a2a;opacity:0.55;cursor:not-allowed;}
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}
 

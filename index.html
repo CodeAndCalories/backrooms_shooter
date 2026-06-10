@@ -27,7 +27,14 @@
     <span style="color:#ff6644;">Boss fights every 5 levels — survive to progress!</span>
   </div>
 
-  <!-- ════ DEV TOOL: level select. Remove this whole block (and #devLevelSelect CSS + JS) to disable. ════ -->
+  <!-- ════ PART 2 — PLAYER level select (always visible). Unlock-gated replay of beaten levels. Buttons injected by main.js. ════ -->
+  <div id="playerLevelSelect">
+    <div class="pls-title">Level Select</div>
+    <div class="pls-buttons" id="playerLevelButtons"><!-- buttons injected by main.js --></div>
+    <div class="pls-hint">Clear a level to unlock the next &nbsp;·&nbsp; 🔒 = locked</div>
+  </div>
+
+  <!-- ════ PART 1 — DEV TOOL: unrestricted level select. Hidden unless ?dev=1 (handled in main.js). Remove this block (+ #devLevelSelect CSS/JS) to delete entirely. ════ -->
   <div id="devLevelSelect">
     <div class="dev-ls-title">⚠ DEV — LEVEL SELECT</div>
     <div class="dev-ls-buttons" id="devLevelButtons"><!-- buttons injected by main.js --></div>
