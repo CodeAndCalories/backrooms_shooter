@@ -28,7 +28,35 @@ function initAudio() {
 
 function playSound(fn) { if (audioCtx) fn(); }
 
+/* ═══════════════════════════════════════════
+   GUN SOUND SELECTOR — 3 procedural variants, chosen in pause settings,
+   persisted in localStorage. playGunshot() dispatches on gunSoundMode, so the
+   change applies to the very next shot (and the settings button test-fires).
+   ═══════════════════════════════════════════ */
+const GUN_SOUND_KEY = 'backrooms_gun_sound';
+const GUN_SOUND_MODES = ['sharp', 'heavy', 'suppressed'];
+const GUN_SOUND_LABELS = { sharp: 'Sharp', heavy: 'Heavy', suppressed: 'Suppressed' };
+let gunSoundMode = (() => {
+  try {
+    const v = localStorage.getItem(GUN_SOUND_KEY);
+    return GUN_SOUND_MODES.includes(v) ? v : 'sharp';
+  } catch (e) { return 'sharp'; }
+})();
+function setGunSoundMode(mode) {
+  if (!GUN_SOUND_MODES.includes(mode)) return;
+  gunSoundMode = mode;
+  try { localStorage.setItem(GUN_SOUND_KEY, mode); } catch (e) {}
+}
+
 function playGunshot() {
+  if (gunSoundMode === 'heavy') return playGunshotHeavy();
+  if (gunSoundMode === 'suppressed') return playGunshotSuppressed();
+  return playGunshotSharp();
+}
+
+// OPTION 1 "Sharp" — the original shot, unchanged: bright broadband crack,
+// short 1.6kHz bark, small 220→90Hz pop.
+function playGunshotSharp() {
   playSound(() => {
     const t = audioCtx.currentTime;
     const sr = audioCtx.sampleRate;
@@ -89,6 +117,123 @@ function playGunshot() {
     oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.035);
     osc.connect(oscGain); oscGain.connect(sfxGain);
     osc.start(t); osc.stop(t + 0.04);
+  });
+}
+
+// OPTION 2 "Heavy" — beefier bang: the crack is darker and slightly tamer, the
+// body is a longer, louder low-mid bark (700Hz, ~120ms), and the punch is a
+// bigger 160→55Hz thump. Same three-layer recipe as Sharp, weighted downward.
+function playGunshotHeavy() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    const sr = audioCtx.sampleRate;
+
+    // 1. CRACK — same broadband transient but high-passed lower (2kHz) with a
+    //    modest 3.5kHz peak instead of Sharp's 5k/7k sizzle: present, not piercing.
+    const crackLen = sr * 0.04;
+    const crackBuf = audioCtx.createBuffer(1, crackLen, sr);
+    const cd = crackBuf.getChannelData(0);
+    for (let i = 0; i < crackLen; i++) {
+      cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.010));
+    }
+    const crack = audioCtx.createBufferSource();
+    crack.buffer = crackBuf;
+    const crackHP = audioCtx.createBiquadFilter();
+    crackHP.type = 'highpass'; crackHP.frequency.value = 2000; crackHP.Q.value = 0.7;
+    const peak = audioCtx.createBiquadFilter();
+    peak.type = 'peaking'; peak.frequency.value = 3500; peak.Q.value = 0.9; peak.gain.value = 7;
+    const crackGain = audioCtx.createGain();
+    crackGain.gain.setValueAtTime(3.8, t);
+    crackGain.gain.exponentialRampToValueAtTime(0.01, t + 0.035);
+    crack.connect(crackHP); crackHP.connect(peak); peak.connect(crackGain);
+    crackGain.connect(sfxGain);
+    crack.start(t);
+
+    // 2. BODY — the beef. Bandpass dropped to 700Hz, twice the length (~120ms),
+    //    noticeably louder than Sharp's bark: the low-mid "boom" of a big bore.
+    const bodyLen = sr * 0.12;
+    const bodyBuf = audioCtx.createBuffer(1, bodyLen, sr);
+    const bd = bodyBuf.getChannelData(0);
+    for (let i = 0; i < bodyLen; i++) {
+      bd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.035));
+    }
+    const body = audioCtx.createBufferSource();
+    body.buffer = bodyBuf;
+    const bodyBP = audioCtx.createBiquadFilter();
+    bodyBP.type = 'bandpass'; bodyBP.frequency.value = 700; bodyBP.Q.value = 0.7;
+    const bodyGain = audioCtx.createGain();
+    bodyGain.gain.setValueAtTime(2.2, t);
+    bodyGain.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+    body.connect(bodyBP); bodyBP.connect(bodyGain); bodyGain.connect(sfxGain);
+    body.start(t);
+
+    // 3. PUNCH — bigger and deeper than Sharp's pop: 160→55Hz over ~70ms. Still
+    //    short enough not to read as a drum.
+    const osc = audioCtx.createOscillator();
+    const oscGain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(160, t);
+    osc.frequency.exponentialRampToValueAtTime(55, t + 0.06);
+    oscGain.gain.setValueAtTime(0.7, t);
+    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.075);
+    osc.connect(oscGain); oscGain.connect(sfxGain);
+    osc.start(t); osc.stop(t + 0.08);
+  });
+}
+
+// OPTION 3 "Suppressed" — for long sessions: a quiet, muffled thump-click.
+// Everything lowpassed, total level far below the other two (loudest gain 0.9
+// vs Sharp's 5.5 crack), and over in ~80ms. Thump + tiny mechanical click.
+function playGunshotSuppressed() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    const sr = audioCtx.sampleRate;
+
+    // 1. THUMP — short noise burst through a 900Hz lowpass: the muffled "pfft".
+    const thumpLen = sr * 0.06;
+    const thumpBuf = audioCtx.createBuffer(1, thumpLen, sr);
+    const td = thumpBuf.getChannelData(0);
+    for (let i = 0; i < thumpLen; i++) {
+      td[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.015));
+    }
+    const thump = audioCtx.createBufferSource();
+    thump.buffer = thumpBuf;
+    const thumpLP = audioCtx.createBiquadFilter();
+    thumpLP.type = 'lowpass'; thumpLP.frequency.value = 900; thumpLP.Q.value = 0.7;
+    const thumpGain = audioCtx.createGain();
+    thumpGain.gain.setValueAtTime(0.9, t);
+    thumpGain.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    thump.connect(thumpLP); thumpLP.connect(thumpGain); thumpGain.connect(sfxGain);
+    thump.start(t);
+
+    // 2. CLICK — the action cycling: a faint, very short (~8ms) mid tick so each
+    //    shot still has a crisp edge to time follow-up shots by.
+    const clickLen = sr * 0.012;
+    const clickBuf = audioCtx.createBuffer(1, clickLen, sr);
+    const kd = clickBuf.getChannelData(0);
+    for (let i = 0; i < clickLen; i++) {
+      kd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.002));
+    }
+    const click = audioCtx.createBufferSource();
+    click.buffer = clickBuf;
+    const clickBP = audioCtx.createBiquadFilter();
+    clickBP.type = 'bandpass'; clickBP.frequency.value = 2500; clickBP.Q.value = 1.2;
+    const clickGain = audioCtx.createGain();
+    clickGain.gain.setValueAtTime(0.25, t);
+    clickGain.gain.exponentialRampToValueAtTime(0.01, t + 0.015);
+    click.connect(clickBP); clickBP.connect(clickGain); clickGain.connect(sfxGain);
+    click.start(t);
+
+    // 3. Low sine knock for a hint of weight — quiet and brief.
+    const osc = audioCtx.createOscillator();
+    const oscGain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(140, t);
+    osc.frequency.exponentialRampToValueAtTime(70, t + 0.04);
+    oscGain.gain.setValueAtTime(0.3, t);
+    oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+    osc.connect(oscGain); oscGain.connect(sfxGain);
+    osc.start(t); osc.stop(t + 0.06);
   });
 }
 

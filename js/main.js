@@ -989,7 +989,18 @@ function generateLinear(w, h) {
    3D GUN MODEL
    ═══════════════════════════════════════════ */
 function createGun() {
-  if (gunGroup) camera.remove(gunGroup);
+  if (gunGroup) {
+    // The gun is rebuilt every floor — dispose the old one's ~24 geometries
+    // and materials or they accumulate in VRAM per floor.
+    gunGroup.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach(m => m.dispose());
+      }
+    });
+    camera.remove(gunGroup);
+  }
 
   gunGroup = new THREE.Group();
 
@@ -1187,15 +1198,144 @@ function updateFlashlightHUD() {
 }
 
 /* ═══════════════════════════════════════════
+   AMMO PICKUPS
+   Small glowing canisters on the floor. Emissive material ONLY — deliberately
+   no PointLight, so the scene's light count (and thus the compiled shader
+   variants) stays stable. One shared geometry+material → 1 draw call each.
+   Floor spawns use the SEEDED rng() so placement is deterministic per floor
+   (multiplayer-ready); enemy death drops use Math.random (combat isn't
+   deterministic anyway).
+   ═══════════════════════════════════════════ */
+let ammoPickups = []; // { mesh, x, z, baseY, phase }
+const AMMO_PICKUP_RADIUS = 1.1;      // world units — walk-over distance
+const AMMO_DROP_CHANCE = 0.2;        // chance a killed enemy drops one
+
+const ammoPickupGeo = new THREE.BoxGeometry(0.32, 0.22, 0.2);
+const ammoPickupMat = new THREE.MeshStandardMaterial({
+  color: 0x554411, emissive: 0xffcc33, emissiveIntensity: 0.9,
+  roughness: 0.4, metalness: 0.3
+});
+
+function createAmmoPickup(wx, wz) {
+  const mesh = new THREE.Mesh(ammoPickupGeo, ammoPickupMat);
+  const baseY = 0.18;
+  mesh.position.set(wx, baseY, wz);
+  scene.add(mesh);
+  ammoPickups.push({ mesh, x: wx, z: wz, baseY, phase: ammoPickups.length * 1.7 });
+}
+
+// 2-4 per floor at random OPEN cells, away from the player spawn. Called from
+// buildMazeScene AFTER generation, so the rng() draw order — and therefore the
+// placement — is reproducible from the floor seed.
+function spawnAmmoPickups() {
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  const count = 2 + Math.floor(rng() * 3); // 2..4
+  const used = new Set();
+  for (let n = 0; n < count; n++) {
+    for (let attempts = 0; attempts < 40; attempts++) {
+      const rx = 1 + Math.floor(rng() * (gw - 2));
+      const ry = 1 + Math.floor(rng() * (gh - 2));
+      const key = ry + ',' + rx;
+      // open cell, not reused, and at least ~3 cells from the spawn corner (1,1)
+      if (mazeGrid[ry][rx] !== 1 || used.has(key)) continue;
+      if (Math.abs(rx - 1) + Math.abs(ry - 1) < 3) continue;
+      used.add(key);
+      createAmmoPickup(rx * CELL + CELL / 2, ry * CELL + CELL / 2);
+      break;
+    }
+  }
+}
+
+// Spin/bob the canisters; pick up on walk-over. Full reserve = the pickup is
+// LEFT on the ground (no wasted ammo), so the walk-over check repeats later.
+function updateAmmoPickups(dt) {
+  if (ammoPickups.length === 0) return;
+  const t = clock.getElapsedTime();
+  for (let i = ammoPickups.length - 1; i >= 0; i--) {
+    const p = ammoPickups[i];
+    p.mesh.rotation.y += dt * 2.0;
+    p.mesh.position.y = p.baseY + Math.sin(t * 3 + p.phase) * 0.05;
+
+    const dx = p.x - player.pos.x, dz = p.z - player.pos.z;
+    if (dx * dx + dz * dz < AMMO_PICKUP_RADIUS * AMMO_PICKUP_RADIUS) {
+      if (player.reserveAmmo >= shopStats.reserveMax) continue; // already full
+      // +1 magazine of reserve, capped at the (possibly shop-upgraded) max
+      player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize);
+      playPickup();
+      scene.remove(p.mesh);
+      ammoPickups.splice(i, 1);
+      updateHUD();
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════
+   RESOURCE DISPOSAL
+   three.js never frees GPU resources on scene.remove() — geometry, materials
+   and textures stay in VRAM until .dispose(). Ownership rules here:
+   - GLB mob clones (userData.isModel): geometry is SHARED with modelCache →
+     keep. Materials are per-instance clones → dispose. Their .map textures are
+     reference-copied from the cache (material.dispose() leaves textures alone,
+     which is exactly right).
+   - Wire-figure fallbacks: geometry AND materials per-instance → dispose both.
+   - Sprites (mobs, boss): ALL three.js Sprites share one static plane geometry
+     → never dispose it; the material is per-instance → dispose (.map lives in
+     the shared spriteTextures cache, untouched).
+   - Rigged clones (aranea): each SkinnedMesh clone lazily allocates its own
+     skeleton boneTexture on first render → dispose it or it leaks per spawn.
+   ═══════════════════════════════════════════ */
+function disposeMobVisual(mesh) {
+  const sharedGeo = !!mesh.userData.isModel;
+  mesh.traverse(o => {
+    if (o.geometry && !sharedGeo && !o.isSprite) o.geometry.dispose();
+    if (o.isSkinnedMesh && o.skeleton && o.skeleton.boneTexture) o.skeleton.boneTexture.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m => m.dispose());
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════
    BUILD SCENE
    ═══════════════════════════════════════════ */
 function buildMazeScene() {
+  // ── TEARDOWN: dispose the old floor's GPU resources BEFORE dropping the
+  // references (this was the audit's per-floor VRAM leak: 3 CanvasTextures +
+  // all world geometry/materials every floor). Mixed-ownership objects first:
+  for (const e of enemies) { removeDebugLabel(e); disposeMobVisual(e.mesh); scene.remove(e.mesh); }
+  if (bossEntity && bossEntity.mesh) { removeDebugLabel(bossEntity); disposeMobVisual(bossEntity.mesh); scene.remove(bossEntity.mesh); }
+  for (const p of bossProjectiles) { p.mesh.geometry.dispose(); p.mesh.material.dispose(); scene.remove(p.mesh); }
+  for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
+  bulletTrails = [];
+  for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
+  scene.remove(camera); // gun + flashlight persist across floors (createGun disposes the old gun itself)
+
+  // Everything still in the scene is floor-owned world geometry (walls, floor,
+  // ceiling, fixtures, decorations, exit). Dispose it all — including material
+  // .map textures: that's where the 3 per-floor CanvasTextures live.
+  scene.traverse(o => {
+    if (o.geometry && !o.isSprite) o.geometry.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
+    }
+  });
+
   while (scene.children.length > 0) scene.remove(scene.children[0]);
   mazeWalls = []; enemies = []; lights = []; flickerTimers = [];
+  ammoPickups = [];
   bossEntity = null;
   bossProjectiles = [];
 
   const theme = getTheme(currentFloor);
+
+  // Boss arenas are built TALL so the full boss sprite (2.0 * bossScale meters:
+  // Warden 6m / Amalgam 7m / Hive 8m) fits below the ceiling instead of being
+  // depth-clipped by it. Normal floors keep the standard claustrophobic WALL_H.
+  // Only ceiling + wall geometry use roomH; lights/fixtures stay at WALL_H
+  // (wall-mount height) so floor lighting is identical to before.
+  const roomH = theme.isBoss ? Math.max(WALL_H, theme.bossScale * 2.0 + 0.8) : WALL_H;
 
   const wallTex = createWallTexture(theme);
   const floorTex = createFloorTexture(theme);
@@ -1231,17 +1371,17 @@ function buildMazeScene() {
   const ceilGeo = new THREE.PlaneGeometry(gw * CELL, gh * CELL);
   ceilGeo.rotateX(Math.PI / 2);
   const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
-  ceilMesh.position.set(gw * CELL / 2, WALL_H, gh * CELL / 2);
+  ceilMesh.position.set(gw * CELL / 2, roomH, gh * CELL / 2);
   scene.add(ceilMesh);
 
-  // Walls (instanced)
-  const wallGeo = new THREE.BoxGeometry(CELL, WALL_H, CELL);
+  // Walls (instanced) — roomH-tall on boss floors, WALL_H elsewhere
+  const wallGeo = new THREE.BoxGeometry(CELL, roomH, CELL);
   const matrices = [];
 
   for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
     if (mazeGrid[y][x] === 0) {
       const m = new THREE.Matrix4();
-      m.setPosition(x * CELL + CELL / 2, WALL_H / 2, y * CELL + CELL / 2);
+      m.setPosition(x * CELL + CELL / 2, roomH / 2, y * CELL + CELL / 2);
       matrices.push(m);
       mazeWalls.push({ minX: x * CELL, maxX: x * CELL + CELL, minZ: y * CELL, maxZ: y * CELL + CELL });
     }
@@ -1384,6 +1524,10 @@ function buildMazeScene() {
     exitLight = null;
   }
 
+  // Ammo pickups — seeded rng(), so keep this call AFTER generation and at a
+  // fixed point in the build order (determinism per floor seed).
+  spawnAmmoPickups();
+
   // Place player
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
   player.vel.set(0, 0, 0);
@@ -1402,8 +1546,10 @@ function buildMazeScene() {
   dangerLevel = 0;
   dangerSpawnTimer = LINGER_SPAWN_BASE;
 
-  // Force the next minimap tick to redraw: the maze changed but the signature
-  // (player spawn cell, empty enemy list) could match the previous floor's.
+  // New floor: wipe fog-of-war exploration and force the next minimap tick to
+  // redraw (the signature — player spawn cell, empty enemy list — could
+  // otherwise match the previous floor's).
+  resetSeenGrid();
   minimapSig = '';
 }
 
@@ -1663,6 +1809,12 @@ function playerShoot() {
       playerMoney += KILL_REWARD;
       playEnemyDeath();
 
+      // ~20% ammo drop where the enemy died (Math.random, not the seeded rng —
+      // combat outcomes aren't deterministic, so drops don't need to be either)
+      if (Math.random() < AMMO_DROP_CHANCE) {
+        createAmmoPickup(hitEnemy.pos.x, hitEnemy.pos.z);
+      }
+
       if (waveMobsLeft <= 0 && !isBossFloor(currentFloor)) {
         currentWave++;
         updateHUD();
@@ -1839,17 +1991,84 @@ const MINIMAP_INTERVAL = 0.1; // seconds between redraw checks (10 Hz)
 let minimapAccum = 0;
 let minimapSig = ''; // signature of everything drawn last time ('' = force redraw)
 
+/* ── MINIMAP MODE + FOG OF WAR ──
+   'fog' (default): cells start hidden, permanently revealed per-floor as the
+   player gets near them; blips only show in revealed cells (the exit stays
+   hidden until discovered). 'always': pre-fog behavior. 'off': hidden.
+   Mode persists in localStorage; the seen-grid resets every floor. */
+const MINIMAP_MODE_KEY = 'backrooms_minimap_mode';
+const MINIMAP_MODES = ['fog', 'always', 'off'];
+const MINIMAP_MODE_LABELS = { fog: 'Fog of War', always: 'Always On', off: 'Off' };
+let minimapMode = (() => {
+  try {
+    const v = localStorage.getItem(MINIMAP_MODE_KEY);
+    return MINIMAP_MODES.includes(v) ? v : 'fog';
+  } catch (e) { return 'fog'; }
+})();
+
+let seenGrid = null;      // per-floor; seenGrid[y][x] = player has been near cell
+const REVEAL_RADIUS = 2;  // cells (~8m) revealed around the player each tick
+
+function resetSeenGrid() {
+  seenGrid = mazeGrid.map(row => row.map(() => false));
+}
+
+// Mark cells around the player as seen. Runs on the 10Hz minimap tick in EVERY
+// mode (even 'off'/'always'), so exploration is fully tracked if the player
+// switches to fog mid-floor. ~20 cells per tick — negligible.
+function markSeenAroundPlayer() {
+  if (!seenGrid) return;
+  const gh = seenGrid.length, gw = seenGrid[0].length;
+  const pcx = Math.floor(player.pos.x / CELL), pcy = Math.floor(player.pos.z / CELL);
+  for (let dy = -REVEAL_RADIUS; dy <= REVEAL_RADIUS; dy++) {
+    for (let dx = -REVEAL_RADIUS; dx <= REVEAL_RADIUS; dx++) {
+      if (dx * dx + dy * dy > REVEAL_RADIUS * REVEAL_RADIUS + 1) continue; // round-ish reveal
+      const nx = pcx + dx, ny = pcy + dy;
+      if (nx >= 0 && nx < gw && ny >= 0 && ny < gh) seenGrid[ny][nx] = true;
+    }
+  }
+}
+
+// Is this WORLD position in a revealed cell? Always true outside fog mode, so
+// the blip-drawing code below needs no per-mode branches.
+function isCellSeen(wx, wz) {
+  if (minimapMode !== 'fog') return true;
+  if (!seenGrid) return false;
+  const cx = Math.floor(wx / CELL), cy = Math.floor(wz / CELL);
+  return cy >= 0 && cy < seenGrid.length && cx >= 0 && cx < seenGrid[0].length && seenGrid[cy][cx];
+}
+
+function setMinimapMode(mode) {
+  if (!MINIMAP_MODES.includes(mode)) return;
+  minimapMode = mode;
+  try { localStorage.setItem(MINIMAP_MODE_KEY, mode); } catch (e) {}
+  const container = document.querySelector('.minimap-container');
+  if (container) container.style.display = (mode === 'off') ? 'none' : '';
+  const btn = document.getElementById('btnMinimapMode');
+  if (btn) btn.textContent = MINIMAP_MODE_LABELS[mode];
+  minimapSig = ''; // force a redraw under the new mode
+}
+
 function updateMinimap(dt) {
   minimapAccum += dt;
   if (minimapAccum < MINIMAP_INTERVAL) return;
   minimapAccum = 0;
 
+  markSeenAroundPlayer(); // track exploration in every mode (see comment above)
+  if (minimapMode === 'off') return;
+
   // Cheap change signature. Positions are quantized (~canvas-pixel precision),
-  // so sub-visible jitter doesn't count as a change.
-  let sig = player.pos.x.toFixed(1) + ',' + player.pos.z.toFixed(1) + ',' + player.yaw.toFixed(2);
-  for (const e of enemies) if (e.alive) sig += '|' + e.pos.x.toFixed(1) + ',' + e.pos.z.toFixed(1);
-  if (bossEntity && bossEntity.alive) sig += '|B' + bossEntity.pos.x.toFixed(1) + ',' + bossEntity.pos.z.toFixed(1);
-  if (exitZone) sig += '|E' + exitZone.x + ',' + exitZone.z;
+  // so sub-visible jitter doesn't count as a change. Only VISIBLE blips are
+  // included: in fog mode an enemy roaming unseen cells can't dirty the map,
+  // and the exit joins the signature the moment it's discovered.
+  let sig = minimapMode + '|' + player.pos.x.toFixed(1) + ',' + player.pos.z.toFixed(1) + ',' + player.yaw.toFixed(2);
+  for (const e of enemies) {
+    if (e.alive && isCellSeen(e.pos.x, e.pos.z)) sig += '|' + e.pos.x.toFixed(1) + ',' + e.pos.z.toFixed(1);
+  }
+  if (bossEntity && bossEntity.alive && isCellSeen(bossEntity.pos.x, bossEntity.pos.z)) {
+    sig += '|B' + bossEntity.pos.x.toFixed(1) + ',' + bossEntity.pos.z.toFixed(1);
+  }
+  if (exitZone && isCellSeen(exitZone.x, exitZone.z)) sig += '|E' + exitZone.x + ',' + exitZone.z;
   if (sig === minimapSig) return;
   minimapSig = sig;
 
@@ -1866,10 +2085,13 @@ function updateMinimap(dt) {
 
   const cellW = w / gw, cellH = h / gh;
 
-  // Draw maze cells
+  // Draw maze cells (fog mode: unrevealed cells are near-black voids)
+  const fog = minimapMode === 'fog';
   for (let y = 0; y < gh; y++) {
     for (let x = 0; x < gw; x++) {
-      if (mazeGrid[y][x] === 1) {
+      if (fog && !seenGrid[y][x]) {
+        ctx.fillStyle = 'rgba(0,0,0,0.88)';
+      } else if (mazeGrid[y][x] === 1) {
         ctx.fillStyle = 'rgba(60,80,60,0.4)';
       } else {
         ctx.fillStyle = 'rgba(20,30,20,0.7)';
@@ -1888,8 +2110,8 @@ function updateMinimap(dt) {
     ctx.beginPath(); ctx.moveTo(0, y * cellH); ctx.lineTo(w, y * cellH); ctx.stroke();
   }
 
-  // Exit zone
-  if (exitZone) {
+  // Exit zone — in fog mode, hidden until the player has discovered its cell
+  if (exitZone && isCellSeen(exitZone.x, exitZone.z)) {
     const ex = exitZone.x / CELL * cellW;
     const ez = exitZone.z / CELL * cellH;
     ctx.beginPath();
@@ -1903,9 +2125,9 @@ function updateMinimap(dt) {
     ctx.stroke();
   }
 
-  // Enemy blips
+  // Enemy blips — only inside revealed cells
   for (const e of enemies) {
-    if (!e.alive) continue;
+    if (!e.alive || !isCellSeen(e.pos.x, e.pos.z)) continue;
     const ex = e.pos.x / CELL * cellW;
     const ez = e.pos.z / CELL * cellH;
     ctx.beginPath();
@@ -1914,8 +2136,8 @@ function updateMinimap(dt) {
     ctx.fill();
   }
 
-  // Boss blip
-  if (bossEntity && bossEntity.alive) {
+  // Boss blip — only once its cell has been revealed
+  if (bossEntity && bossEntity.alive && isCellSeen(bossEntity.pos.x, bossEntity.pos.z)) {
     const bx = bossEntity.pos.x / CELL * cellW;
     const bz = bossEntity.pos.z / CELL * cellH;
     ctx.beginPath();
@@ -2120,7 +2342,7 @@ function startGame() {
   document.getElementById('bossHpContainer').style.opacity = '0';
 
   gameState = 'playing';
-  document.body.requestPointerLock();
+  tryPointerLock(); // same cooldown applies on a fast quit→restart
   updateHUD();
   updateFlashlightHUD();
   showFloorAnnounce();
@@ -2129,6 +2351,18 @@ function startGame() {
   } else {
     setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
   }
+}
+
+// Request pointer lock, tolerating failure. Chrome enforces a ~1.25s cooldown
+// after an Esc-release; a request inside that window is REJECTED (it fires
+// 'pointerlockerror', NOT 'pointerlockchange'), which used to strand the game
+// in 'playing' with a free cursor and no way back. Failures are recovered by
+// the click-to-relock fallback in the mousedown handler.
+function tryPointerLock() {
+  const p = document.body.requestPointerLock();
+  // Modern Chrome returns a Promise; swallow the cooldown rejection (the
+  // pointerlockerror event + click fallback handle recovery).
+  if (p && typeof p.catch === 'function') p.catch(() => {});
 }
 
 function pauseGame() {
@@ -2142,7 +2376,7 @@ function resumeGame() {
   if (gameState !== 'paused') return;
   gameState = 'playing';
   document.getElementById('pauseMenu').style.display = 'none';
-  document.body.requestPointerLock();
+  tryPointerLock(); // may fail inside Chrome's post-Esc cooldown → click re-locks
 }
 
 function gameOver() {
@@ -2248,7 +2482,16 @@ document.addEventListener('mousemove', e => {
 document.addEventListener('mousedown', e => {
   if (e.button === 0) {
     mouseDown = true;
-    if (gameState === 'playing' && document.pointerLockElement === document.body) playerShoot();
+    if (gameState === 'playing') {
+      if (document.pointerLockElement === document.body) {
+        playerShoot();
+      } else {
+        // FALLBACK: playing but not locked — happens when resumeGame's relock
+        // was rejected by Chrome's post-Esc cooldown. Clicking the game area
+        // re-acquires the lock (this click does NOT fire a shot).
+        tryPointerLock();
+      }
+    }
   }
   if (e.button === 2) {
     rightMouseDown = true;
@@ -2268,6 +2511,13 @@ document.addEventListener('contextmenu', e => { e.preventDefault(); });
 
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement !== document.body && gameState === 'playing') pauseGame();
+});
+
+// Fires when a lock request is rejected (typically Chrome's ~1.25s post-Esc
+// cooldown). No state change needed — the game is either paused (menu visible)
+// or playing-unlocked, where the mousedown fallback re-requests on next click.
+document.addEventListener('pointerlockerror', () => {
+  console.warn('[pointerlock] request rejected (browser cooldown?) — click the game area to re-lock.');
 });
 
 document.getElementById('btnStart').addEventListener('click', startGame);
@@ -2342,6 +2592,24 @@ if (!DEV_MODE) {
   const _fps = document.getElementById('hudFps'); if (_fps) _fps.style.display = 'none';
   const _st = document.getElementById('hudStats'); if (_st) _st.style.display = 'none';
 }
+
+/* ════ PAUSE-MENU SETTINGS: minimap mode + gun sound (both persisted) ════ */
+// Cycle Fog of War → Always On → Off. setMinimapMode persists + syncs the label.
+document.getElementById('btnMinimapMode').addEventListener('click', () => {
+  const next = MINIMAP_MODES[(MINIMAP_MODES.indexOf(minimapMode) + 1) % MINIMAP_MODES.length];
+  setMinimapMode(next);
+});
+// Cycle Sharp → Heavy → Suppressed, then TEST-FIRE the new sound immediately
+// (no-op before the first game start, when the AudioContext doesn't exist yet).
+document.getElementById('btnGunSound').addEventListener('click', () => {
+  const next = GUN_SOUND_MODES[(GUN_SOUND_MODES.indexOf(gunSoundMode) + 1) % GUN_SOUND_MODES.length];
+  setGunSoundMode(next);
+  document.getElementById('btnGunSound').textContent = GUN_SOUND_LABELS[gunSoundMode];
+  playGunshot(); // instant preview of the selected variant
+});
+// Sync both buttons + minimap visibility with the persisted choices at load.
+setMinimapMode(minimapMode);
+document.getElementById('btnGunSound').textContent = GUN_SOUND_LABELS[gunSoundMode];
 
 // Volume sliders → audio gain nodes (sliders are 0–100, gains are 0–1)
 document.getElementById('sliderVolMaster').addEventListener('input', e => {
@@ -2533,6 +2801,7 @@ function animate() {
     updateHUDTimers(dt);
     updateAmbient(dt);
     updateBulletTrails(dt);
+    updateAmmoPickups(dt);
     updateHUD();
   }
 

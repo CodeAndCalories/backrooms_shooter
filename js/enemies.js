@@ -228,8 +228,11 @@ const MODEL_DEFS = {
   // (or tweak) per-model if a model turns out to already face +Z.
   crawler:        { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
   danger_crawler: { url: 'models/bacteria_-_kane_pixels_backrooms.glb', height: 2.6, faceOffset: Math.PI },
-  stalker:        { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI },
-  danger_stalker: { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: Math.PI },
+  // skinstealer faceOffset is 0 (was Math.PI): the optimization pass stripped its
+  // skinning, and the un-skinned mesh renders 180° from how the SkinnedMesh did
+  // (node-chain rotations apply where joint matrices used to override them).
+  stalker:        { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: 0 },
+  danger_stalker: { url: 'models/escape_the_backrooms_skinstealer.glb', height: 2.2, faceOffset: 0 },
   // phantom → floating death-moths. `float` (m) = hover height of the model's CENTER;
   // its presence also tells instanceMobModel to center the model vertically (not plant
   // feet at y=0) so it bobs in the air rather than standing on the floor.
@@ -553,8 +556,12 @@ function spawnBoss() {
   // clean — no rectangle/halo around the boss. depthWrite:false keeps sprite sorting.
   const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, alphaTest: 0.1, depthWrite: false });
   const mesh = new THREE.Sprite(mat);
-  
-  mesh.scale.set(sc * 4.0, sc * 4.0, 1);
+
+  // Quad height = bh (the boss's intended body height, 2.0*scale), centered at
+  // bh/2 → feet at y=0, head at y=bh. The old sc*4.0 made the quad TWICE the
+  // body height, sinking half of it below the floor (only the legs showed).
+  // The full height fits because buildMazeScene raises boss-arena ceilings.
+  mesh.scale.set(bh, bh, 1);
   mesh.position.set(bx, bh / 2, bz);
   scene.add(mesh);
 
@@ -732,6 +739,7 @@ function updateBossProjectiles(dt) {
     const dy = p.pos.y - player.pos.y;
     if (Math.sqrt(dx * dx + dz * dz + dy * dy) < 1.0) {
       damagePlayer(p.damage, p.pos);
+      p.mesh.geometry.dispose(); p.mesh.material.dispose(); // per-projectile resources
       scene.remove(p.mesh);
       bossProjectiles.splice(i, 1);
       continue;
@@ -744,6 +752,7 @@ function updateBossProjectiles(dt) {
     }
 
     if (p.life <= 0 || hitWall) {
+      p.mesh.geometry.dispose(); p.mesh.material.dispose(); // per-projectile resources
       scene.remove(p.mesh);
       bossProjectiles.splice(i, 1);
     }
@@ -770,11 +779,15 @@ function damageBoss(amount) {
       b.deathTimer += 0.016;
       b.mesh.material.opacity = Math.max(0, 1 - b.deathTimer * 1.5);
       b.mesh.material.transparent = true;
-      b.mesh.scale.y = Math.max(0.01, 1 - b.deathTimer * 2);
-      b.mesh.position.y = b.height / 2 * b.mesh.scale.y;
+      // quad scale.y is in world meters (b.height tall when alive) — collapse
+      // from FULL height, not from 1 (which would snap a 6-8m boss to 1m)
+      const squash = Math.max(0.01, 1 - b.deathTimer * 2);
+      b.mesh.scale.y = b.height * squash;
+      b.mesh.position.y = b.height / 2 * squash;
       if (b.deathTimer < 1.0) {
         requestAnimationFrame(deathAnim);
       } else {
+        disposeMobVisual(b.mesh); // per-instance sprite material; shared boss texture untouched
         scene.remove(b.mesh);
         document.getElementById('bossHpContainer').style.opacity = '0';
         // Create exit after boss dies
@@ -826,15 +839,13 @@ function spawnWave() {
   // Spider joins the wave rotation only from floor index 8 onward (the in-game "LEVEL 9"+),
   // so it's a later-game threat. Lower SPIDER_MIN_FLOOR to make it appear earlier.
   const SPIDER_MIN_FLOOR = 8;
-  const types = currentFloor >= SPIDER_MIN_FLOOR
-    ? ['stalker', 'crawler', 'phantom', 'spider']
-    : ['stalker', 'crawler', 'phantom'];
-  // Partygoer: spawns ONLY on Level Fun (floor 5) — weight it heavily so it makes up
-  // ~half the party. (Spawn uses round-robin over `types`, so repeating an entry raises
-  // its share.) Floor 5's base pool has 3 entries, so 3 partygoers → exactly half.
-  if (currentFloor === 5) {
-    types.push('partygoer', 'partygoer', 'partygoer');
-  }
+  // Level Fun (theme id 5, incl. looped repeats): the party is EXCLUSIVELY
+  // partygoers — no stalkers/crawlers/phantoms crash it.
+  const types = getTheme(currentFloor).id === 5
+    ? ['partygoer']
+    : currentFloor >= SPIDER_MIN_FLOOR
+      ? ['stalker', 'crawler', 'phantom', 'spider']
+      : ['stalker', 'crawler', 'phantom'];
   for (let i = 0; i < count; i++) {
     const t = types[i % types.length];
     setTimeout(() => {
@@ -843,8 +854,15 @@ function spawnWave() {
   }
 }
 
-// Anti-linger: spawn from behind player
+// Anti-linger: spawn from behind player. On Level Fun the escalation mobs are
+// ALSO partygoers (the floor's only mob — more guests keep arriving); the
+// escalating spawn RATE still provides the linger pressure. Everywhere else:
+// danger variants as before.
 function spawnDangerMob() {
+  const types = getTheme(currentFloor).id === 5
+    ? ['partygoer']
+    : ['danger_stalker', 'danger_crawler'];
+
   const behindAngle = player.yaw + Math.PI + (Math.random() - 0.5) * 1.0;
   const spawnDist = CELL * 5 + Math.random() * CELL * 3;
   const sx = player.pos.x + Math.sin(behindAngle) * spawnDist;
@@ -854,11 +872,9 @@ function spawnDangerMob() {
   const gh = mazeGrid.length, gw = mazeGrid[0].length;
   const cx = Math.floor(sx / CELL), cy = Math.floor(sz / CELL);
   if (cx >= 0 && cx < gw && cy >= 0 && cy < gh && mazeGrid[cy][cx] === 1) {
-    const types = ['danger_stalker', 'danger_crawler'];
     spawnEnemy(types[Math.floor(Math.random() * types.length)], { x: sx, z: sz });
   } else {
     // Fallback: spawn normally
-    const types = ['danger_stalker', 'danger_crawler'];
     spawnEnemy(types[Math.floor(Math.random() * types.length)]);
   }
 }
@@ -920,6 +936,7 @@ function updateEnemies(dt) {
         e.mesh.position.y = (e.scale * 2.5) / 2 * squashY;
       }
       if (e.deathTimer > 0.7) {
+        disposeMobVisual(e.mesh); // free per-instance materials (+ wire geometry); shared GLB/sprite resources untouched
         scene.remove(e.mesh);
         enemies.splice(i, 1);
       }

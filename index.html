@@ -47,7 +47,7 @@
   <div class="menu-subtitle">They know where you are</div>
   
   <div style="margin: 20px 0; width: 300px; text-align: left; background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid #444; border-radius: 4px;">
-    <div style="color: #d4c36a; margin-bottom: 15px; font-weight: bold; text-align: center; letter-spacing: 2px;">AUDIO SETTINGS</div>
+    <div style="color: #d4c36a; margin-bottom: 15px; font-weight: bold; text-align: center; letter-spacing: 2px;">SETTINGS</div>
     
     <label style="color: #ccc; font-size: 0.9em; display: flex; justify-content: space-between; margin-bottom: 5px;">
       Master Volume <span id="lblVolMaster">100%</span>
@@ -63,6 +63,19 @@
       Ambient Volume <span id="lblVolAmbient">60%</span>
     </label>
     <input type="range" id="sliderVolAmbient" min="0" max="100" value="60" style="width: 100%; cursor: pointer;">
+
+    <div style="border-top: 1px solid #333; margin: 15px 0 12px;"></div>
+
+    <!-- Cycle buttons: click to advance Fog of War → Always On → Off (resp.
+         Sharp → Heavy → Suppressed). Labels kept in sync + persisted by main.js. -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+      <span style="color: #ccc; font-size: 0.9em;">Minimap</span>
+      <button id="btnMinimapMode" class="setting-cycle-btn">Fog of War</button>
+    </div>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <span style="color: #ccc; font-size: 0.9em;">Gun Sound</span>
+      <button id="btnGunSound" class="setting-cycle-btn">Sharp</button>
+    </div>
   </div>
 
   <button class="menu-btn" id="btnShop">Black Market</button>
