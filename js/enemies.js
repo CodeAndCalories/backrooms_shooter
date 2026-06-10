@@ -242,15 +242,35 @@ const MODEL_DEFS = {
 };
 const modelCache = {}; // url -> { scene, rigged } on success, or null on failure
 
-// Preload every unique GLB ONCE (call during init/loading). Non-blocking: spawns
-// before a model finishes loading just use the fallback placeholder.
-function preloadMobModels() {
+// Preload every unique GLB ONCE (call during init/loading). main.js keeps the
+// loading screen up until onComplete fires, so mobs can no longer spawn as
+// fallbacks just because the network was slow — the one localhost-vs-deployed
+// gameplay difference. onProgress(0..1) drives the loading bar: byte-accurate
+// per file when the server sends a length (Vercel does), file-count otherwise.
+// onComplete ALWAYS fires, success or failure: a 404/parse error falls back to
+// placeholder visuals per-model, it never blocks the game from starting.
+function preloadMobModels(onProgress, onComplete) {
+  const done = () => { if (onComplete) onComplete(); };
   if (typeof THREE.GLTFLoader === 'undefined') {
     console.warn('[models] GLTFLoader not present — mobs will use placeholders.');
+    done();
     return;
   }
   const loader = new THREE.GLTFLoader();
   const urls = Array.from(new Set(Object.values(MODEL_DEFS).map(d => d.url)));
+  let remaining = urls.length;
+  const fileProgress = {}; // url -> 0..1
+  const report = () => {
+    if (!onProgress) return;
+    let sum = 0;
+    for (const u of urls) sum += fileProgress[u] || 0;
+    onProgress(sum / urls.length);
+  };
+  const settle = url => {
+    fileProgress[url] = 1;
+    report();
+    if (--remaining === 0) done();
+  };
   urls.forEach(url => {
     loader.load(
       url,
@@ -259,9 +279,14 @@ function preloadMobModels() {
         gltf.scene.traverse(o => { if (o.isSkinnedMesh) rigged = true; });
         modelCache[url] = { scene: gltf.scene, rigged };
         console.log('[models] loaded', url, rigged ? '(rigged)' : '(static)');
+        settle(url);
       },
-      undefined,
-      err => { modelCache[url] = null; console.warn('[models] FAILED', url, '— using placeholder.', err); }
+      xhr => {
+        // download progress only; parse time after the last byte is negligible.
+        // Cap below 1 so a file only reads "done" once it has actually settled.
+        if (xhr.total > 0) { fileProgress[url] = Math.min(0.99, xhr.loaded / xhr.total); report(); }
+      },
+      err => { modelCache[url] = null; console.warn('[models] FAILED', url, '— using placeholder.', err); settle(url); }
     );
   });
 }
@@ -365,11 +390,11 @@ function buildSpriteMob(type, scale) {
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(scale * 2.5, scale * 2.5, 1);
 
-  // faint red atmosphere light (as before)
-  const eyeLight = new THREE.PointLight(0xff2200, 0.2, 4);
-  eyeLight.position.set(0, 0, 0.5);
-  sprite.add(eyeLight);
-
+  // NO per-mob PointLight (was a faint red "eyeLight"). SpriteMaterial is unlit,
+  // so the mob itself renders full-bright with or without it — the light only
+  // tinted nearby walls. The real cost: every spawn/death changed the scene's
+  // LIGHT COUNT, and three.js compiles a new shader variant per light count
+  // (a visible hitch) while every extra light adds per-fragment cost scene-wide.
   return sprite;
 }
 
@@ -378,8 +403,8 @@ function buildSpriteMob(type, scale) {
 // All body parts SHARE one dark material (6 body meshes + 1 glowing eye = 7 meshes
 // total) instead of the old 80-tube / 80-material build. This is a stand-in until
 // real 3D models are loaded through the same buildMobModel() seam; keep the name,
-// the ~2.5m height, feet-at-y=0, and the userData.core/coreLight refs so the
-// existing hit-flash and death/fade code keep working unchanged.
+// the ~2.5m height, feet-at-y=0, and the userData.core ref so the existing
+// hit-flash and death/fade code keep working unchanged.
 function buildWiremonster(scale) {
   const group = new THREE.Group();
 
@@ -406,8 +431,11 @@ function buildWiremonster(scale) {
   head.position.y = 2.25;
   group.add(head);
 
-  // Glowing red core "eye" on the head (own basic material so flash code skips it
-  // and it always reads as a glow). Kept as userData.core for death/flash refs.
+  // Glowing red core "eye" on the head. MeshBasicMaterial ignores lighting, so it
+  // reads as a glow on its own — NO PointLight behind it anymore (the old coreLight
+  // changed the scene's light count on every spawn/death → shader-recompile hitch
+  // plus scene-wide per-fragment cost). Hit-flash now whitens the core's color
+  // (see setMobFlash) instead of pulsing the removed light.
   const core = new THREE.Mesh(
     new THREE.SphereGeometry(0.06, 8, 8),
     new THREE.MeshBasicMaterial({ color: 0xff4040 })
@@ -415,13 +443,7 @@ function buildWiremonster(scale) {
   core.position.set(0, 2.28, 0.17);
   group.add(core);
 
-  const coreLight = new THREE.PointLight(0xff2020, 0.6, 3);
-  coreLight.position.copy(core.position);
-  group.add(coreLight);
-
   group.userData.core = core;
-  group.userData.coreLight = coreLight;
-  group.userData.coreBaseIntensity = 0.6;
 
   group.scale.setScalar(scale);
   return group;
@@ -436,9 +458,10 @@ function setMobFlash(enemy, on) {
         o.material.emissive.setHex(on ? 0xff0000 : 0x000000);
       }
     });
-    if (mesh.userData.coreLight) {
-      const base = mesh.userData.coreBaseIntensity || 0.6;
-      mesh.userData.coreLight.intensity = on ? base * 4 : base;
+    // Wire-figure core: flash the unlit eye white (replaces the old coreLight
+    // intensity pulse — the light itself is gone, see buildWiremonster).
+    if (mesh.userData.core) {
+      mesh.userData.core.material.color.setHex(on ? 0xffffff : 0xff4040);
     }
   } else {
     // sprite mobs: tint the sprite material (SpriteMaterial has no emissive)

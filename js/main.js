@@ -451,6 +451,12 @@ const BOSS_KILL_REWARD = 500;
 // Bullet trails
 let bulletTrails = [];
 
+// Model preload gate. The loading screen (z-index above the menu) stays up until
+// every mob GLB has SETTLED (loaded or failed), so first-visit players on slow
+// connections wait a few seconds instead of fighting fallback mobs. startGame
+// also checks this flag as a backstop in case the overlay is ever bypassed.
+let modelsReady = false;
+
 // Shop upgrades state
 let shopUpgrades = {
   damage1:   { name: 'Hardened Rounds',   desc: 'Increase bullet damage by 30%',          cost: 200,  bought: false, apply: () => { shopStats.damageMult = 1.3; } },
@@ -1395,6 +1401,10 @@ function buildMazeScene() {
   floorTimer = 0;
   dangerLevel = 0;
   dangerSpawnTimer = LINGER_SPAWN_BASE;
+
+  // Force the next minimap tick to redraw: the maze changed but the signature
+  // (player spawn cell, empty enemy list) could match the previous floor's.
+  minimapSig = '';
 }
 
 function addDecorations(theme, gw, gh) {
@@ -1600,7 +1610,7 @@ function playerShoot() {
       spawnBulletTrail(gunTip, trailEnd);
 
       if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-        document.getElementById('ammoWarning').style.opacity = '1';
+        hudSetStyle('ammoWarning', 'opacity', '1');
       }
       updateHUD();
       return;
@@ -1665,7 +1675,7 @@ function playerShoot() {
   spawnBulletTrail(gunTip, trailEnd);
 
   if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-    document.getElementById('ammoWarning').style.opacity = '1';
+    hudSetStyle('ammoWarning', 'opacity', '1');
   }
   updateHUD();
 }
@@ -1676,13 +1686,19 @@ function playerReload() {
   player.reloadTimer = RELOAD_TIME;
   playReload();
   document.getElementById('reloadBarContainer').style.opacity = '1';
-  document.getElementById('ammoWarning').style.opacity = '0';
+  hudSetStyle('ammoWarning', 'opacity', '0');
 }
 
+// Module-level scratch vectors for updatePlayer — allocated once and reused
+// every frame instead of 3 fresh Vector3s per frame (GC pressure in the loop).
+const _tmpForward = new THREE.Vector3();
+const _tmpRight = new THREE.Vector3();
+const _tmpMoveDir = new THREE.Vector3();
+
 function updatePlayer(dt) {
-  const forward = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
-  const right = new THREE.Vector3(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
-  const moveDir = new THREE.Vector3();
+  const forward = _tmpForward.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  const right = _tmpRight.set(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
+  const moveDir = _tmpMoveDir.set(0, 0, 0);
 
   if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(forward);
   if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
@@ -1815,8 +1831,28 @@ function showFloorAnnounce() {
 
 /* ═══════════════════════════════════════════
    MINIMAP
+   Redrawn at most 10x/sec, and within a tick ONLY if something it shows has
+   actually changed (player pose, alive blips, boss, exit). A full redraw is
+   up to ~1.7k canvas fillRects on big floors — far too much to run at 144Hz.
    ═══════════════════════════════════════════ */
-function updateMinimap() {
+const MINIMAP_INTERVAL = 0.1; // seconds between redraw checks (10 Hz)
+let minimapAccum = 0;
+let minimapSig = ''; // signature of everything drawn last time ('' = force redraw)
+
+function updateMinimap(dt) {
+  minimapAccum += dt;
+  if (minimapAccum < MINIMAP_INTERVAL) return;
+  minimapAccum = 0;
+
+  // Cheap change signature. Positions are quantized (~canvas-pixel precision),
+  // so sub-visible jitter doesn't count as a change.
+  let sig = player.pos.x.toFixed(1) + ',' + player.pos.z.toFixed(1) + ',' + player.yaw.toFixed(2);
+  for (const e of enemies) if (e.alive) sig += '|' + e.pos.x.toFixed(1) + ',' + e.pos.z.toFixed(1);
+  if (bossEntity && bossEntity.alive) sig += '|B' + bossEntity.pos.x.toFixed(1) + ',' + bossEntity.pos.z.toFixed(1);
+  if (exitZone) sig += '|E' + exitZone.x + ',' + exitZone.z;
+  if (sig === minimapSig) return;
+  minimapSig = sig;
+
   const canvas = document.getElementById('minimapCanvas');
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
@@ -1922,30 +1958,46 @@ function updateMinimap() {
 
 /* ═══════════════════════════════════════════
    HUD
+   updateHUD runs EVERY frame, so all writes go through change-detecting setters:
+   element refs are looked up once, and the DOM is only touched when the string
+   actually differs from what was last written. Steady-state frames (full
+   stamina, no kills) cost zero DOM writes / zero style recalcs.
+   NOTE: anything else that writes one of these same properties must use these
+   setters too (see playerShoot/playerReload), or the cache goes stale and a
+   later updateHUD write gets skipped.
    ═══════════════════════════════════════════ */
+const _hudEls = {};
+const _hudCache = {};
+function hudEl(id) { return _hudEls[id] || (_hudEls[id] = document.getElementById(id)); }
+function hudSetText(id, v) { if (_hudCache['t:' + id] !== v) { _hudCache['t:' + id] = v; hudEl(id).textContent = v; } }
+function hudSetStyle(id, prop, v) {
+  const k = prop + ':' + id;
+  if (_hudCache[k] !== v) { _hudCache[k] = v; hudEl(id).style[prop] = v; }
+}
+
 function updateHUD() {
   const theme = getTheme(currentFloor);
-  document.getElementById('healthFill').style.width = (player.health / shopStats.maxHealth * 100) + '%';
-  document.getElementById('staminaFill').style.width = (player.stamina / MAX_STAMINA * 100) + '%';
-  document.getElementById('ammoCurrent').textContent = player.clipAmmo;
-  document.getElementById('ammoReserve').textContent = '/ ' + player.reserveAmmo;
-  document.getElementById('hudFloor').textContent = 'Level ' + currentFloor;
-  document.getElementById('hudLevelName').textContent = theme.name;
-  document.getElementById('hudWave').textContent = theme.isBoss ? 'BOSS' : 'Wave ' + currentWave;
-  document.getElementById('hudKills').textContent = 'Kills: ' + player.kills;
-  document.getElementById('hudMoney').textContent = '$' + playerMoney;
+  // bar widths rounded to 0.1% so a slowly-regenerating stat doesn't produce a
+  // new string (= a new layout pass) on literally every frame
+  hudSetStyle('healthFill', 'width', (player.health / shopStats.maxHealth * 100).toFixed(1) + '%');
+  hudSetStyle('staminaFill', 'width', (player.stamina / MAX_STAMINA * 100).toFixed(1) + '%');
+  hudSetText('ammoCurrent', String(player.clipAmmo));
+  hudSetText('ammoReserve', '/ ' + player.reserveAmmo);
+  hudSetText('hudFloor', 'Level ' + currentFloor);
+  hudSetText('hudLevelName', theme.name);
+  hudSetText('hudWave', theme.isBoss ? 'BOSS' : 'Wave ' + currentWave);
+  hudSetText('hudKills', 'Kills: ' + player.kills);
+  hudSetText('hudMoney', '$' + playerMoney);
 
   const hpPct = player.health / shopStats.maxHealth;
-  const hpEl = document.getElementById('healthFill');
-  if (hpPct < 0.25) hpEl.style.background = 'linear-gradient(90deg,#ff0000,#ff2200)';
-  else if (hpPct < 0.55) hpEl.style.background = 'linear-gradient(90deg,#ff6622,#ffaa33)';
-  else hpEl.style.background = 'linear-gradient(90deg,#ff2222,#ff6644)';
+  let hpGrad;
+  if (hpPct < 0.25) hpGrad = 'linear-gradient(90deg,#ff0000,#ff2200)';
+  else if (hpPct < 0.55) hpGrad = 'linear-gradient(90deg,#ff6622,#ffaa33)';
+  else hpGrad = 'linear-gradient(90deg,#ff2222,#ff6644)';
+  hudSetStyle('healthFill', 'background', hpGrad);
 
-  if (player.clipAmmo === 0 && player.reserveAmmo > 0 && !player.isReloading) {
-    document.getElementById('ammoWarning').style.opacity = '1';
-  } else {
-    document.getElementById('ammoWarning').style.opacity = '0';
-  }
+  const warn = (player.clipAmmo === 0 && player.reserveAmmo > 0 && !player.isReloading) ? '1' : '0';
+  hudSetStyle('ammoWarning', 'opacity', warn);
 }
 
 function updateHUDTimers(dt) {
@@ -2017,6 +2069,8 @@ function updateLights(dt) {
    GAME FLOW
    ═══════════════════════════════════════════ */
 function startGame() {
+  if (!modelsReady) return; // preload gate backstop — loading screen still covers the menu
+
   initAudio();
   startAmbient();
 
@@ -2284,7 +2338,10 @@ function buildPlayerLevelSelect() {
 buildPlayerLevelSelect(); // initial build at load
 
 // PART 1: hide the FPS readout entirely unless ?dev=1 (the update is already gated).
-if (!DEV_MODE) { const _fps = document.getElementById('hudFps'); if (_fps) _fps.style.display = 'none'; }
+if (!DEV_MODE) {
+  const _fps = document.getElementById('hudFps'); if (_fps) _fps.style.display = 'none';
+  const _st = document.getElementById('hudStats'); if (_st) _st.style.display = 'none';
+}
 
 // Volume sliders → audio gain nodes (sliders are 0–100, gains are 0–1)
 document.getElementById('sliderVolMaster').addEventListener('input', e => {
@@ -2373,7 +2430,6 @@ document.getElementById('btnShopClose').addEventListener('click', () => {
 function init() {
   initSpriteTextures();
   loadBossSprites();  // swap procedural boss placeholders for custom PNGs (falls back if a PNG fails)
-  preloadMobModels(); // load real GLB mob models once; spawns clone from cache
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d0a04);
@@ -2397,9 +2453,24 @@ function init() {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // Loading complete
-  document.getElementById('loadBarFill').style.width = '100%';
-  setTimeout(() => { document.getElementById('loadingScreen').style.display = 'none'; }, 500);
+  // PRELOAD GATE: load every mob GLB before dropping the loading screen. The bar
+  // tracks real download bytes (~3.7 MB across 5 optimized models), so slow
+  // connections see honest progress instead of an instant fake "100%". onComplete
+  // fires even if a model 404s — that model keeps its placeholder; never blocks.
+  const loadText = document.querySelector('#loadingScreen .loading-text');
+  preloadMobModels(
+    frac => {
+      const pct = Math.round(frac * 100);
+      document.getElementById('loadBarFill').style.width = pct + '%';
+      if (loadText) loadText.textContent = 'Noclipping... ' + pct + '%';
+    },
+    () => {
+      modelsReady = true;
+      document.getElementById('loadBarFill').style.width = '100%';
+      if (loadText) loadText.textContent = 'Noclipping... 100%';
+      setTimeout(() => { document.getElementById('loadingScreen').style.display = 'none'; }, 400);
+    }
+  );
 
   animate();
 }
@@ -2418,6 +2489,32 @@ function updateFpsCounter(dt) {
   }
 }
 
+// DEV: extended renderer stats (?dev=1 only). renderer.info resets on every
+// renderer.render() call, so it must be sampled AFTER render, same frame.
+// The scene traversal for light counts only runs on the throttled refresh tick.
+let _statsAccum = 0;
+function updateRendererStats(dt) {
+  if (!DEV_MODE) return;
+  _statsAccum += dt;
+  if (_statsAccum < 0.5) return;
+  _statsAccum = 0;
+  const el = document.getElementById('hudStats');
+  if (!el) return;
+
+  let ptTotal = 0, ptLit = 0, spotOn = 0;
+  scene.traverse(o => {
+    if (o.isPointLight) { ptTotal++; if (o.visible && o.intensity > 0) ptLit++; }
+    else if (o.isSpotLight && o.visible) spotOn++;
+  });
+
+  const r = renderer.info.render, m = renderer.info.memory;
+  el.textContent =
+    `DRAW ${r.calls}  TRIS ${(r.triangles / 1000).toFixed(1)}k  PROG ${renderer.info.programs.length}\n` +
+    `GEO ${m.geometries}  TEX ${m.textures}  PTLIGHT ${ptLit}/${ptTotal}  SPOT ${spotOn}\n` +
+    `DPR ${window.devicePixelRatio.toFixed(2)}→${renderer.getPixelRatio().toFixed(2)}  ` +
+    `CANVAS ${renderer.domElement.width}x${renderer.domElement.height}`;
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const rawDt = clock.getDelta();        // true frame time (for the FPS readout)
@@ -2431,7 +2528,7 @@ function animate() {
     updateBoss(dt);
     updateBossProjectiles(dt);
     updateAntiLinger(dt);
-    updateMinimap();
+    updateMinimap(dt);
     updateLights(dt);
     updateHUDTimers(dt);
     updateAmbient(dt);
@@ -2440,6 +2537,7 @@ function animate() {
   }
 
   renderer.render(scene, camera);
+  updateRendererStats(rawDt);
 }
 
 init();
