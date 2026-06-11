@@ -56,7 +56,11 @@ const LEVEL_THEMES = [
     floorType: 'carpet',
     decorations: 'pillars',
     enemyTint: 0.0,
-    darknessLevel: 0
+    darknessLevel: 0,
+    // MOB ECOLOGY (see getThemeMobs/waveSizeFor): entry floor — few, weak, mostly
+    // crawlers with the odd phantom. Gentle on-ramp.
+    mobs: { types: ['crawler', 'phantom'], weights: [3, 1], danger: ['danger_crawler'],
+            speedMult: 1.0, hpMult: 0.8, countMult: 0.8, waveBase: 2, waveCap: 5 }
   },
   {
     id: 1,
@@ -76,7 +80,10 @@ const LEVEL_THEMES = [
     floorType: 'concrete',
     decorations: 'crates',
     enemyTint: 0.2,
-    darknessLevel: 0.3
+    darknessLevel: 0.3,
+    // Still an early floor: small mixed crawler/phantom waves, slightly less frail.
+    mobs: { types: ['crawler', 'phantom'], weights: [2, 2], danger: ['danger_crawler'],
+            speedMult: 1.0, hpMult: 0.85, countMult: 0.9, waveBase: 2, waveCap: 6 }
   },
   {
     id: 2,
@@ -96,7 +103,11 @@ const LEVEL_THEMES = [
     floorType: 'metal',
     decorations: 'pipes',
     enemyTint: 0.4,
-    darknessLevel: 0.6
+    darknessLevel: 0.6,
+    // STAT VARIANT floor: tight tunnels, FAST mobs (speedMult) but still weak —
+    // the scare is speed in confined space, not numbers.
+    mobs: { types: ['crawler', 'phantom'], weights: [3, 1], danger: ['danger_crawler'],
+            speedMult: 1.25, hpMult: 0.8, countMult: 0.85, waveBase: 2, waveCap: 6 }
   },
   {
     id: 3,
@@ -117,7 +128,10 @@ const LEVEL_THEMES = [
     floorType: 'tile',
     decorations: 'water',
     enemyTint: 0.6,
-    darknessLevel: 0.1
+    darknessLevel: 0.1,
+    // SIGNATURE: phantoms drifting over the water + crawlers wading the basins.
+    mobs: { types: ['phantom', 'crawler'], weights: [2, 2], danger: ['danger_crawler'],
+            speedMult: 1.0, hpMult: 1.0, countMult: 1.0, waveBase: 3, waveCap: 8 }
   },
   {
     id: 4,
@@ -163,7 +177,11 @@ const LEVEL_THEMES = [
     floorType: 'party',
     decorations: 'party',                         // balloons + candle-lit cake tables (see addDecorations)
     enemyTint: 0.8,
-    darknessLevel: 0.0
+    darknessLevel: 0.0,
+    // SIGNATURE: partygoers ONLY (anti-linger included — more guests keep arriving).
+    // STAT VARIANT: numerous-but-weak — the party swells, each guest is soft.
+    mobs: { types: ['partygoer'], weights: [1], danger: ['partygoer'],
+            speedMult: 1.0, hpMult: 0.7, countMult: 1.5, waveBase: 4, waveCap: 12 }
   },
   {
     id: 6,
@@ -183,7 +201,10 @@ const LEVEL_THEMES = [
     floorType: 'metal',
     decorations: 'pipes',
     enemyTint: 0.3,
-    darknessLevel: 0.8
+    darknessLevel: 0.8,
+    // Dark transformer maze: erratic phantoms flickering between the racks.
+    mobs: { types: ['phantom', 'crawler', 'stalker'], weights: [3, 2, 1], danger: ['danger_crawler', 'danger_stalker'],
+            speedMult: 1.1, hpMult: 1.0, countMult: 1.0, waveBase: 3, waveCap: 8 }
   },
   {
     id: 7,
@@ -201,7 +222,11 @@ const LEVEL_THEMES = [
     floorType: 'carpet',
     decorations: 'crates',
     enemyTint: 0.1,
-    darknessLevel: 0.4
+    darknessLevel: 0.4,
+    // SIGNATURE: facelings/stalkers (skinstealer model) looming in the fog —
+    // fewer mobs, taller silhouettes.
+    mobs: { types: ['stalker', 'phantom'], weights: [3, 1], danger: ['danger_stalker'],
+            speedMult: 1.0, hpMult: 1.0, countMult: 0.9, waveBase: 3, waveCap: 8 }
   },
   {
     id: 8,
@@ -219,7 +244,10 @@ const LEVEL_THEMES = [
     floorType: 'concrete',
     decorations: 'pillars',
     enemyTint: 0.5,
-    darknessLevel: 0.85
+    darknessLevel: 0.85,
+    // Mid-game gut check: mixed roster (spiders join here), a touch tankier.
+    mobs: { types: ['stalker', 'crawler', 'spider'], weights: [2, 2, 1], danger: ['danger_stalker', 'danger_crawler'],
+            speedMult: 0.95, hpMult: 1.15, countMult: 1.0, waveBase: 3, waveCap: 9 }
   },
   {
     id: 9,
@@ -264,7 +292,11 @@ const LEVEL_THEMES = [
     floorType: 'tile',
     decorations: 'crates',
     enemyTint: 0.2,
-    darknessLevel: 0.3
+    darknessLevel: 0.3,
+    // SIGNATURE: skinstealers (stalker model) stalking the wards + wretches
+    // (crawler/bacteria model) on the gurneys. The flagship stalker floor.
+    mobs: { types: ['stalker', 'crawler'], weights: [3, 2], danger: ['danger_stalker'],
+            speedMult: 1.05, hpMult: 1.1, countMult: 1.0, waveBase: 4, waveCap: 10 }
   },
   {
     id: 11,
@@ -282,7 +314,10 @@ const LEVEL_THEMES = [
     floorType: 'concrete',
     decorations: 'pillars',
     enemyTint: 0.4,
-    darknessLevel: 0.5
+    darknessLevel: 0.5,
+    // Overgrown: spiders in the foliage, quick skittering threats.
+    mobs: { types: ['spider', 'crawler', 'phantom'], weights: [2, 2, 1], danger: ['danger_crawler'],
+            speedMult: 1.1, hpMult: 1.0, countMult: 1.0, waveBase: 4, waveCap: 10 }
   },
   {
     id: 12,
@@ -300,7 +335,10 @@ const LEVEL_THEMES = [
     floorType: 'carpet',
     decorations: 'crates',
     enemyTint: 0.3,
-    darknessLevel: 0.6
+    darknessLevel: 0.6,
+    // Quiet stacks, things between the shelves: phantom-led, slightly hardened.
+    mobs: { types: ['phantom', 'stalker', 'spider'], weights: [2, 1, 1], danger: ['danger_stalker'],
+            speedMult: 1.0, hpMult: 1.05, countMult: 0.9, waveBase: 4, waveCap: 9 }
   },
   {
     id: 13,
@@ -318,7 +356,10 @@ const LEVEL_THEMES = [
     floorType: 'metal',
     decorations: 'pipes',
     enemyTint: 0.5,
-    darknessLevel: 0.75
+    darknessLevel: 0.75,
+    // STAT VARIANT floor: frozen-stiff mobs — SLOWER but much TANKIER. Kite or die.
+    mobs: { types: ['stalker', 'crawler', 'spider'], weights: [2, 1, 1], danger: ['danger_stalker'],
+            speedMult: 0.8, hpMult: 1.5, countMult: 0.85, waveBase: 4, waveCap: 8 }
   },
   {
     id: 14,
@@ -362,7 +403,11 @@ const LEVEL_THEMES = [
     floorType: 'metal',
     decorations: 'none',
     enemyTint: 0.4,
-    darknessLevel: 0.5
+    darknessLevel: 0.5,
+    // 1-cell aisle: SMALL waves only (countMult + low cap) — two crawlers in a
+    // bus aisle are plenty. Slightly hardened so each one matters.
+    mobs: { types: ['crawler', 'stalker'], weights: [2, 1], danger: ['danger_crawler'],
+            speedMult: 1.05, hpMult: 1.1, countMult: 0.7, waveBase: 3, waveCap: 6 }
   },
   {
     id: 16,
@@ -385,7 +430,11 @@ const LEVEL_THEMES = [
     floorType: 'tile',
     decorations: 'water',
     enemyTint: 0.7,
-    darknessLevel: 0.85
+    darknessLevel: 0.85,
+    // SIGNATURE: sparse — DREAD over density. Half-size waves, tiny cap, tanky
+    // phantoms over black water. The emptiness is the point.
+    mobs: { types: ['phantom', 'stalker'], weights: [2, 1], danger: ['danger_stalker'],
+            speedMult: 0.9, hpMult: 1.25, countMult: 0.5, waveBase: 2, waveCap: 4 }
   }
 ];
 
@@ -397,6 +446,36 @@ function isBossFloor(floor) {
   const theme = getTheme(floor);
   return theme.isBoss === true;
 }
+
+/* ═══════════════════════════════════════════
+   MOB ECOLOGY — per-theme spawn tables
+   Composition/pacing/stat-variants all read from LEVEL_THEMES[].mobs (data
+   only, no new mob types). Spawning itself stays HOST-only (spawnEnemy bails
+   on clients; mirrors come via snapshots), so none of this needs the seeded
+   rng — EXCEPT waveSizeFor, which killTarget derives from on EVERY machine
+   independently (co-op kill-gate) and therefore must stay deterministic.
+   ═══════════════════════════════════════════ */
+// Fallback for themes without a table — boss-floor adds spawn through
+// spawnEnemy too and get neutral multipliers from here.
+const DEFAULT_THEME_MOBS = {
+  types: ['stalker', 'crawler', 'phantom'], weights: [1, 1, 1],
+  danger: ['danger_stalker', 'danger_crawler'],
+  speedMult: 1.0, hpMult: 1.0, countMult: 1.0, waveBase: 3, waveCap: 10
+};
+function getThemeMobs(floor) { return getTheme(floor).mobs || DEFAULT_THEME_MOBS; }
+
+// Wave size: theme base + intra-floor wave ramp + depth ramp, theme-scaled and
+// capped (caps are the entity-budget guard; old global cap was 15).
+// DETERMINISTIC — no randomness allowed in here (see block comment above).
+function waveSizeFor(floor, wave) {
+  const M = getThemeMobs(floor);
+  const raw = (M.waveBase + (wave - 1) + floor * 0.5) * M.countMult;
+  return Math.max(2, Math.min(M.waveCap, Math.round(raw)));
+}
+
+// Breather between a cleared wave and the next: long on early floors,
+// tightening with depth. Anti-linger pressure is separate and unchanged.
+function waveRespiteMs(floor) { return Math.max(2500, 6500 - floor * 400); }
 
 /* ═══════════════════════════════════════════
    STATE
@@ -909,8 +988,9 @@ function generateMaze(w, h, theme) {
     }
   }
 
-  // 5. Spawn + exit anchors stay floor no matter what the rooms overwrote.
-  // (buildMazeScene spawns at (1,1) and searches the exit from (gw-2, gh-2).)
+  // 5. Spawn anchor (1,1) + far-corner anchor stay floor no matter what the
+  // rooms overwrote. (The exit is now seeded-random via pickExitCell; the
+  // far corner remains its degenerate-grid fallback.)
   mazeGrid[1][1] = 1;
   mazeGrid[gh - 2][gw - 2] = 1;
 
@@ -1041,7 +1121,8 @@ function generateLevel(theme, w, h) {
 // inset >=1 cell from the hall edge, so a dry tiled DECK rings every basin —
 // the deck network (value 1) alone is connected by construction (ring +
 // archways + grid-connected hall graph), so pools can never gate progress and
-// spawn (1,1) / exit (gw-2, gh-2) always sit on dry deck. Big pools sometimes
+// spawn (1,1) + the exit (pickExitCell draws from value-1 cells only) always
+// sit on dry deck. Big pools sometimes
 // keep a 1-cell deck BRIDGE across the middle (reads as a raised walkway
 // between two pools). Pool rects are recorded in poolRects for the renderer.
 // Grid contract grows: 0 = wall, 1 = deck floor, 2 = pool basin. Seeded rng()
@@ -1128,8 +1209,8 @@ function generatePools(w, h, theme) {
 // floor walled off from its neighbours, and every adjacent pair of rooms is linked by
 // 1-2 doorway gaps punched through the shared wall. Connecting EVERY adjacent pair makes
 // the room-adjacency graph a fully-connected grid → guaranteed flood-fill connected.
-// Same mazeGrid contract (0=wall, 1=floor); spawn (1,1) and exit (gw-2,gh-2) land inside
-// the first/last rooms. Deterministic via rng().
+// Same mazeGrid contract (0=wall, 1=floor); spawn (1,1) lands inside the first
+// room (the exit is seeded-random via pickExitCell). Deterministic via rng().
 function generateChambers(w, h, theme) {
   const gw = w * 2 + 1, gh = h * 2 + 1;
 
@@ -1151,7 +1232,8 @@ function generateChambers(w, h, theme) {
   const rowH = Math.floor((innerH - (rows - 1)) / rows);  // room height (1-cell wall between rows)
 
   // Room interior rectangles. The last col/row stretches to gw-2 / gh-2 to absorb any
-  // remainder, so the exit cell (gw-2, gh-2) is always inside the bottom-right room.
+  // remainder, so the far corner (pickExitCell's fallback) is always inside the
+  // bottom-right room.
   const rooms = []; // rooms[r][c] = {x0,x1,y0,y1}
   for (let r = 0; r < rows; r++) {
     rooms[r] = [];
@@ -1207,8 +1289,8 @@ function generateOpen(w, h) {
   for (let x = 0; x < gw; x++) { mazeGrid[0][x] = 0; mazeGrid[gh - 1][x] = 0; }
   for (let y = 0; y < gh; y++) { mazeGrid[y][0] = 0; mazeGrid[y][gw - 1] = 0; }
 
-  // Keep-out spots that must stay open: player spawn (1,1) and the exit corner
-  // that buildMazeScene searches from (gw-2, gh-2).
+  // Keep-out spots that must stay open: player spawn (1,1) and the far corner
+  // (pickExitCell's degenerate-grid fallback; the real exit is seeded-random).
   const keepClear = [{ x: 1, y: 1 }, { x: gw - 2, y: gh - 2 }];
   const CLEAR_PAD = 2;
   function hitsKeepout(hx, hy, hw, hh) {
@@ -1261,8 +1343,8 @@ function generateField(w, h) {
   for (let x = 0; x < gw; x++) { mazeGrid[0][x] = 0; mazeGrid[gh - 1][x] = 0; }
   for (let y = 0; y < gh; y++) { mazeGrid[y][0] = 0; mazeGrid[y][gw - 1] = 0; }
 
-  // Keep-out spots that must stay open: player spawn (1,1) and the exit corner
-  // that buildMazeScene searches from (gw-2, gh-2).
+  // Keep-out spots that must stay open: player spawn (1,1) and the far corner
+  // (pickExitCell's degenerate-grid fallback; the real exit is seeded-random).
   const keepClear = [{ x: 1, y: 1 }, { x: gw - 2, y: gh - 2 }];
   const CLEAR_PAD = 2;
   function hitsKeepout(hx, hy, hw, hh) {
@@ -1338,6 +1420,73 @@ function generateLinear(w, h) {
       mazeGrid[y + dy][gw - 2] = 0;     // right bench (x=3, against x=4 wall) — mirrored
     }
   }
+}
+
+/* ═══════════════════════════════════════════
+   EXIT PLACEMENT — seeded random, far from spawn
+   Replaces the old fixed corner search from (gw-2, gh-2): BFS the walkable
+   deck (mazeGrid === 1 — the same 4-neighbor space players move through, so
+   pool basins (2) are automatically excluded → dry deck) from spawn (1,1),
+   then draw with the seeded rng() from the top 25% of reachable cells by
+   path distance. 'linear' floors restrict to the rear-clearance rows that
+   generateLinear keeps seat-free, so the exit stays a rear-door.
+   DETERMINISM: called at a FIXED point in the build order on every machine
+   (buildMazeScene, before spawnAmmoPickups) and consumes exactly ONE rng()
+   draw on every path — co-op machines agree on the cell. The fog-of-war
+   minimap already hides the exit until its cell is discovered.
+   ═══════════════════════════════════════════ */
+function pickExitCell(theme) {
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+
+  // BFS distances from spawn over deck cells.
+  const dist = [];
+  for (let y = 0; y < gh; y++) dist.push(new Array(gw).fill(-1));
+  if (mazeGrid[1] && mazeGrid[1][1] === 1) {
+    dist[1][1] = 0;
+    const q = [[1, 1]];
+    for (let qi = 0; qi < q.length; qi++) {
+      const [x, y] = q[qi], d = dist[y][x] + 1;
+      if (y > 0 && mazeGrid[y - 1][x] === 1 && dist[y - 1][x] < 0) { dist[y - 1][x] = d; q.push([x, y - 1]); }
+      if (y < gh - 1 && mazeGrid[y + 1][x] === 1 && dist[y + 1][x] < 0) { dist[y + 1][x] = d; q.push([x, y + 1]); }
+      if (x > 0 && mazeGrid[y][x - 1] === 1 && dist[y][x - 1] < 0) { dist[y][x - 1] = d; q.push([x - 1, y]); }
+      if (x < gw - 1 && mazeGrid[y][x + 1] === 1 && dist[y][x + 1] < 0) { dist[y][x + 1] = d; q.push([x + 1, y]); }
+    }
+  }
+
+  // Reachable candidates in scan order (deterministic), spawn cell excluded.
+  const cands = [];
+  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
+    if (dist[y][x] > 0) cands.push({ x, y, d: dist[y][x] });
+  }
+
+  let pool;
+  if (theme && theme.archetype === 'linear') {
+    pool = cands.filter(c => c.y >= gh - 3); // rear-door rows (kept clear by generateLinear)
+  } else {
+    // Top 25% by path distance; ties broken by scan order for determinism.
+    cands.sort((a, b) => b.d - a.d || a.y - b.y || a.x - b.x);
+    pool = cands.slice(0, Math.max(1, Math.ceil(cands.length * 0.25)));
+  }
+  if (pool.length) {
+    const pick = pool[Math.floor(rng() * pool.length)];
+    return { ex: pick.x, ey: pick.y };
+  }
+
+  // Legacy corner fallback — only reachable if the grid is degenerate (spawn
+  // sealed), which the generators' connectivity guarantees prevent. Burn the
+  // rng() draw anyway so the stream stays aligned across machines regardless.
+  rng();
+  let ex = gw - 2, ey = gh - 2;
+  for (let dy = 0; dy > -6; dy--) {
+    let found = false;
+    for (let dx = 0; dx > -6; dx--) {
+      if (ey + dy >= 0 && ex + dx >= 0 && ey + dy < gh && ex + dx < gw && mazeGrid[ey + dy][ex + dx] === 1) {
+        ex = ex + dx; ey = ey + dy; found = true; break;
+      }
+    }
+    if (found) break;
+  }
+  return { ex, ey };
 }
 
 /* ═══════════════════════════════════════════
@@ -1968,18 +2117,12 @@ function buildMazeScene() {
   exitLight.position.set(0, -100, 0);
   scene.add(exitLight);
 
-  // Exit zone (not on boss levels — boss must be killed first)
+  // Exit zone (not on boss levels — boss must be killed first). Seeded random
+  // placement far from spawn — see pickExitCell. Keep this BEFORE
+  // spawnAmmoPickups: both consume the seeded rng() and the draw order must
+  // be identical on every machine.
   if (!theme.isBoss) {
-    let ex = gw - 2, ey = gh - 2;
-    for (let dy = 0; dy > -6; dy--) {
-      let found = false;
-      for (let dx = 0; dx > -6; dx--) {
-        if (ey + dy >= 0 && ex + dx >= 0 && ey + dy < gh && ex + dx < gw && mazeGrid[ey + dy][ex + dx] === 1) {
-          ex = ex + dx; ey = ey + dy; found = true; break;
-        }
-      }
-      if (found) break;
-    }
+    const { ex, ey } = pickExitCell(theme);
     exitZone = { x: ex * CELL + CELL / 2, z: ey * CELL + CELL / 2, radius: CELL * 1.2 };
 
     const exitGeo = new THREE.CylinderGeometry(1.0, 1.0, 0.06, 20);
@@ -2007,10 +2150,11 @@ function buildMazeScene() {
   spawnAmmoPickups();
 
   // MP kill-gate: party kills needed to open the exit ≈ the mobs of the first
-  // two waves at this floor (wave size = min(3 + floor + wave, 15)). Computed
-  // on every machine (same floor → same target); only enforced in co-op.
+  // two waves at this floor, via the per-theme spawn table (waveSizeFor is
+  // deterministic). Computed on every machine (same floor → same target);
+  // only enforced in co-op.
   floorKills = 0;
-  killTarget = Math.min(3 + currentFloor + 1, 15) + Math.min(3 + currentFloor + 2, 15);
+  killTarget = waveSizeFor(currentFloor, 1) + waveSizeFor(currentFloor, 2);
 
   // Place player
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
@@ -2601,7 +2745,7 @@ function applyEnemyHit(e, dmg, shooterConn) {
   if (waveMobsLeft <= 0 && !isBossFloor(currentFloor)) {
     currentWave++;
     updateHUD();
-    setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2500);
+    setTimeout(() => { if (gameState === 'playing') spawnWave(); }, waveRespiteMs(currentFloor));
   }
   return true;
 }

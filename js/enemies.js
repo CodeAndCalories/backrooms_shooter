@@ -514,14 +514,18 @@ function spawnEnemy(type, forcePos) {
   scene.add(mesh);
 
   const scaleMult = 1 + (currentFloor % LEVEL_THEMES.length) * 0.05;
+  // MOB ECOLOGY stat variants: per-theme multipliers on top of the existing
+  // depth scaling (Pipe Dreams fast, Freezer slow+tanky, Level Fun weak…).
+  // Host-side only — mirrors receive the resulting hp via snapshots.
+  const tm = getThemeMobs(currentFloor);
   const enemy = {
     id: ++netEnemyIdCounter, // MP: stable id, keys the client-side mirrors
     type, mesh,
     height: mt.height,
     scale: mt.scale,
-    hp: mt.health * (1 + currentFloor * 0.12) * scaleMult,
-    maxHp: mt.health * (1 + currentFloor * 0.12) * scaleMult,
-    speed: mt.speed * (1 + currentFloor * 0.06),
+    hp: mt.health * (1 + currentFloor * 0.12) * scaleMult * tm.hpMult,
+    maxHp: mt.health * (1 + currentFloor * 0.12) * scaleMult * tm.hpMult,
+    speed: mt.speed * (1 + currentFloor * 0.06) * tm.speedMult,
     damage: mt.damage * (1 + currentFloor * 0.08),
     attackRange: mt.attackRange,
     attackCooldown: mt.attackCooldown,
@@ -886,34 +890,43 @@ function spawnWave() {
   const theme = getTheme(currentFloor);
   if (theme.isBoss) return; // Boss levels don't have waves
 
-  const count = Math.min(3 + currentFloor + currentWave, 15);
+  // MOB ECOLOGY: composition, size and pacing come from the per-theme spawn
+  // table (LEVEL_THEMES[].mobs). Size is deterministic (killTarget mirrors it
+  // on every machine); the PICKS are host-only → Math.random is fine here,
+  // same as spawn positions — clients mirror the result via snapshots.
+  const M = getThemeMobs(currentFloor);
+  const count = waveSizeFor(currentFloor, currentWave);
   waveMobsLeft = count;
-  // Spider joins the wave rotation only from floor index 8 onward (the in-game "LEVEL 9"+),
-  // so it's a later-game threat. Lower SPIDER_MIN_FLOOR to make it appear earlier.
-  const SPIDER_MIN_FLOOR = 8;
-  // Level Fun (theme id 5, incl. looped repeats): the party is EXCLUSIVELY
-  // partygoers — no stalkers/crawlers/phantoms crash it.
-  const types = getTheme(currentFloor).id === 5
-    ? ['partygoer']
-    : currentFloor >= SPIDER_MIN_FLOOR
-      ? ['stalker', 'crawler', 'phantom', 'spider']
-      : ['stalker', 'crawler', 'phantom'];
+
+  const totalW = M.weights.reduce((a, b) => a + b, 0);
+  const pickType = () => {
+    let r = Math.random() * totalW;
+    for (let i = 0; i < M.types.length; i++) { r -= M.weights[i]; if (r < 0) return M.types[i]; }
+    return M.types[M.types.length - 1];
+  };
+  // Deeper floors mix danger variants INTO waves (on top of anti-linger):
+  // 0% through floor 8, then +4%/floor up to a 35% ceiling.
+  const dangerChance = Math.min(0.35, Math.max(0, (currentFloor - 8) * 0.04));
+  // Pacing: early floors trickle mobs in slowly; deeper floors pile in faster.
+  const stagger = Math.max(450, 900 - currentFloor * 30);
   for (let i = 0; i < count; i++) {
-    const t = types[i % types.length];
+    let t = pickType();
+    if (Math.random() < dangerChance) {
+      if (t === 'stalker') t = 'danger_stalker';
+      else if (t === 'crawler') t = 'danger_crawler';
+    }
     setTimeout(() => {
       if (gameState === 'playing') spawnEnemy(t);
-    }, i * 600 + Math.random() * 400);
+    }, i * stagger + Math.random() * 400);
   }
 }
 
-// Anti-linger: spawn from behind player. On Level Fun the escalation mobs are
-// ALSO partygoers (the floor's only mob — more guests keep arriving); the
-// escalating spawn RATE still provides the linger pressure. Everywhere else:
-// danger variants as before.
+// Anti-linger: spawn from behind player. The escalation mobs come from the
+// theme's spawn table (mobs.danger) — Level Fun lists partygoers there (the
+// floor's only mob — more guests keep arriving), everywhere else it's the
+// theme-appropriate danger variants. Escalating RATE is unchanged.
 function spawnDangerMob() {
-  const types = getTheme(currentFloor).id === 5
-    ? ['partygoer']
-    : ['danger_stalker', 'danger_crawler'];
+  const types = getThemeMobs(currentFloor).danger;
 
   // MP: ambush a random connected player (the linger pressure is shared);
   // solo the list has one entry, so behavior is exactly as before.

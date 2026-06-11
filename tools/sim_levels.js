@@ -5,8 +5,10 @@
 //      the spawn cell (1,1)) for floors 0..63 and for hundreds of extra seeds
 //      per archetype (co-op host can override floorSeed, so arbitrary seeds
 //      must hold too);
-//   2. verifies the exit-search window used by buildMazeScene (6x6 from
-//      (gw-2, gh-2)) always lands on a reachable floor cell;
+//   2. runs the REAL pickExitCell (same rng stream position as buildMazeScene:
+//      right after generation) and verifies the chosen exit is reachable, on
+//      dry deck (value 1), far from spawn (top-25% BFS distance band; rear
+//      rows on 'linear'), and actually VARIES across seeds per theme;
 //   3. prints ASCII maps of representative floors for eyeballing layout.
 // Usage: node tools/sim_levels.js [--maps-only]
 
@@ -54,6 +56,7 @@ const pieces = [
   'function generateLinear',
   'function generateBossArena',
   'function generateLevel',
+  'function pickExitCell',
 ].map(extract);
 
 const api = new Function(`
@@ -61,86 +64,89 @@ const api = new Function(`
   let poolRects = [];
   let rng = Math.random;
   ${pieces.join('\n')}
-  return { LEVEL_THEMES, mulberry32, generateLevel, generateBossArena,
+  return { LEVEL_THEMES, mulberry32, generateLevel, generateBossArena, pickExitCell,
            setRng: (f) => { rng = f; }, grid: () => mazeGrid, pools: () => poolRects };
 `)();
 
 const THEMES = api.LEVEL_THEMES;
 
-// Mirror of generateCurrentFloor (floor -> seed -> size -> generator).
+// Mirror of generateCurrentFloor (floor -> seed -> size -> generator), plus
+// the exit pick at the SAME rng-stream position buildMazeScene uses (exit is
+// the first seeded draw after generation; ammo pickups come after it).
 function genFloor(floor, seedOverride) {
   const theme = THEMES[floor % THEMES.length];
   const seed = seedOverride !== undefined ? seedOverride : (floor * 2654435761) >>> 0;
   api.setRng(api.mulberry32(seed));
   if (theme.isBoss) {
     api.generateBossArena(theme.mazeSize);
-  } else {
-    const size = Math.min(theme.mazeSize + Math.floor(floor / THEMES.length), 20);
-    api.generateLevel(theme, size, size);
+    return { theme, grid: api.grid(), exit: null };
   }
-  return { theme, grid: api.grid() };
+  const size = Math.min(theme.mazeSize + Math.floor(floor / THEMES.length), 20);
+  api.generateLevel(theme, size, size);
+  return { theme, grid: api.grid(), exit: api.pickExitCell(theme) };
 }
 
+// BFS over deck cells (value 1) from spawn — returns the distance grid
+// (-1 = unreachable), the independent cross-check for pickExitCell's BFS.
 function flood(grid) {
   const gh = grid.length, gw = grid[0].length;
-  const seen = grid.map((row) => row.map(() => false));
+  const dist = grid.map((row) => row.map(() => -1));
+  if (grid[1][1] !== 1) return dist; // spawn buried — caught by the checks
+  dist[1][1] = 0;
   const q = [[1, 1]];
-  if (grid[1][1] !== 1) return seen; // spawn buried — caught by the checks
-  seen[1][1] = true;
-  while (q.length) {
-    const [x, y] = q.pop();
+  for (let qi = 0; qi < q.length; qi++) {
+    const [x, y] = q[qi];
     for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
-      if (grid[ny][nx] !== 1 || seen[ny][nx]) continue;
-      seen[ny][nx] = true;
+      if (grid[ny][nx] !== 1 || dist[ny][nx] >= 0) continue;
+      dist[ny][nx] = dist[y][x] + 1;
       q.push([nx, ny]);
     }
   }
-  return seen;
-}
-
-// Same corner search buildMazeScene runs to place the exit.
-function findExit(grid, seen) {
-  const gh = grid.length, gw = grid[0].length;
-  for (let dy = 0; dy > -6; dy--) {
-    for (let dx = 0; dx > -6; dx--) {
-      const ex = gw - 2 + dx, ey = gh - 2 + dy;
-      if (ey >= 0 && ex >= 0 && grid[ey][ex] === 1) {
-        return { ex, ey, reachable: seen[ey][ex] };
-      }
-    }
-  }
-  return null;
+  return dist;
 }
 
 // Connectivity is checked on the WALKABLE DECK level only (cell value 1) —
 // pool basins (value 2) are optional sunken space and must never be needed
 // to reach the exit. A basin sealing the only path would show up here as a
-// disconnected deck.
-function check(grid, isBoss, isPools) {
+// disconnected deck. The exit comes from the REAL pickExitCell (via genFloor)
+// and is verified independently: dry deck, reachable, and inside the far band
+// it claims to draw from.
+function check(grid, theme, exit) {
   const gh = grid.length, gw = grid[0].length;
   const errs = [];
   if (grid[1][1] !== 1) errs.push('spawn (1,1) is not dry floor');
-  const seen = flood(grid);
+  const dist = flood(grid);
   let floorCells = 0, reached = 0, basinCells = 0;
+  const reachableDists = [];
   for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
-    if (grid[y][x] === 1) { floorCells++; if (seen[y][x]) reached++; }
+    if (grid[y][x] === 1) {
+      floorCells++;
+      if (dist[y][x] >= 0) { reached++; if (dist[y][x] > 0) reachableDists.push(dist[y][x]); }
+    }
     if (grid[y][x] === 2) basinCells++;
   }
   if (reached !== floorCells) errs.push(`disconnected: ${floorCells - reached}/${floorCells} deck cells unreachable`);
-  if (isPools && basinCells === 0) errs.push('pools floor generated zero basins');
-  if (!isBoss) {
-    const exit = findExit(grid, seen);
-    if (!exit) errs.push('no dry floor cell in the 6x6 exit-search window');
-    else if (!exit.reachable) errs.push('exit cell unreachable from spawn');
+  if (theme.archetype === 'pools' && basinCells === 0) errs.push('pools floor generated zero basins');
+  if (!theme.isBoss) {
+    if (!exit) errs.push('pickExitCell returned nothing');
+    else if (grid[exit.ey] === undefined || grid[exit.ey][exit.ex] !== 1) errs.push(`exit (${exit.ex},${exit.ey}) is not dry deck floor`);
+    else if (dist[exit.ey][exit.ex] <= 0) errs.push(`exit (${exit.ex},${exit.ey}) unreachable from spawn`);
+    else if (theme.archetype === 'linear') {
+      if (exit.ey < gh - 3) errs.push(`linear exit row ${exit.ey} not in rear rows (>= ${gh - 3})`);
+    } else {
+      // Far-from-spawn: exit distance must sit in the top-25% rank band.
+      reachableDists.sort((a, b) => b - a);
+      const cut = reachableDists[Math.max(0, Math.ceil(reachableDists.length * 0.25) - 1)];
+      if (dist[exit.ey][exit.ex] < cut) errs.push(`exit dist ${dist[exit.ey][exit.ex]} below top-25% cutoff ${cut}`);
+    }
   }
-  return { errs, floorCells, total: (gw - 2) * (gh - 2), seen };
+  return { errs, floorCells, total: (gw - 2) * (gh - 2), dist };
 }
 
-function drawMap(grid, seen) {
+function drawMap(grid, exit) {
   const gh = grid.length, gw = grid[0].length;
-  const exit = findExit(grid, seen);
   const lines = [];
   for (let y = 0; y < gh; y++) {
     let line = '';
@@ -158,13 +164,13 @@ function drawMap(grid, seen) {
 /* ── 1. eyeball maps ── */
 const SHOW = process.argv.includes('--pools') ? [3, 16] : [0, 1, 2, 3, 5, 6, 7, 10, 13, 16];
 for (const f of SHOW) {
-  const { theme, grid } = genFloor(f);
-  const { errs, floorCells, total, seen } = check(grid, theme.isBoss, theme.archetype === 'pools');
+  const { theme, grid, exit } = genFloor(f);
+  const { errs, floorCells, total } = check(grid, theme, exit);
   const openPct = Math.round((floorCells / total) * 100);
   console.log(`\n── Floor ${f}: ${theme.name} [${theme.archetype}] ` +
     `${grid[0].length}x${grid.length}, ${openPct}% open ` +
     (errs.length ? `*** ${errs.join('; ')} ***` : '(connected ✓)') + ' ──');
-  console.log(drawMap(grid, seen));
+  console.log(drawMap(grid, exit));
 }
 
 if (process.argv.includes('--maps-only')) process.exit(0);
@@ -173,29 +179,38 @@ if (process.argv.includes('--maps-only')) process.exit(0);
 let fails = 0;
 const SWEEP = 68;
 for (let f = 0; f < SWEEP; f++) {
-  const { theme, grid } = genFloor(f);
-  const { errs } = check(grid, theme.isBoss, theme.archetype === 'pools');
+  const { theme, grid, exit } = genFloor(f);
+  const { errs } = check(grid, theme, exit);
   if (errs.length) { fails++; console.error(`FAIL floor ${f} (${theme.name}): ${errs.join('; ')}`); }
 }
 console.log(`\nFloors 0..${SWEEP - 1}: ${SWEEP - fails}/${SWEEP} pass`);
 
 /* ── 3. arbitrary-seed sweep (co-op hosts may override floorSeed) ── */
 const SEEDS_PER_THEME = 300;
-let seedFails = 0, seedRuns = 0;
+let seedFails = 0, seedRuns = 0, varietyFails = 0;
 for (const theme of THEMES) {
   if (theme.isBoss) continue;
+  const exitCells = new Set();
   for (let i = 0; i < SEEDS_PER_THEME; i++) {
     const seed = ((i * 2654435761) ^ (theme.id * 0x9e3779b9)) >>> 0;
-    const { grid } = genFloor(theme.id, seed);
-    const { errs } = check(grid, false, theme.archetype === 'pools');
+    const { grid, exit } = genFloor(theme.id, seed);
+    const { errs } = check(grid, theme, exit);
     seedRuns++;
+    if (exit) exitCells.add(exit.ex + ',' + exit.ey);
     if (errs.length) {
       seedFails++;
       console.error(`FAIL theme ${theme.id} (${theme.name}) seed ${seed}: ${errs.join('; ')}`);
     }
   }
+  // Exit VARIETY: a single repeated cell across 300 seeds means the
+  // randomization is dead (the old fixed-corner bug this pass removes).
+  if (exitCells.size < 2) {
+    varietyFails++;
+    console.error(`FAIL theme ${theme.id} (${theme.name}): exit landed on ${exitCells.size} distinct cell(s) across ${SEEDS_PER_THEME} seeds`);
+  }
+  console.log(`theme ${String(theme.id).padStart(2)} ${theme.name.padEnd(24)} exits: ${exitCells.size} distinct cells / ${SEEDS_PER_THEME} seeds`);
 }
 console.log(`Arbitrary seeds: ${seedRuns - seedFails}/${seedRuns} pass`);
 
-if (fails || seedFails) { console.error('\nVERIFICATION FAILED'); process.exit(1); }
-console.log('\nAll connectivity + exit-reachability checks passed.');
+if (fails || seedFails || varietyFails) { console.error('\nVERIFICATION FAILED'); process.exit(1); }
+console.log('\nAll connectivity + exit-reachability + exit-variety checks passed.');

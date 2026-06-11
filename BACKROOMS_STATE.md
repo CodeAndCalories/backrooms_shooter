@@ -4,7 +4,7 @@
 BACKROOMS_STATE.md") to resume with full context. UPDATE THIS at the end of every
 session: what changed, what's validated vs unplayed, what's next.
 
-**Last updated:** June 10, 2026
+**Last updated:** June 11, 2026
 
 ---
 
@@ -24,6 +24,23 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Mob ecology pass landed (June 11, UNPLAYED):** per-theme spawn tables in
+  LEVEL_THEMES[].mobs (types/weights/danger + speedMult/hpMult/countMult +
+  waveBase/waveCap). spawnWave/spawnDangerMob/spawnEnemy read them; killTarget now
+  derives from waveSizeFor (deterministic — co-op kill-gate safe). Early floors few/
+  weak (Lobby wave 1 = 2 mobs), Pipe Dreams 1.25x speed, Freezer 0.8x/1.5x hp,
+  Level Fun 1.5x count @ 0.7x hp, Dark Pools 0.5x count. Danger variants mix into
+  waves past floor 8 (+4%/floor, 35% cap). Wave respite 6.5s→2.5s with depth.
+  Boss floors untouched (adds get neutral mults).
+- **Exit placement randomized (June 11, UNPLAYED):** pickExitCell (main.js) — BFS
+  from spawn over deck cells, seeded rng() pick from top-25% by path distance;
+  linear floors restrict to rear-door rows; pools auto-dry-deck (value-1 only).
+  One rng() draw at a fixed build-order point (before spawnAmmoPickups) → co-op
+  deterministic, but ammo placement shifts vs old builds: **BOTH PLAYERS MUST BE
+  ON THE NEW BUILD** (version warning already pending from QoL batch anyway).
+- Sim suite extended: extracts the real pickExitCell, verifies exit on dry deck,
+  reachable, in the top-25% distance band (rear rows on linear), plus exit VARIETY
+  across 300 seeds/theme. 68/68 floors + 4200/4200 seeds pass.
 - QoL batch landed and verified: lobby 19/19, hazmat skins, revive UX, teammate shot
   effects. **PENDING: push the build — protocol changed, version-mismatch warning will
   fire until both players update.**
@@ -56,15 +73,8 @@ Parked: bloom/EffectComposer (new render pipeline, fights program keepalive; fak
 additive glow sprites on emissives gets 80% later).
 
 ## DESIGN ROADMAP (from June 10 design session — in order)
-1. **Mob ecology pass** (first — changes every minute of play): per-floor spawn tables
-   replacing the generic mix — early floors few/weak, 1-2 signature mobs per theme
-   (Hospital=wretches/skinstealers, Poolrooms=phantoms+crawlers, Suburbs=facelings/
-   stalkers in fog, Dark Pools=sparse dread), deeper = bigger waves + danger variants.
-   Stat variants via per-theme multiplier fields (Pipe Dreams faster, Freezer tankier,
-   Level Fun numerous-but-weak). Spawn pacing ramps with depth; anti-linger stays as
-   universal pressure. Data-only; respect existing entity caps. Host-authoritative.
-2. **Exit placement variety** (can bundle with #1): seeded random exit from candidate
-   cells far from spawn (top 25% by distance), reachable, dry deck on pool floors.
+1. ~~**Mob ecology pass**~~ DONE June 11 (unplayed) — see CURRENT STATE.
+2. ~~**Exit placement variety**~~ DONE June 11 (unplayed) — see CURRENT STATE.
 3. **Scripted scare events** (after ecology): starter set of 3-4 — lights cut for 5s,
    mob that freezes until looked at, distant roar, door slam. Proximity/timer
    triggered, designed not random.
