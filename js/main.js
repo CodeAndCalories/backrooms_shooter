@@ -8,6 +8,30 @@ const CELL = 4, WALL_H = 3.4;
 const GRAVITY = 22, JUMP_V = 8, MOVE_SPEED = 5.5, SPRINT_MULT = 1.65;
 const MOUSE_SENS = 0.0018;
 const MAX_HEALTH = 100, MAX_STAMINA = 100, STAMINA_DRAIN = 22, STAMINA_REGEN = 14;
+
+/* ── SANITY (gentle, atmospheric — per-player, PERSISTS across floors; only ever
+   drains from TAKING damage, never ambient/dark). "More noticeable" tuning.
+   ALL of these are meant to be tweaked — they're the knobs the design asked to see. */
+const MAX_SANITY = 100;
+const SANITY_DRAIN_PER_DMG = 0.60;   // sanity lost per point of damage taken
+const SANITY_DRAIN_CAP    = 16;      // ...capped per hit (one big boss hit ≠ instant break)
+const SANITY_RECOVER_RATE = 0.9;     // passive sanity regained per second once calm
+const SANITY_RECOVER_DELAY = 10;     // seconds with no damage before passive recovery starts
+const SANITY_LOW      = 55;          // whisper + vignette begin below this
+const SANITY_CRITICAL = 30;          // stronger unease (breathing vignette, denser whispers) below this
+const SANITY_SAFE_THEME = 3;         // Poolrooms — calm zone, sanity never drains here
+
+/* ── CONSUMABLES — inventory items that heal OVER TIME (never instant). Carry up
+   to 3 of each. Almond Water → sanity, Bandages → health. Buyable + findable. ── */
+const CONSUMABLE_MAX  = 3;           // carry cap per kind
+const ALMOND_RESTORE  = 30;          // sanity restored per Almond Water (delivered over time)
+const ALMOND_PRICE    = 140;         // Black Market price (repeatable)
+const BANDAGE_RESTORE = 40;          // health restored per Bandage (delivered over time)
+const BANDAGE_PRICE   = 150;
+const SANITY_HEAL_RATE = 6;          // sanity/sec drained from the almond regen pool
+const HEALTH_HEAL_RATE = 8;          // health/sec drained from the bandage regen pool
+const CONSUMABLE_PICKUP_RADIUS = 1.1;
+const CONSUMABLE_DROP_CHANCE = 0.06; // kill-drop chance (then ~65% almond / 35% bandage)
 const CLIP_SIZE = 12, RESERVE_MAX = 84, RELOAD_TIME = 1.6, FIRE_RATE = 0.12;
 const GUN_DAMAGE = 28, GUN_RANGE = 90;
 
@@ -504,6 +528,10 @@ let player = {
   yaw: 0, pitch: 0,
   onGround: true,
   health: MAX_HEALTH, stamina: MAX_STAMINA,
+  // SANITY (persists across floors; reset only on a new run). Heal pools deliver
+  // consumable restores gradually. noDamageTimer gates passive recovery.
+  sanity: MAX_SANITY, sanityHealPool: 0, healthHealPool: 0, noDamageTimer: SANITY_RECOVER_DELAY,
+  almondWater: 0, bandages: 0, // carried consumables (max CONSUMABLE_MAX each)
   isSprinting: false,
   // MP down/revive (Phase 4, co-op only): at 0 HP a co-op player goes DOWN
   // (no move/shoot) instead of game over; a teammate nearby for ~3s revives.
@@ -651,6 +679,10 @@ let shopUpgrades = {
   wpn_shotgun: { name: 'Sawn-Off Shotgun', desc: '8-pellet close-range boomstick [2]',    cost: 450,  bought: false, apply: () => {}, weapon: 1 },
   wpn_smg:     { name: 'Compact SMG',       desc: 'Fast fire · low dmg · deep mag [3]',    cost: 500,  bought: false, apply: () => {}, weapon: 2 },
   wpn_flare:   { name: 'Flare Pistol',      desc: 'Lights a dark area ~8s [4]',            cost: 350,  bought: false, apply: () => {}, weapon: 3 },
+  // ── SUPPLIES: REPEATABLE consumables (never permanently `bought`; the buy
+  //    handler special-cases `consumable` — spend → +1 to that inventory, capped). ──
+  buy_almond:  { name: 'Almond Water',      desc: 'Restores sanity over time · [Q] to drink', cost: ALMOND_PRICE,  consumable: true, inv: 'almondWater', apply: () => {} },
+  buy_bandage: { name: 'Bandages',          desc: 'Heals health over time · [H] to apply',    cost: BANDAGE_PRICE, consumable: true, inv: 'bandages',    apply: () => {} },
 };
 
 // Active stat modifiers from shop. clipMult/reserveMult are MULTIPLIERS applied
@@ -2335,6 +2367,169 @@ function collectArtifact(id) {
 }
 
 /* ═══════════════════════════════════════════
+   SANITY — gentle atmospheric pressure (per-player, persists across floors).
+   Drains ONLY on damage (see damagePlayer); recovers slowly when calm; topped up
+   by Almond Water (over time). Low sanity is COSMETIC ONLY — a darkening vignette
+   and faint whispers, NO screen shake, NO slowdown, NO control loss.
+   ═══════════════════════════════════════════ */
+let _sanityWhisperTimer = 0;
+function updateSanity(dt) {
+  player.noDamageTimer += dt;
+  // Passive slow recovery once you've been un-hit for a while.
+  if (player.noDamageTimer >= SANITY_RECOVER_DELAY && player.sanity < MAX_SANITY) {
+    player.sanity = Math.min(MAX_SANITY, player.sanity + SANITY_RECOVER_RATE * dt);
+  }
+  // Consumable regen pools drip into the stats OVER TIME (never instant).
+  if (player.sanityHealPool > 0) {
+    const tick = Math.min(player.sanityHealPool, SANITY_HEAL_RATE * dt);
+    player.sanity = Math.min(MAX_SANITY, player.sanity + tick);
+    player.sanityHealPool -= tick;
+  }
+  if (player.healthHealPool > 0) {
+    const tick = Math.min(player.healthHealPool, HEALTH_HEAL_RATE * dt);
+    player.health = Math.min(shopStats.maxHealth, player.health + tick);
+    player.healthHealPool -= tick;
+  }
+  // Cosmetic effects.
+  const s = player.sanity;
+  let vig = 0;
+  if (s < SANITY_LOW) {
+    vig = (SANITY_LOW - s) / SANITY_LOW * 0.5;                       // edges darken as it falls
+    if (s < SANITY_CRITICAL) vig += 0.14 * (0.5 + 0.5 * Math.sin(clock.getElapsedTime() * 2.0)); // slow "breathing"
+    _sanityWhisperTimer -= dt;
+    if (_sanityWhisperTimer <= 0) {
+      _sanityWhisperTimer = (s < SANITY_CRITICAL ? 5 : 11) + Math.random() * (s < SANITY_CRITICAL ? 6 : 13);
+      playSanityWhisper();
+    }
+  }
+  hudSetStyle('sanityVignette', 'opacity', Math.min(0.82, vig).toFixed(2));
+}
+
+// Drink an Almond Water: queue a sanity restore over time (won't overfill, won't
+// be wasted at full). Inventory-limited; per-player.
+function useAlmondWater() {
+  if (player.isDown || player.almondWater <= 0) return;
+  if (player.sanity + player.sanityHealPool >= MAX_SANITY) return; // already topping out — keep the carton
+  player.almondWater--;
+  player.sanityHealPool = Math.min(MAX_SANITY - player.sanity, player.sanityHealPool + ALMOND_RESTORE);
+  playDrink();
+  updateHUD();
+}
+// Apply a Bandage: queue a health restore over time.
+function useBandage() {
+  if (player.isDown || player.bandages <= 0) return;
+  if (player.health + player.healthHealPool >= shopStats.maxHealth) return;
+  player.bandages--;
+  player.healthHealPool = Math.min(shopStats.maxHealth - player.health, player.healthHealPool + BANDAGE_RESTORE);
+  playBandage();
+  updateHUD();
+}
+
+/* ═══════════════════════════════════════════
+   CONSUMABLE PICKUPS — glowing cartons (Almond Water) / packs (Bandages) on the
+   floor. SAME contract as ammo pickups: ONE shared geo+material per kind (emissive,
+   NO PointLight — light count stable), sequential ids in seeded creation order so
+   every co-op machine has the identical pickup at the identical id. Placement uses
+   a floorSeed-derived prng (0 world-rng draws). Collection grants to whoever walks
+   over (per-player inventory, capped); the removal broadcasts ('consumable_taken'
+   {id}) so it vanishes for everyone — exactly the ammo-pickup pattern.
+   ═══════════════════════════════════════════ */
+let consumables = [];           // { id, mesh, x, z, baseY, phase, kind } — current floor only
+let consumableNextId = 0;       // reset per floor (seeded order); kill-drops continue the sequence
+// Shared resources — created once, NEVER disposed (keeps the no-map standard
+// program family pinned, same as ammoPickupMat). Distinct looks, same program.
+const almondGeo = new THREE.BoxGeometry(0.24, 0.34, 0.16);
+const almondMat = new THREE.MeshStandardMaterial({ color: 0xd8e8d0, emissive: 0x66cc88, emissiveIntensity: 0.7, roughness: 0.5, metalness: 0.1 });
+const bandageGeo = new THREE.BoxGeometry(0.30, 0.15, 0.22);
+const bandageMat = new THREE.MeshStandardMaterial({ color: 0xeeeae2, emissive: 0xcc4444, emissiveIntensity: 0.55, roughness: 0.6, metalness: 0.05 });
+function consumableGM(kind) { return kind === 'bandage' ? [bandageGeo, bandageMat] : [almondGeo, almondMat]; }
+
+function createConsumable(wx, wz, id, kind) {
+  const [g, m] = consumableGM(kind);
+  const mesh = new THREE.Mesh(g, m);
+  const baseY = 0.5 + floorHeightAt(wx, wz);
+  mesh.position.set(wx, baseY, wz);
+  scene.add(mesh);
+  consumables.push({ id, mesh, x: wx, z: wz, baseY, phase: consumables.length * 1.6, kind });
+}
+
+// 1-3 cartons per non-boss floor at seeded cells away from spawn (0 world-rng
+// draws). Almond Water is more common than Bandages.
+function spawnConsumables(theme) {
+  for (const c of consumables) scene.remove(c.mesh);
+  consumables = [];
+  consumableNextId = 0;
+  if (theme.isBoss) return;
+  const sp = mulberry32((floorSeed ^ 0xC047A1E) >>> 0); // dedicated stream
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  const cells = [];
+  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
+    if (mazeGrid[y][x] !== 1 && mazeGrid[y][x] !== 2) continue;
+    if (Math.abs(x - 1) + Math.abs(y - 1) < 5) continue; // keep clear of spawn
+    cells.push({ x, y });
+  }
+  if (!cells.length) return;
+  const count = 1 + Math.floor(sp() * 3); // 1..3
+  for (let i = 0; i < count && cells.length; i++) {
+    const c = cells.splice(Math.floor(sp() * cells.length), 1)[0];
+    const kind = sp() < 0.62 ? 'almond' : 'bandage';
+    createConsumable(c.x * CELL + CELL / 2, c.y * CELL + CELL / 2, ++consumableNextId, kind);
+  }
+}
+
+// Spin/bob; collect on the LOCAL player's walk-over into inventory (capped). Full
+// for that kind → left on the ground (like full-reserve ammo).
+function updateConsumables(dt) {
+  if (consumables.length === 0) return;
+  const t = clock.getElapsedTime();
+  for (let i = consumables.length - 1; i >= 0; i--) {
+    const c = consumables[i];
+    c.mesh.rotation.y += dt * 1.3;
+    c.mesh.position.y = c.baseY + Math.sin(t * 2.2 + c.phase) * 0.08;
+    const dx = c.x - player.pos.x, dz = c.z - player.pos.z;
+    if (dx * dx + dz * dz < CONSUMABLE_PICKUP_RADIUS * CONSUMABLE_PICKUP_RADIUS) {
+      const have = c.kind === 'bandage' ? player.bandages : player.almondWater;
+      if (have >= CONSUMABLE_MAX) continue; // inventory full → leave it for later
+      const kind = c.kind;
+      if (collectConsumableById(c.id)) {
+        if (kind === 'bandage') player.bandages = Math.min(CONSUMABLE_MAX, player.bandages + 1);
+        else player.almondWater = Math.min(CONSUMABLE_MAX, player.almondWater + 1);
+        playPickup();
+        netAnnounceConsumableTaken(c.id); // MP: remove it on every other machine too
+        updateHUD();
+      }
+    }
+  }
+}
+
+// Remove a pickup by id (idempotent). Shared by the local walk-over and the
+// 'consumable_taken' net handler — NO grant here (grant is local to the collector).
+function collectConsumableById(id) {
+  const i = consumables.findIndex(c => c.id === id);
+  if (i === -1) return false;
+  scene.remove(consumables[i].mesh); // shared geo/mat — never disposed
+  consumables.splice(i, 1);
+  return true;
+}
+
+// HOST: a killed enemy may drop a consumable (host-authoritative roll, broadcast
+// like the ammo kill-drop so clients spawn the same id).
+function maybeDropConsumable(wx, wz) {
+  if (Math.random() >= CONSUMABLE_DROP_CHANCE) return;
+  const kind = Math.random() < 0.65 ? 'almond' : 'bandage';
+  const id = ++consumableNextId;
+  createConsumable(wx, wz, id, kind);
+  netBroadcastConsumableSpawn(id, wx, wz, kind);
+}
+
+// Floor teardown: pull pickups out of the scene BEFORE the dispose traverse
+// (shared geo/mats must not be caught).
+function clearConsumables() {
+  for (const c of consumables) if (c.mesh.parent) scene.remove(c.mesh);
+  consumables = [];
+}
+
+/* ═══════════════════════════════════════════
    RESOURCE DISPOSAL
    three.js never frees GPU resources on scene.remove() — geometry, materials
    and textures stay in VRAM until .dispose(). Ownership rules here:
@@ -2378,6 +2573,7 @@ function buildMazeScene() {
   bulletTrails = [];
   clearImpactFx(); // pull pooled sparks/decals/flare out before the dispose pass (shared geo/mats)
   clearScares();   // pull active watcher sprites out too (shared mob textures) + reset effects
+  clearConsumables(); // pull almond/bandage pickups out (shared geo/mats) before the dispose pass
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
   for (const a of artifacts) scene.remove(a.mesh);   // same pattern: shared artifact geo/mat stay out of the dispose traverse
   artifacts = [];
@@ -2647,6 +2843,9 @@ function buildMazeScene() {
   // Lore objective: on item-gate floors, seed N artifacts far from spawn (0
   // world-rng draws — own prng). Resets the counters every floor either way.
   spawnArtifacts(theme);
+
+  // Consumable pickups (almond water / bandages) — seeded, 0 world-rng draws.
+  spawnConsumables(theme);
 
   // Place player
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
@@ -3153,6 +3352,12 @@ function updateWaterPlayerFX(dt, isMoving, inWater) {
 function damagePlayer(amount, fromPos) {
   if (player.isDown) return; // MP: a downed player can't be damaged further
   player.health -= amount;
+  // SANITY drains ONLY from taking damage — scaled to the hit, capped, and never
+  // in the Poolrooms (the calm safe zone). No ambient/dark drain anywhere.
+  if (getTheme(currentFloor).id !== SANITY_SAFE_THEME) {
+    player.sanity = Math.max(0, player.sanity - Math.min(amount * SANITY_DRAIN_PER_DMG, SANITY_DRAIN_CAP));
+  }
+  player.noDamageTimer = 0; // restart the calm timer → passive recovery pauses
   playDamage();
   damageVigTimer = 0.5;
 
@@ -3603,6 +3808,7 @@ function applyEnemyHit(e, dmg, shooterConn) {
     createAmmoPickup(e.pos.x, e.pos.z, id);
     netBroadcastPickupSpawn(id, e.pos.x, e.pos.z);
   }
+  maybeDropConsumable(e.pos.x, e.pos.z); // small chance of an almond water / bandage drop
 
   if (waveMobsLeft <= 0 && !isBossFloor(currentFloor)) {
     currentWave++;
@@ -4104,6 +4310,12 @@ function updateHUD() {
   // new string (= a new layout pass) on literally every frame
   hudSetStyle('healthFill', 'width', (player.health / shopStats.maxHealth * 100).toFixed(1) + '%');
   hudSetStyle('staminaFill', 'width', (player.stamina / MAX_STAMINA * 100).toFixed(1) + '%');
+  hudSetStyle('sanityFill', 'width', (player.sanity / MAX_SANITY * 100).toFixed(1) + '%');
+  // Consumable inventory counts (dim a slot to 0.35 when empty).
+  hudSetText('invAlmondCount', player.almondWater + '/' + CONSUMABLE_MAX);
+  hudSetText('invBandageCount', player.bandages + '/' + CONSUMABLE_MAX);
+  hudSetStyle('invAlmond', 'opacity', player.almondWater > 0 ? '1' : '0.35');
+  hudSetStyle('invBandage', 'opacity', player.bandages > 0 ? '1' : '0.35');
   hudSetText('ammoWeapon', curWeapon().name);
   hudSetText('ammoCurrent', String(player.clipAmmo));
   hudSetText('ammoReserve', '/ ' + player.reserveAmmo);
@@ -4474,6 +4686,11 @@ function startGame() {
 
   player.health = shopStats.maxHealth;
   player.stamina = MAX_STAMINA;
+  // SANITY + consumables reset on a NEW RUN only (they persist across floors).
+  player.sanity = MAX_SANITY;
+  player.sanityHealPool = 0; player.healthHealPool = 0;
+  player.noDamageTimer = SANITY_RECOVER_DELAY;
+  player.almondWater = 0; player.bandages = 0;
   player.isReloading = false;
   player.kills = 0;
   player.floorReached = 0;
@@ -4680,6 +4897,8 @@ document.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyR' && gameState === 'playing') playerReload();
   if (e.code === 'KeyF' && gameState === 'playing') toggleFlashlight();
+  if (e.code === 'KeyQ' && gameState === 'playing') useAlmondWater(); // drink — restore sanity over time
+  if (e.code === 'KeyH' && gameState === 'playing') useBandage();     // bandage — restore health over time
   // Weapon select 1-4 (Digit row + numpad). Owned-only switch is handled inside.
   if (gameState === 'playing' && /^(Digit|Numpad)[1-4]$/.test(e.code)) {
     switchWeapon(parseInt(e.code.slice(-1), 10) - 1);
@@ -4875,7 +5094,8 @@ const SHOP_TRACKS = [
   { title: 'MAGAZINE',  keys: ['mag1', 'mag2'] },
   { title: 'STAMINA',   keys: ['stamina1', 'stamina2'] },
   { title: 'SUPPLY',    keys: ['reserve1'] },
-  { title: 'ARMOR',     keys: ['health1'] }
+  { title: 'ARMOR',     keys: ['health1'] },
+  { title: 'SUPPLIES',  keys: ['buy_almond', 'buy_bandage'] } // repeatable consumables
 ];
 
 function updateShopUI() {
@@ -4896,6 +5116,41 @@ function updateShopUI() {
       const div = document.createElement('div');
       const canAfford = playerMoney >= up.cost;
       const reqMet = !up.requires || shopUpgrades[up.requires].bought;
+
+      // ── REPEATABLE CONSUMABLE (Almond Water / Bandages) — never "owned"; shows
+      //    the carried count and stays buyable until the inventory is full. ──
+      if (up.consumable) {
+        const held = player[up.inv] || 0;
+        const full = held >= CONSUMABLE_MAX;
+        let cls = 'shop-item consumable';
+        if (full) cls += ' purchased';
+        else if (!canAfford) cls += ' cant-afford';
+        div.className = cls;
+        div.innerHTML = `
+          <div class="shop-item-name">${up.name}</div>
+          <div class="shop-item-desc">${up.desc}</div>
+          ${full ? `<div class="shop-item-owned">FULL ${held}/${CONSUMABLE_MAX}</div>`
+                 : `<div class="shop-item-cost">$${up.cost} · ${held}/${CONSUMABLE_MAX}</div>`}
+        `;
+        if (!full) {
+          div.addEventListener('click', () => {
+            if (playerMoney >= up.cost && (player[up.inv] || 0) < CONSUMABLE_MAX) {
+              playerMoney -= up.cost;
+              player[up.inv] = Math.min(CONSUMABLE_MAX, (player[up.inv] || 0) + 1);
+              div.classList.add('shop-flash');
+              playPickup();
+              updateShopUI();
+              updateHUD();
+            } else {
+              div.classList.remove('shop-insufficient');
+              void div.offsetWidth;
+              div.classList.add('shop-insufficient');
+            }
+          });
+        }
+        col.appendChild(div);
+        continue;
+      }
 
       // Four explicit visual states: purchased / locked (prereq missing) /
       // can't afford / buyable — styled in css (.shop-item.*).
@@ -5087,6 +5342,8 @@ function animate() {
     updateFlares(dt);       // flare light/bead countdown (no-op when idle)
     updateAmmoPickups(dt);
     updateArtifacts(dt); // lore objective: bob/spin + walk-over collect (no-op off item floors)
+    updateConsumables(dt); // almond water / bandage pickups
+    updateSanity(dt);      // passive recovery, heal-over-time pools, low-sanity vignette/whisper
     updateBalloons(dt); // Level Fun: balloon bob/sway (no-op elsewhere — empty list)
     updateHUD();
   }

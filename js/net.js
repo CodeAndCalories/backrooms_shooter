@@ -1197,6 +1197,36 @@ onMessage('pickup_spawn', (d) => {
   if (netIsClient() && d && gameState === 'playing') createAmmoPickup(d.x, d.z, d.id);
 });
 
+/* ── consumable (almond water / bandage) sync ──
+   Same shape as the ammo pickup pair: seeded sequential ids name the SAME pickup
+   on every machine; whoever walks over one grants it to THEIR OWN inventory and
+   announces the removal ('consumable_taken' {id}), which every machine applies
+   (remove only — no grant). Host kill-drops broadcast 'consumable_spawn'
+   {id,x,z,kind}. PROTOCOL ADDITION — both players on the new build. */
+function netAnnounceConsumableTaken(id) {
+  if (netState.role === 'solo' || id === undefined) return;
+  if (netState.role === 'host') sendToAll('consumable_taken', { id });
+  else sendToHost('consumable_taken', { id });
+}
+
+onMessage('consumable_taken', (d, fromConn) => {
+  if (netState.role === 'solo' || !d) return;
+  collectConsumableById(d.id); // main.js — remove the mesh (no grant for others)
+  if (netState.role === 'host') {
+    for (const conn of netState.peers) {
+      if (conn !== fromConn && conn.open) conn.send({ t: 'consumable_taken', d: { id: d.id } });
+    }
+  }
+});
+
+function netBroadcastConsumableSpawn(id, x, z, kind) {
+  if (netState.role === 'host') sendToAll('consumable_spawn', { id, x: netR2(x), z: netR2(z), kind });
+}
+
+onMessage('consumable_spawn', (d) => {
+  if (netIsClient() && d && gameState === 'playing') createConsumable(d.x, d.z, d.id, d.kind);
+});
+
 /* ── balloon pop sync (Level Fun trap) ──
    host --balloon_pop {id}--> clients. Balloons are placed by the seeded rng
    with sequential ids (addDecorations party branch), so the id names the SAME

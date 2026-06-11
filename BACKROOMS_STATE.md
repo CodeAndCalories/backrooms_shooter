@@ -24,6 +24,44 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Sanity mechanic + consumables + Level Fun music rework (June 11, UNPLAYED):**
+  - **SANITY (0-100, per-player, PERSISTS across floors; resets only on a new
+    run):** drains ONLY on taking damage — `min(dmg×0.60, 16)` per hit ("More
+    noticeable" tuning) — NEVER ambient/dark, and NEVER in the Poolrooms (floor 3,
+    the calm safe zone; Dark Pools still drains). Passive recovery +0.9/sec after
+    10s with no damage. LOW <55 / CRITICAL <30. Effects are COSMETIC ONLY: a cold
+    violet edge-vignette (CSS overlay, opacity-driven) + faint diffuse whispers
+    (denser when critical) — NO shake, NO slowdown, NO control loss.
+  - **CONSUMABLES — inventory, heal OVER TIME (never instant), carry ≤3 each:**
+    Almond Water → sanity (+30 over time, [Q]), Bandages → health (+40 over time,
+    [H]). Both BUYABLE (repeatable SUPPLIES shop track: $140 / $150) AND FINDABLE
+    (seeded 1-3 cartons/non-boss floor via a floorSeed-derived prng — 0 world-rng
+    draws — plus a 6% kill-drop). Same pickup contract as ammo: ONE shared
+    emissive geo/mat per kind (NO lights — light budget intact; no-map standard =
+    pinned family), seeded sequential ids. **PROTOCOL ADDITIONS: 'consumable_taken'
+    {id} + 'consumable_spawn' {id,x,z,kind}** (ammo-pickup pattern — collector
+    grants to own inventory, removal broadcasts; host kill-drops). Both on new build.
+  - **HUD:** sanity bar (violet) under health/stamina + inventory readout
+    ([Q] Almond n/3, [H] Bandage n/3, dimmed when empty).
+  - **Level Fun music reworked toward DREAD** (was too "ping-ping"): drone now
+    LEADS (louder 0.09→0.16 + a sub-octave), music box is SPARSE (3.5-10s near-
+    silent gaps, was a 680ms 16-step loop), an octave LOWER, SOFT-attacked
+    (0.05s, was 5ms), lowpassed to kill the plink, and warped (wider flat detune +
+    per-note pitch wobble). Party horn/laugh stabs are RARER (30-70s, was 12-35s),
+    quieter, and pushed far away through a feedback-delay reverb tail. Floor 5
+    only, ambientGain bus, same updateFloorMusic start/stop.
+  - Audio: playSanityWhisper (delayed/diffuse), playDrink, playBandage.
+  - Headless: tools/test_sanity.js (placement determinism + 0 world draws,
+    1-3/distinct/away-from-spawn/sequential-id/valid-kind over 400 seeds, almond>
+    bandage frequency, boss→0, drain math + Poolrooms-safe guard, tuning
+    constants, no-new-lights). Full suite green; node --check clean.
+  - **Tuning is intentionally exposed** as named constants at the top of main.js
+    (SANITY_*, ALMOND_*, BANDAGE_*) — easy to retune after playtest.
+  - **Needs a browser/co-op session:** does sanity feel gentle (drain pace,
+    recovery, vignette/whisper intensity)? the over-time heals; almond/bandage
+    pickup spawns + kill-drops; shop SUPPLIES buying; live co-op consumable sync;
+    and whether the reworked Level Fun music reads as tense near-silence vs the
+    old plinky loop.
 - **Visual fix queue 2-4 landed (June 11, UNPLAYED) — texture-creation only, zero
   runtime cost, PROG stable (no new materials/lights/shader families):**
   - **Anisotropy:** `MAX_ANISO = min(8, getMaxAnisotropy())` set once in init,

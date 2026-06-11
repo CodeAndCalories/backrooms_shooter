@@ -102,6 +102,10 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .bar-fill{height:100%;transition:width 0.25s;}
 #healthFill{background:linear-gradient(90deg,#ff2222,#ff6644);width:100%;}
 #staminaFill{background:linear-gradient(90deg,#22aaff,#66ddff);width:100%;}
+#sanityFill{background:linear-gradient(90deg,#7a3bd0,#b07cff);width:100%;}
+.hud-consumables{margin-top:6px;display:flex;gap:14px;font-size:0.62em;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.7);}
+.inv-item{white-space:nowrap;}
+.inv-key{display:inline-block;min-width:14px;text-align:center;padding:0 3px;margin-right:3px;border:1px solid rgba(255,255,255,0.3);border-radius:3px;color:#d4c36a;font-weight:bold;}
 
 .hud-ammo{position:absolute;bottom:30px;right:30px;text-align:right;}
 .ammo-weapon{font-size:0.85em;color:rgba(212,195,106,0.7);letter-spacing:3px;text-transform:uppercase;margin-bottom:2px;}
@@ -203,6 +207,9 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 /* Overlays */
 .muzzle-overlay{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99;background:radial-gradient(circle at 50% 80%,rgba(255,200,50,0.18),transparent 40%);opacity:0;}
 .damage-vignette{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:98;background:radial-gradient(ellipse at center,transparent 50%,rgba(180,0,0,0.55) 100%);opacity:0;transition:opacity 0.25s;}
+/* Low-sanity vignette — darkens the edges with a cold violet tint. opacity is
+   driven each frame by updateSanity (cosmetic only; no shake). */
+.sanity-vignette{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:97;background:radial-gradient(ellipse at center,transparent 42%,rgba(20,5,35,0.9) 100%);opacity:0;transition:opacity 0.4s;}
 
 /* Loading */
 #loadingScreen{position:fixed;top:0;left:0;width:100%;height:100%;background:#0a0804;display:flex;align-items:center;justify-content:center;z-index:2000;flex-direction:column;}

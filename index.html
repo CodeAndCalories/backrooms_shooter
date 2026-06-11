@@ -142,6 +142,11 @@
   <div class="hud-bars">
     <div class="bar-container"><div class="bar-label">Health</div><div class="bar-fill" id="healthFill"></div></div>
     <div class="bar-container"><div class="bar-label">Stamina</div><div class="bar-fill" id="staminaFill"></div></div>
+    <div class="bar-container"><div class="bar-label">Sanity</div><div class="bar-fill" id="sanityFill"></div></div>
+    <div class="hud-consumables">
+      <span class="inv-item" id="invAlmond"><span class="inv-key">Q</span> Almond <span id="invAlmondCount">0/3</span></span>
+      <span class="inv-item" id="invBandage"><span class="inv-key">H</span> Bandage <span id="invBandageCount">0/3</span></span>
+    </div>
   </div>
 
   <div class="hud-ammo">
@@ -198,6 +203,8 @@
 
 <div class="muzzle-overlay" id="muzzleOverlay"></div>
 <div class="damage-vignette" id="damageVignette"></div>
+<!-- Low-sanity vignette: darkens the screen edges as sanity falls (opacity driven by updateSanity). Cosmetic only. -->
+<div class="sanity-vignette" id="sanityVignette"></div>
 
 <!-- Three.js CDN -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
