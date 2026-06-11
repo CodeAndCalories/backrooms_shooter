@@ -237,6 +237,123 @@ function playGunshotSuppressed() {
   });
 }
 
+/* ═══════════════════════════════════════════
+   PER-WEAPON SHOT SOUNDS — the pistol keeps the selectable sharp/heavy/
+   suppressed report (playGunshot); the new guns each get a fixed character.
+   playWeaponShot dispatches by the weapon's sound id (main.js: playerShoot).
+   ═══════════════════════════════════════════ */
+function playWeaponShot(sound) {
+  if (sound === 'shotgun') return playGunshotShotgun();
+  if (sound === 'smg') return playGunshotSmg();
+  if (sound === 'flare') return playGunshotFlare();
+  return playGunshot(); // pistol — user-selectable variant
+}
+
+// SHOTGUN — a heavy procedural BOOM: a big low-mid blast body (450Hz, ~180ms),
+// a broad crack on top, and a deep 130→45Hz thump. Loud and round.
+function playGunshotShotgun() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    // CRACK — broad noise transient
+    const cl = sr * 0.05, cb = audioCtx.createBuffer(1, cl, sr), cd = cb.getChannelData(0);
+    for (let i = 0; i < cl; i++) cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.012));
+    const crack = audioCtx.createBufferSource(); crack.buffer = cb;
+    const chp = audioCtx.createBiquadFilter(); chp.type = 'highpass'; chp.frequency.value = 1600; chp.Q.value = 0.6;
+    const cpk = audioCtx.createBiquadFilter(); cpk.type = 'peaking'; cpk.frequency.value = 3200; cpk.Q.value = 0.8; cpk.gain.value = 8;
+    const cg = audioCtx.createGain(); cg.gain.setValueAtTime(4.2, t); cg.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+    crack.connect(chp); chp.connect(cpk); cpk.connect(cg); cg.connect(sfxGain); crack.start(t);
+    // BODY — fat low-mid blast, the "boom"
+    const bl = sr * 0.18, bb = audioCtx.createBuffer(1, bl, sr), bd = bb.getChannelData(0);
+    for (let i = 0; i < bl; i++) bd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.05));
+    const body = audioCtx.createBufferSource(); body.buffer = bb;
+    const bbp = audioCtx.createBiquadFilter(); bbp.type = 'bandpass'; bbp.frequency.value = 450; bbp.Q.value = 0.6;
+    const bg = audioCtx.createGain(); bg.gain.setValueAtTime(3.0, t); bg.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+    body.connect(bbp); bbp.connect(bg); bg.connect(sfxGain); body.start(t);
+    // THUMP — deep concussion
+    const o = audioCtx.createOscillator(); o.type = 'triangle';
+    o.frequency.setValueAtTime(130, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.1);
+    const og = audioCtx.createGain(); og.gain.setValueAtTime(1.0, t); og.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+    o.connect(og); og.connect(sfxGain); o.start(t); o.stop(t + 0.13);
+  });
+}
+
+// SMG — snappy, light, bright crack: short noise pop, tight high peak, almost no
+// body. Built to be rattled off fast without fatiguing.
+function playGunshotSmg() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const cl = sr * 0.03, cb = audioCtx.createBuffer(1, cl, sr), cd = cb.getChannelData(0);
+    for (let i = 0; i < cl; i++) cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.006));
+    const crack = audioCtx.createBufferSource(); crack.buffer = cb;
+    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000; hp.Q.value = 0.7;
+    const pk = audioCtx.createBiquadFilter(); pk.type = 'peaking'; pk.frequency.value = 5200; pk.Q.value = 1.0; pk.gain.value = 9;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(2.6, t); g.gain.exponentialRampToValueAtTime(0.01, t + 0.025);
+    crack.connect(hp); hp.connect(pk); pk.connect(g); g.connect(sfxGain); crack.start(t);
+    // tiny mid click for mechanical edge
+    const o = audioCtx.createOscillator(); o.type = 'square';
+    o.frequency.setValueAtTime(420, t); o.frequency.exponentialRampToValueAtTime(180, t + 0.018);
+    const og = audioCtx.createGain(); og.gain.setValueAtTime(0.18, t); og.gain.exponentialRampToValueAtTime(0.01, t + 0.02);
+    o.connect(og); og.connect(sfxGain); o.start(t); o.stop(t + 0.025);
+  });
+}
+
+// FLARE — a hollow THUNK + a rising whoosh of the burning projectile launching:
+// muffled low pop then a band-swept noise tail. Distinct from the bullet guns.
+function playGunshotFlare() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    // THUNK — short low pop (the launch charge)
+    const o = audioCtx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(280, t); o.frequency.exponentialRampToValueAtTime(70, t + 0.07);
+    const og = audioCtx.createGain(); og.gain.setValueAtTime(0.9, t); og.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
+    o.connect(og); og.connect(sfxGain); o.start(t); o.stop(t + 0.1);
+    // WHOOSH — noise tail swept up through a bandpass (the flare leaving the bore)
+    const nl = sr * 0.32, nb = audioCtx.createBuffer(1, nl, sr), nd = nb.getChannelData(0);
+    for (let i = 0; i < nl; i++) nd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.12));
+    const n = audioCtx.createBufferSource(); n.buffer = nb;
+    const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.9;
+    bp.frequency.setValueAtTime(500, t); bp.frequency.exponentialRampToValueAtTime(2600, t + 0.3);
+    const ng = audioCtx.createGain(); ng.gain.setValueAtTime(0.5, t); ng.gain.exponentialRampToValueAtTime(0.01, t + 0.32);
+    n.connect(bp); bp.connect(ng); ng.connect(sfxGain); n.start(t);
+  });
+}
+
+// Weapon swap — a quick two-part mechanical clack (handling + a lighter snap).
+function playWeaponSwitch() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    for (const [at, freq, lvl] of [[0, 220, 0.3], [0.06, 520, 0.2]]) {
+      const cl = sr * 0.02, cb = audioCtx.createBuffer(1, cl, sr), cd = cb.getChannelData(0);
+      for (let i = 0; i < cl; i++) cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.004));
+      const s = audioCtx.createBufferSource(); s.buffer = cb;
+      const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 1.4;
+      const g = audioCtx.createGain(); g.gain.setValueAtTime(lvl, t + at); g.gain.exponentialRampToValueAtTime(0.01, t + at + 0.03);
+      s.connect(f); f.connect(g); g.connect(sfxGain); s.start(t + at);
+    }
+  });
+}
+
+// MP: a teammate's shot, distance-attenuated, with a tone hint per weapon class
+// (boomy shotgun / snappy smg / hollow flare / generic pistol). Replaces the old
+// single playRemoteGunshot for the weapon system.
+function playRemoteShot(sound, dist) {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const gain = Math.max(0.03, 0.30 / (1 + dist * 0.09));
+    const dur = sound === 'shotgun' ? 0.22 : 0.14;
+    const buf = audioCtx.createBuffer(1, sr * dur, sr), d = buf.getChannelData(0);
+    const decay = sound === 'shotgun' ? 16 : (sound === 'smg' ? 60 : 30);
+    for (let i = 0; i < d.length; i++) { const tt = i / sr; d[i] = (Math.random() * 2 - 1) * Math.exp(-tt * decay) * 0.9; }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const f = audioCtx.createBiquadFilter();
+    if (sound === 'shotgun') { f.type = 'lowpass'; f.frequency.value = Math.max(350, 1400 - dist * 30); }
+    else if (sound === 'smg') { f.type = 'highpass'; f.frequency.value = Math.max(400, 1200 - dist * 20); }
+    else { f.type = 'lowpass'; f.frequency.value = Math.max(500, 2400 - dist * 45); }
+    const g = audioCtx.createGain(); g.gain.value = gain * (sound === 'shotgun' ? 1.3 : 1.0);
+    src.connect(f); f.connect(g); g.connect(sfxGain); src.start(t);
+  });
+}
+
 function playHit() {
   playSound(() => {
     const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.08, audioCtx.sampleRate);

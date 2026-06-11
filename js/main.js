@@ -504,7 +504,11 @@ let player = {
   clipAmmo: CLIP_SIZE, reserveAmmo: RESERVE_MAX,
   isReloading: false, reloadTimer: 0, fireTimer: 0,
   kills: 0, floorReached: 0,
-  isADS: false, currentFOV: DEFAULT_FOV
+  isADS: false, currentFOV: DEFAULT_FOV,
+  // WEAPON SYSTEM: which weapon is equipped + per-weapon ammo bank. clipAmmo/
+  // reserveAmmo above always mirror the ACTIVE weapon (so the HUD/reload/shoot
+  // code reads one place); switchWeapon stows/restores the bank entry.
+  weaponIdx: 0, weaponAmmo: []
 };
 let currentFloor = 0, currentWave = 1, waveMobsLeft = 0;
 // MP kill-gate (Phase 4): the party's COMBINED kills this floor vs the target
@@ -573,10 +577,17 @@ let muzzleFlashLight = null, muzzleFlashTimer = 0;
      projectile slots + the muzzle flash on the camera = 32 total.
    Combat/exit lights only ever change INTENSITY (the muzzle-flash pattern),
    never the count, so programs compiled on floor 0 are reused forever. */
-const CEILING_LIGHT_BUDGET = 26;  // covers the worst real placement (5x5 sample grid = 25)
+// Dropped 26→25 to free ONE point-light slot for the flare (below) and stay at
+// exactly 32 point lights. 25 still covers the worst real placement (5x5 sample
+// grid = 25); the grid-spacing inflater and the placeCeilingLight hard cap both
+// read this constant, so the count self-bounds — only the 1 spare pad is gone.
+const CEILING_LIGHT_BUDGET = 25;
 const BOSS_PROJ_LIGHT_COUNT = 3;  // max concurrent lit boss projectiles
 let bossLight = null;             // persistent slot — lit only while a boss is alive
 let bossProjLights = [];          // persistent slots — intensity 0 marks a free slot
+// Flare light — ONE persistent slot (intensity 0 when idle, same pattern as the
+// muzzle flash). Recreated per floor like bossLight; planted by the flare gun.
+let flareLight = null;
 let programKeepalive = null;      // camera-riding micro-meshes pinning shader programs (see createProgramKeepalive)
 let flashlightWarmupToken = 0;    // invalidates in-flight async warm-up frames on rebuild
 
@@ -614,23 +625,107 @@ let shopUpgrades = {
   damage2:   { name: 'Hollow Points',     desc: 'Increase bullet damage by 65%',          cost: 500,  bought: false, apply: () => { shopStats.damageMult = 1.65; }, requires: 'damage1' },
   firerate1: { name: 'Hair Trigger',      desc: 'Increase fire rate by 25%',              cost: 250,  bought: false, apply: () => { shopStats.fireRateMult = 0.75; } },
   firerate2: { name: 'Auto Sear',         desc: 'Increase fire rate by 50%',              cost: 600,  bought: false, apply: () => { shopStats.fireRateMult = 0.5; }, requires: 'firerate1' },
-  mag1:      { name: 'Extended Mag',      desc: 'Magazine capacity: 18 rounds',           cost: 150,  bought: false, apply: () => { shopStats.clipSize = 18; } },
-  mag2:      { name: 'Drum Magazine',     desc: 'Magazine capacity: 30 rounds',           cost: 400,  bought: false, apply: () => { shopStats.clipSize = 30; }, requires: 'mag1' },
+  // Mag/reserve are now MULTIPLIERS (not absolute counts) so they scale every
+  // weapon sensibly. The pistol math is unchanged: 12×1.5=18, 12×2.5=30.
+  mag1:      { name: 'Extended Mag',      desc: 'Magazine capacity +50% (all guns)',      cost: 150,  bought: false, apply: () => { shopStats.clipMult = 1.5; } },
+  mag2:      { name: 'Drum Magazine',     desc: 'Magazine capacity +150% (all guns)',     cost: 400,  bought: false, apply: () => { shopStats.clipMult = 2.5; }, requires: 'mag1' },
   stamina1:  { name: 'Adrenaline Shot',   desc: 'Stamina recovers 40% faster',            cost: 175,  bought: false, apply: () => { shopStats.staminaRegenMult = 1.4; } },
   stamina2:  { name: 'Endurance Serum',   desc: 'Stamina recovers 100% faster',           cost: 450,  bought: false, apply: () => { shopStats.staminaRegenMult = 2.0; }, requires: 'stamina1' },
-  reserve1:  { name: 'Ammo Crate',       desc: 'Max reserve ammo increased to 120',       cost: 200,  bought: false, apply: () => { shopStats.reserveMax = 120; } },
+  reserve1:  { name: 'Ammo Crate',       desc: 'Max reserve ammo +50% (all guns)',        cost: 200,  bought: false, apply: () => { shopStats.reserveMult = 1.5; } },
   health1:   { name: 'Kevlar Vest',       desc: 'Max health increased to 140',            cost: 300,  bought: false, apply: () => { shopStats.maxHealth = 140; } },
+  // ── ARSENAL: weapon unlocks. Per-player like every other upgrade (reset each
+  //    run in startGame). apply() is a no-op — ownership is read straight off
+  //    `bought` by weaponOwned(); the buy handler tops up that weapon's bank. ──
+  wpn_shotgun: { name: 'Sawn-Off Shotgun', desc: '8-pellet close-range boomstick [2]',    cost: 450,  bought: false, apply: () => {}, weapon: 1 },
+  wpn_smg:     { name: 'Compact SMG',       desc: 'Fast fire · low dmg · deep mag [3]',    cost: 500,  bought: false, apply: () => {}, weapon: 2 },
+  wpn_flare:   { name: 'Flare Pistol',      desc: 'Lights a dark area ~8s [4]',            cost: 350,  bought: false, apply: () => {}, weapon: 3 },
 };
 
-// Active stat modifiers from shop
+// Active stat modifiers from shop. clipMult/reserveMult are MULTIPLIERS applied
+// to each weapon's own base clip/reserve (see wpnClip/wpnReserve).
 let shopStats = {
   damageMult: 1.0,
   fireRateMult: 1.0,
-  clipSize: CLIP_SIZE,
+  clipMult: 1.0,
   staminaRegenMult: 1.0,
-  reserveMax: RESERVE_MAX,
+  reserveMult: 1.0,
   maxHealth: MAX_HEALTH,
 };
+
+/* ═══════════════════════════════════════════
+   WEAPON SYSTEM — definition table + stat helpers
+   Weapon 0 (Pistol) uses the ORIGINAL pistol constants verbatim, so it behaves
+   bit-for-bit as before. Shop multipliers (damage/fireRate/clip/reserve) apply
+   across every weapon via the wpn* helpers below. Each weapon owns its combat
+   stats, a procedural viewmodel builder (build*, declared near createGun and
+   hoisted), a sound id, and optional flags (pellets/spread/falloff/flare).
+   ═══════════════════════════════════════════ */
+const WEAPONS = [
+  { id: 0, name: 'Pistol', slot: 1, shopKey: null,
+    damage: GUN_DAMAGE, fireRate: FIRE_RATE, clipSize: CLIP_SIZE, reserveMax: RESERVE_MAX,
+    reloadTime: RELOAD_TIME, range: GUN_RANGE, pellets: 1, spread: 0,
+    recoil: 0.15, muzzleTime: 0.08, muzzleColor: 0xffaa44, muzzleScale: 1.0,
+    sound: 'pistol', build: buildPistolViewmodel },
+
+  // Shotgun — close-range panic weapon: 8 pellets, steep damage falloff, slow
+  // fire, tiny clip. Per-pellet damage is low; point-blank all 8 = ~112 base.
+  { id: 1, name: 'Shotgun', slot: 2, shopKey: 'wpn_shotgun',
+    damage: 14, fireRate: 0.85, clipSize: 6, reserveMax: 36,
+    reloadTime: 2.4, range: 60, pellets: 8, spread: 0.105,
+    falloff: { near: 7, far: 26, farMult: 0.25 },
+    recoil: 0.42, muzzleTime: 0.13, muzzleColor: 0xffcc55, muzzleScale: 2.0,
+    sound: 'shotgun', build: buildShotgunViewmodel },
+
+  // SMG — spray weapon: very fast, low per-shot damage, big mag that drains the
+  // (also big) reserve fast. Slight spread so it isn't a laser.
+  { id: 2, name: 'SMG', slot: 3, shopKey: 'wpn_smg',
+    damage: 11, fireRate: 0.062, clipSize: 30, reserveMax: 180,
+    reloadTime: 1.8, range: 75, pellets: 1, spread: 0.024,
+    recoil: 0.075, muzzleTime: 0.045, muzzleColor: 0xfff0b0, muzzleScale: 0.8,
+    sound: 'smg', build: buildSmgViewmodel },
+
+  // Flare pistol — low damage, slow, single-shot, but the impact plants a light
+  // that illuminates the area for ~8s (see plantFlare/updateFlares). Made for
+  // the dark floors (Dark Pools).
+  { id: 3, name: 'Flare Gun', slot: 4, shopKey: 'wpn_flare',
+    damage: 20, fireRate: 1.1, clipSize: 1, reserveMax: 12,
+    reloadTime: 1.5, range: 50, pellets: 1, spread: 0,
+    recoil: 0.32, muzzleTime: 0.1, muzzleColor: 0xff5522, muzzleScale: 1.4,
+    sound: 'flare', flare: true, build: buildFlareViewmodel },
+];
+
+function curWeapon() { return WEAPONS[player.weaponIdx]; }
+function wpnClip(w)    { return Math.max(1, Math.round(w.clipSize * shopStats.clipMult)); }
+function wpnReserve(w) { return Math.round(w.reserveMax * shopStats.reserveMult); }
+function wpnFireRate(w){ return w.fireRate * shopStats.fireRateMult; }
+// Weapon falloff multiplier (1 at point-blank → farMult at range; flat 1 for
+// weapons with no falloff). Distance-only, independent of the damage upgrade.
+function wpnFalloff(w, dist) {
+  if (!w.falloff) return 1;
+  const f = w.falloff;
+  if (dist <= f.near) return 1;
+  if (dist >= f.far) return f.farMult;
+  return 1 + (f.farMult - 1) * (dist - f.near) / (f.far - f.near);
+}
+// Owned? Pistol (no shopKey) is always owned; the rest follow their shop item.
+function weaponOwned(idx) {
+  const w = WEAPONS[idx];
+  if (!w || !w.shopKey) return true;
+  return !!(shopUpgrades[w.shopKey] && shopUpgrades[w.shopKey].bought);
+}
+// Fill the whole per-weapon ammo bank to each weapon's current max (start of a
+// run, and the source of a freshly-bought weapon's loadout).
+function initWeaponBank() {
+  player.weaponAmmo = WEAPONS.map(w => ({ clip: wpnClip(w), reserve: wpnReserve(w) }));
+}
+// Top up the equipped gun + every stashed gun by ~3 mags on a floor clear.
+function floorReserveTopUp() {
+  for (let i = 0; i < WEAPONS.length; i++) {
+    const cap = wpnReserve(WEAPONS[i]), add = wpnClip(WEAPONS[i]) * 3;
+    if (i === player.weaponIdx) player.reserveAmmo = Math.min(cap, player.reserveAmmo + add);
+    else if (player.weaponAmmo[i]) player.weaponAmmo[i].reserve = Math.min(cap, player.weaponAmmo[i].reserve + add);
+  }
+}
 
 /* ═══════════════════════════════════════════
    PROCEDURAL TEXTURES (themed)
@@ -1496,10 +1591,31 @@ function pickExitCell(theme) {
 /* ═══════════════════════════════════════════
    3D GUN MODEL
    ═══════════════════════════════════════════ */
+// Shared viewmodel material palette — built fresh each createGun (disposed with
+// the group) so the per-floor dispose traversal stays correct. Returned as an
+// object the build* fns pull from, keeping each weapon's silhouette distinct
+// while sharing the metal/dark/grip/sight looks.
+function gunMatSet() {
+  return {
+    metal:  new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.4, metalness: 0.8 }),
+    dark:   new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.3, metalness: 0.9 }),
+    grip:   new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.85, metalness: 0.1 }),
+    sight:  new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.3, metalness: 0.9 }),
+    accent: new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.25, metalness: 0.9 }),
+  };
+}
+function addPart(group, geo, mat, x, y, z, rx, ry, rz) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  if (rx || ry || rz) m.rotation.set(rx || 0, ry || 0, rz || 0);
+  group.add(m);
+  return m;
+}
+
 function createGun() {
   if (gunGroup) {
-    // The gun is rebuilt every floor — dispose the old one's ~24 geometries
-    // and materials or they accumulate in VRAM per floor.
+    // The gun is rebuilt every weapon-switch / floor — dispose the old one's
+    // geometries and materials or they accumulate in VRAM.
     gunGroup.traverse(o => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
@@ -1511,84 +1627,13 @@ function createGun() {
   }
 
   gunGroup = new THREE.Group();
+  const w = curWeapon();
+  (w.build || buildPistolViewmodel)(gunGroup, gunMatSet());
 
-  const gunMetal = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.4, metalness: 0.8 });
-  const gunMetalDark = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.3, metalness: 0.9 });
-  const gripMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.85, metalness: 0.1 });
-  const sightMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.3, metalness: 0.9 });
-
-  const slide = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.05, 0.28), gunMetal);
-  slide.position.set(0, 0.015, -0.06);
-  gunGroup.add(slide);
-
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.08, 8), gunMetalDark);
-  barrel.rotation.x = Math.PI / 2;
-  barrel.position.set(0, 0.005, -0.24);
-  gunGroup.add(barrel);
-
-  const shroud = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 0.06), gunMetal);
-  shroud.position.set(0, 0.0, -0.22);
-  gunGroup.add(shroud);
-
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.03, 0.2), gunMetal);
-  frame.position.set(0, -0.02, -0.04);
-  gunGroup.add(frame);
-
-  const tGuard = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.003, 0.05), gunMetal);
-  tGuard.position.set(0, -0.045, -0.05);
-  gunGroup.add(tGuard);
-  const tGuardF = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.025, 0.003), gunMetal);
-  tGuardF.position.set(0, -0.034, -0.075);
-  gunGroup.add(tGuardF);
-  const tGuardB = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.015, 0.003), gunMetal);
-  tGuardB.position.set(0, -0.038, -0.025);
-  gunGroup.add(tGuardB);
-
-  const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.018, 0.004), new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.9, roughness: 0.2 }));
-  trigger.position.set(0, -0.035, -0.048);
-  gunGroup.add(trigger);
-
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.09, 0.04), gripMat);
-  grip.position.set(0, -0.075, -0.01);
-  grip.rotation.x = 0.15;
-  gunGroup.add(grip);
-
-  for (let i = 0; i < 5; i++) {
-    const line = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.002, 0.042), new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 }));
-    line.position.set(0, -0.04 - i * 0.015, -0.01);
-    line.rotation.x = 0.15;
-    gunGroup.add(line);
-  }
-
-  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.04, 0.034), gunMetalDark);
-  mag.position.set(0, -0.12, -0.008);
-  mag.rotation.x = 0.15;
-  gunGroup.add(mag);
-
-  const fSight = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.015, 0.006), sightMat);
-  fSight.position.set(0, 0.048, -0.17);
-  gunGroup.add(fSight);
-
-  const rSightL = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.012, 0.006), sightMat);
-  rSightL.position.set(-0.012, 0.046, 0.06);
-  gunGroup.add(rSightL);
-  const rSightR = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.012, 0.006), sightMat);
-  rSightR.position.set(0.012, 0.046, 0.06);
-  gunGroup.add(rSightR);
-
-  for (let i = 0; i < 6; i++) {
-    const ser = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.003, 0.002), gunMetalDark);
-    ser.position.set(0, 0.035, 0.02 + i * 0.012);
-    gunGroup.add(ser);
-  }
-
-  const ePort = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.004, 0.04), new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2, metalness: 1.0 }));
-  ePort.position.set(0.015, 0.038, -0.02);
-  gunGroup.add(ePort);
-
-  // Muzzle flash light (attached to gun)
-  muzzleFlashLight = new THREE.PointLight(0xffaa44, 0, 12);
-  muzzleFlashLight.position.set(0, 0, -0.3);
+  // Muzzle flash light (attached to gun) — color/range tuned per weapon, but it
+  // is still the SAME persistent slot pattern (intensity 0 when idle).
+  muzzleFlashLight = new THREE.PointLight(w.muzzleColor || 0xffaa44, 0, 12);
+  muzzleFlashLight.position.set(0, 0, -0.32);
   gunGroup.add(muzzleFlashLight);
 
   // Position gun in default (hip) view
@@ -1596,6 +1641,109 @@ function createGun() {
   gunGroup.rotation.set(0, 0, 0);
 
   camera.add(gunGroup);
+}
+
+/* ── Procedural viewmodels — each shaped with intent for a distinct silhouette,
+   still all primitives. They build INTO the passed group using the shared mat
+   set. ── */
+
+// PISTOL — the original 24-box pistol, unchanged.
+function buildPistolViewmodel(g, M) {
+  addPart(g, new THREE.BoxGeometry(0.045, 0.05, 0.28), M.metal, 0, 0.015, -0.06);          // slide
+  addPart(g, new THREE.CylinderGeometry(0.012, 0.012, 0.08, 8), M.dark, 0, 0.005, -0.24, Math.PI / 2); // barrel
+  addPart(g, new THREE.BoxGeometry(0.05, 0.04, 0.06), M.metal, 0, 0.0, -0.22);             // shroud
+  addPart(g, new THREE.BoxGeometry(0.042, 0.03, 0.2), M.metal, 0, -0.02, -0.04);           // frame
+  addPart(g, new THREE.BoxGeometry(0.035, 0.003, 0.05), M.metal, 0, -0.045, -0.05);        // trigger guard
+  addPart(g, new THREE.BoxGeometry(0.035, 0.025, 0.003), M.metal, 0, -0.034, -0.075);
+  addPart(g, new THREE.BoxGeometry(0.035, 0.015, 0.003), M.metal, 0, -0.038, -0.025);
+  addPart(g, new THREE.BoxGeometry(0.006, 0.018, 0.004), M.accent, 0, -0.035, -0.048);     // trigger
+  const grip = addPart(g, new THREE.BoxGeometry(0.038, 0.09, 0.04), M.grip, 0, -0.075, -0.01, 0.15);
+  for (let i = 0; i < 5; i++) addPart(g, new THREE.BoxGeometry(0.04, 0.002, 0.042), M.dark, 0, -0.04 - i * 0.015, -0.01, 0.15);
+  addPart(g, new THREE.BoxGeometry(0.03, 0.04, 0.034), M.dark, 0, -0.12, -0.008, 0.15);    // mag
+  addPart(g, new THREE.BoxGeometry(0.006, 0.015, 0.006), M.sight, 0, 0.048, -0.17);        // front sight
+  addPart(g, new THREE.BoxGeometry(0.006, 0.012, 0.006), M.sight, -0.012, 0.046, 0.06);    // rear sights
+  addPart(g, new THREE.BoxGeometry(0.006, 0.012, 0.006), M.sight, 0.012, 0.046, 0.06);
+  for (let i = 0; i < 6; i++) addPart(g, new THREE.BoxGeometry(0.048, 0.003, 0.002), M.dark, 0, 0.035, 0.02 + i * 0.012); // serrations
+  addPart(g, new THREE.BoxGeometry(0.02, 0.004, 0.04), M.dark, 0.015, 0.038, -0.02);       // ejection port
+}
+
+// SHOTGUN — fat double-barrel silhouette: wide twin tubes, a long wooden body
+// and a pump under the barrels. Reads instantly as a boomstick.
+function buildShotgunViewmodel(g, M) {
+  const wood = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.7, metalness: 0.05 });
+  const blued = new THREE.MeshStandardMaterial({ color: 0x20211f, roughness: 0.35, metalness: 0.85 });
+  // twin barrels
+  addPart(g, new THREE.CylinderGeometry(0.026, 0.026, 0.40, 12), blued, -0.022, 0.012, -0.18, Math.PI / 2);
+  addPart(g, new THREE.CylinderGeometry(0.026, 0.026, 0.40, 12), blued,  0.022, 0.012, -0.18, Math.PI / 2);
+  // muzzle caps
+  addPart(g, new THREE.CylinderGeometry(0.03, 0.03, 0.02, 12), M.dark, -0.022, 0.012, -0.375, Math.PI / 2);
+  addPart(g, new THREE.CylinderGeometry(0.03, 0.03, 0.02, 12), M.dark,  0.022, 0.012, -0.375, Math.PI / 2);
+  // receiver / breech block
+  addPart(g, new THREE.BoxGeometry(0.075, 0.07, 0.12), M.metal, 0, 0.0, 0.02);
+  // wooden forend (pump) slung under the barrels
+  addPart(g, new THREE.BoxGeometry(0.07, 0.045, 0.16), wood, 0, -0.045, -0.16);
+  for (let i = 0; i < 5; i++) addPart(g, new THREE.BoxGeometry(0.072, 0.004, 0.006), M.dark, 0, -0.024, -0.22 + i * 0.025); // grooves
+  // wooden stock/grip raked back
+  addPart(g, new THREE.BoxGeometry(0.05, 0.055, 0.16), wood, 0, -0.06, 0.11, 0.28);
+  addPart(g, new THREE.BoxGeometry(0.055, 0.06, 0.04), wood, 0, -0.11, 0.18, 0.28);        // butt
+  // trigger guard + trigger
+  addPart(g, new THREE.BoxGeometry(0.04, 0.004, 0.05), M.metal, 0, -0.05, 0.05);
+  addPart(g, new THREE.BoxGeometry(0.006, 0.02, 0.005), M.accent, 0, -0.04, 0.04);
+  // bead front sight
+  addPart(g, new THREE.SphereGeometry(0.007, 6, 6), M.sight, 0, 0.04, -0.37);
+}
+
+// SMG — boxy, compact: short receiver, stubby barrel + perforated shroud, a long
+// curved-ish mag, a wire-ish folding stock and a top rail.
+function buildSmgViewmodel(g, M) {
+  const poly = new THREE.MeshStandardMaterial({ color: 0x18191b, roughness: 0.6, metalness: 0.3 });
+  // receiver body
+  addPart(g, new THREE.BoxGeometry(0.05, 0.06, 0.20), poly, 0, 0.0, -0.04);
+  // top rail
+  addPart(g, new THREE.BoxGeometry(0.03, 0.012, 0.18), M.dark, 0, 0.04, -0.04);
+  for (let i = 0; i < 7; i++) addPart(g, new THREE.BoxGeometry(0.034, 0.006, 0.004), M.metal, 0, 0.05, -0.10 + i * 0.02); // rail teeth
+  // stubby barrel + vented shroud
+  addPart(g, new THREE.CylinderGeometry(0.011, 0.011, 0.14, 10), M.dark, 0, 0.005, -0.20, Math.PI / 2);
+  addPart(g, new THREE.CylinderGeometry(0.022, 0.022, 0.09, 12), M.metal, 0, 0.005, -0.17, Math.PI / 2);
+  for (let i = 0; i < 4; i++) addPart(g, new THREE.BoxGeometry(0.005, 0.03, 0.05), M.dark, 0.022 * Math.cos(i), 0.005, -0.17, 0, 0, i * 0.6); // vent slots
+  // long curved mag
+  addPart(g, new THREE.BoxGeometry(0.026, 0.13, 0.03), poly, 0, -0.10, -0.02, 0.22);
+  addPart(g, new THREE.BoxGeometry(0.026, 0.05, 0.03), poly, 0, -0.17, 0.0, 0.45);
+  // pistol grip
+  addPart(g, new THREE.BoxGeometry(0.034, 0.08, 0.038), M.grip, 0, -0.07, 0.06, 0.2);
+  // trigger guard
+  addPart(g, new THREE.BoxGeometry(0.036, 0.004, 0.05), poly, 0, -0.045, 0.03);
+  // skeleton folding stock (two thin rails + pad)
+  addPart(g, new THREE.BoxGeometry(0.006, 0.006, 0.14), M.metal, -0.018, 0.02, 0.12);
+  addPart(g, new THREE.BoxGeometry(0.006, 0.006, 0.14), M.metal,  0.018, 0.02, 0.12);
+  addPart(g, new THREE.BoxGeometry(0.05, 0.05, 0.012), M.dark, 0, 0.01, 0.19);
+  // front sight post
+  addPart(g, new THREE.BoxGeometry(0.005, 0.016, 0.005), M.sight, 0, 0.05, -0.21);
+}
+
+// FLARE GUN — fat stubby single-barrel break-action with a bright orange body
+// and a wide bore: visually unmistakable from the combat guns.
+function buildFlareViewmodel(g, M) {
+  const orange = new THREE.MeshStandardMaterial({ color: 0xc24a18, roughness: 0.55, metalness: 0.2, emissive: 0x3a1402, emissiveIntensity: 0.4 });
+  const black = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.5, metalness: 0.6 });
+  // wide short barrel
+  addPart(g, new THREE.CylinderGeometry(0.034, 0.036, 0.20, 14), orange, 0, 0.02, -0.14, Math.PI / 2);
+  // flared muzzle ring
+  addPart(g, new THREE.CylinderGeometry(0.044, 0.04, 0.025, 14), black, 0, 0.02, -0.245, Math.PI / 2);
+  addPart(g, new THREE.CylinderGeometry(0.03, 0.03, 0.01, 14), new THREE.MeshStandardMaterial({ color: 0x301000, roughness: 1, metalness: 0 }), 0, 0.02, -0.252, Math.PI / 2); // dark bore
+  // chunky receiver / hinge
+  addPart(g, new THREE.BoxGeometry(0.06, 0.06, 0.07), orange, 0, 0.0, -0.01);
+  addPart(g, new THREE.CylinderGeometry(0.012, 0.012, 0.07, 8), black, 0, 0.02, -0.03, 0, 0, Math.PI / 2); // hinge pin
+  // fat grip
+  addPart(g, new THREE.BoxGeometry(0.044, 0.10, 0.05), orange, 0, -0.075, 0.02, 0.2);
+  addPart(g, new THREE.BoxGeometry(0.046, 0.06, 0.052), black, 0, -0.105, 0.03, 0.2);   // grip base
+  // trigger guard + trigger
+  addPart(g, new THREE.BoxGeometry(0.04, 0.004, 0.05), black, 0, -0.045, 0.0);
+  addPart(g, new THREE.BoxGeometry(0.006, 0.02, 0.005), M.accent, 0, -0.035, -0.01);
+  // hammer spur
+  addPart(g, new THREE.BoxGeometry(0.012, 0.022, 0.01), black, 0, 0.03, 0.04, -0.3);
+  // bead sight
+  addPart(g, new THREE.SphereGeometry(0.006, 6, 6), M.sight, 0, 0.05, -0.22);
 }
 
 function updateGun(dt, isMoving, isSprinting) {
@@ -1644,10 +1792,11 @@ function updateGun(dt, isMoving, isSprinting) {
     0
   );
 
-  // Muzzle flash light
+  // Muzzle flash light — scaled by the weapon (shotgun flashes bigger, smg
+  // smaller). Still the same persistent slot, only its intensity changes.
   if (muzzleFlashTimer > 0) {
     muzzleFlashTimer -= dt;
-    muzzleFlashLight.intensity = muzzleFlashTimer * 60;
+    muzzleFlashLight.intensity = muzzleFlashTimer * 60 * (curWeapon().muzzleScale || 1);
   } else {
     muzzleFlashLight.intensity = 0;
   }
@@ -1938,9 +2087,11 @@ function updateAmmoPickups(dt) {
 
     const dx = p.x - player.pos.x, dz = p.z - player.pos.z;
     if (dx * dx + dz * dz < AMMO_PICKUP_RADIUS * AMMO_PICKUP_RADIUS) {
-      if (player.reserveAmmo >= shopStats.reserveMax) continue; // already full
+      const w = curWeapon();
+      const rmax = wpnReserve(w);
+      if (player.reserveAmmo >= rmax) continue; // already full for the equipped gun
       // +1 magazine of reserve, capped at the (possibly shop-upgraded) max
-      player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize);
+      player.reserveAmmo = Math.min(rmax, player.reserveAmmo + wpnClip(w));
       playPickup();
       scene.remove(p.mesh);
       ammoPickups.splice(i, 1);
@@ -1992,6 +2143,7 @@ function buildMazeScene() {
   netOnSceneTeardown();
   for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
   bulletTrails = [];
+  clearImpactFx(); // pull pooled sparks/decals/flare out before the dispose pass (shared geo/mats)
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
   for (const b of balloons) scene.remove(b.mesh);    // same pattern: shared balloon geo/mats stay out of the dispose traverse
   balloons = [];
@@ -2206,6 +2358,13 @@ function buildMazeScene() {
     scene.add(l);
     bossProjLights.push(l);
   }
+
+  // Flare slot — persistent, parked dark below the floor until a flare is fired.
+  // Freed by dropping CEILING_LIGHT_BUDGET 26→25, so the 32-light total holds.
+  flareLight = new THREE.PointLight(0xff5a22, 0, CELL * 3.6);
+  flareLight.position.set(0, -100, 0);
+  scene.add(flareLight);
+  flareState.active = false; flareState.timer = 0; // a new floor clears any live flare
 
   // Fog
   scene.fog = new THREE.Fog(theme.fogColor, theme.fogNear, theme.fogFar);
@@ -2810,97 +2969,331 @@ function updateBulletTrails(dt) {
   }
 }
 
+/* ═══════════════════════════════════════════
+   IMPACT FX — wall raycast, sparks, bullet-hole decals, flare light
+   All pooled, all using the already-pinned MeshStandardMaterial (no-map)
+   program family (same one the teammate muzzle flash uses) so no new shader
+   program is introduced. NO new lights except the single flare slot above.
+   ═══════════════════════════════════════════ */
+
+// Grid DDA wall raycast (2D, ignores Y). Returns the first wall the ray crosses
+// as { point, normal, dist } or null (open to max range). Walkable = grid cell
+// 1 (floor) or 2 (pool); anything else, incl. out-of-bounds, is a wall. Used
+// ONLY for cosmetics (trail clip, spark/decal placement) — combat raycasts are
+// unchanged, so enemy hit logic is untouched.
+function raycastWall(origin, dir, maxDist) {
+  if (!mazeGrid || !mazeGrid.length) return null;
+  const dx = dir.x, dz = dir.z;
+  if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return null;
+  let gx = Math.floor(origin.x / CELL), gy = Math.floor(origin.z / CELL);
+  const stepX = dx >= 0 ? 1 : -1, stepZ = dz >= 0 ? 1 : -1;
+  const nextBX = (gx + (dx >= 0 ? 1 : 0)) * CELL;
+  const nextBZ = (gy + (dz >= 0 ? 1 : 0)) * CELL;
+  let tMaxX = Math.abs(dx) < 1e-6 ? Infinity : (nextBX - origin.x) / dx;
+  let tMaxZ = Math.abs(dz) < 1e-6 ? Infinity : (nextBZ - origin.z) / dz;
+  const tDeltaX = Math.abs(dx) < 1e-6 ? Infinity : Math.abs(CELL / dx);
+  const tDeltaZ = Math.abs(dz) < 1e-6 ? Infinity : Math.abs(CELL / dz);
+  let axis = 'x';
+  for (let i = 0; i < 256; i++) {
+    let t;
+    if (tMaxX < tMaxZ) { gx += stepX; t = tMaxX; tMaxX += tDeltaX; axis = 'x'; }
+    else               { gy += stepZ; t = tMaxZ; tMaxZ += tDeltaZ; axis = 'z'; }
+    if (t > maxDist) return null;
+    const row = mazeGrid[gy];
+    const cell = row ? row[gx] : undefined;
+    if (cell !== 1 && cell !== 2) {
+      const point = origin.clone().add(dir.clone().multiplyScalar(t));
+      const normal = axis === 'x' ? new THREE.Vector3(-stepX, 0, 0) : new THREE.Vector3(0, 0, -stepZ);
+      return { point, normal, dist: t };
+    }
+  }
+  return null;
+}
+
+// ── Sparks: pooled tiny emissive boxes that fly out + fade (~0.25s). No lights. ──
+const SPARK_POOL_SIZE = 64;
+let sparkPool = [], sparkGeo = null, sparkMat = null;
+function ensureSparkPool() {
+  if (sparkGeo) return;
+  sparkGeo = new THREE.BoxGeometry(0.05, 0.05, 0.05);
+  sparkMat = new THREE.MeshStandardMaterial({ color: 0xffd27a, emissive: 0xffaa44, emissiveIntensity: 2.6, transparent: true, opacity: 1 });
+  for (let i = 0; i < SPARK_POOL_SIZE; i++) {
+    const mesh = new THREE.Mesh(sparkGeo, sparkMat);
+    mesh.visible = false;
+    sparkPool.push({ mesh, active: false, life: 0, maxLife: 0.25, vel: new THREE.Vector3() });
+  }
+}
+let _sparkScan = 0;
+function spawnImpactSparks(point, count) {
+  ensureSparkPool();
+  for (let n = 0; n < count; n++) {
+    // find a free slot (round-robin scan; skip if pool saturated)
+    let s = null;
+    for (let k = 0; k < SPARK_POOL_SIZE; k++) {
+      const cand = sparkPool[(_sparkScan + k) % SPARK_POOL_SIZE];
+      if (!cand.active) { s = cand; _sparkScan = (_sparkScan + k + 1) % SPARK_POOL_SIZE; break; }
+    }
+    if (!s) return;
+    s.active = true;
+    s.life = s.maxLife = 0.18 + Math.random() * 0.12;
+    s.mesh.position.copy(point);
+    s.mesh.visible = true;
+    s.mesh.scale.setScalar(0.6 + Math.random() * 0.8);
+    s.vel.set((Math.random() - 0.5) * 6, (Math.random() - 0.2) * 6, (Math.random() - 0.5) * 6);
+    if (!s.mesh.parent) scene.add(s.mesh);
+  }
+}
+function updateImpactSparks(dt) {
+  for (const s of sparkPool) {
+    if (!s.active) continue;
+    s.life -= dt;
+    if (s.life <= 0) { s.active = false; s.mesh.visible = false; continue; }
+    s.vel.y -= 14 * dt; // gravity
+    s.mesh.position.addScaledVector(s.vel, dt);
+    s.mesh.scale.setScalar(Math.max(0.05, (s.life / s.maxLife) * 1.2));
+  }
+}
+
+// ── Bullet-hole decals: pooled dark quads, max 20, oldest recycled (ring). ──
+const DECAL_POOL_MAX = 20;
+let decalPool = [], decalRing = 0, decalGeo = null, decalMat = null;
+function ensureDecalPool() {
+  if (decalGeo) return;
+  decalGeo = new THREE.PlaneGeometry(0.17, 0.17);
+  decalMat = new THREE.MeshStandardMaterial({ color: 0x0a0807, roughness: 1, metalness: 0, transparent: true, opacity: 0.72, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+}
+function spawnBulletHole(point, normal) {
+  // skip if the hit is above the wall or below the floor band (DDA ignores Y)
+  if (point.y < 0.12 || point.y > WALL_H - 0.12) return;
+  ensureDecalPool();
+  let slot = decalPool[decalRing];
+  if (!slot) { slot = new THREE.Mesh(decalGeo, decalMat); decalPool[decalRing] = slot; }
+  decalRing = (decalRing + 1) % DECAL_POOL_MAX;
+  slot.position.copy(point).addScaledVector(normal, 0.013);
+  slot.lookAt(point.clone().add(normal));
+  slot.rotation.z = (point.x * 7.3 + point.z * 3.1) % Math.PI; // pseudo-random spin, deterministic
+  slot.visible = true;
+  if (!slot.parent) scene.add(slot);
+}
+
+// ── Flare light: plant the persistent slot + a glowing bead at the impact for
+//    ~8s, flickering down. ONE slot — a new flare re-plants it (last wins). ──
+const FLARE_DURATION = 8;
+let flareState = { active: false, timer: 0, mesh: null };
+let flareGeo = null, flareMat = null;
+function plantFlare(point) {
+  if (!flareLight) return;
+  if (!flareGeo) {
+    flareGeo = new THREE.SphereGeometry(0.09, 8, 8);
+    flareMat = new THREE.MeshStandardMaterial({ color: 0xff6622, emissive: 0xff5522, emissiveIntensity: 3, transparent: true, opacity: 1 });
+    flareState.mesh = new THREE.Mesh(flareGeo, flareMat);
+  }
+  flareState.active = true;
+  flareState.timer = FLARE_DURATION;
+  flareLight.position.copy(point);
+  flareLight.position.y = Math.max(0.5, Math.min(WALL_H - 0.3, flareLight.position.y));
+  flareState.mesh.position.copy(flareLight.position);
+  flareState.mesh.visible = true;
+  if (!flareState.mesh.parent) scene.add(flareState.mesh);
+}
+function updateFlares(dt) {
+  if (!flareState.active) { if (flareLight) flareLight.intensity = 0; return; }
+  flareState.timer -= dt;
+  if (flareState.timer <= 0) {
+    flareState.active = false;
+    if (flareLight) flareLight.intensity = 0;
+    if (flareState.mesh) flareState.mesh.visible = false;
+    return;
+  }
+  const k = flareState.timer / FLARE_DURATION;
+  const flick = 0.82 + 0.18 * Math.sin(clock.getElapsedTime() * 28);
+  flareLight.intensity = 2.6 * Math.max(0.15, k) * flick;
+  if (flareState.mesh) {
+    flareState.mesh.material.emissiveIntensity = 3 * Math.max(0.2, k) * flick;
+    flareState.mesh.material.opacity = Math.min(1, k * 2.2);
+  }
+}
+
+// Pull every active pooled FX mesh OUT of the scene before the buildMazeScene
+// teardown traversal runs — their geo/mats are module-level SHARED (never
+// disposed), so they must not be caught by that dispose pass (same contract as
+// ammo pickups / balloons).
+function clearImpactFx() {
+  for (const s of sparkPool) { if (s.mesh.parent) scene.remove(s.mesh); s.active = false; s.mesh.visible = false; }
+  for (const d of decalPool) { if (d && d.parent) scene.remove(d); }
+  decalRing = 0;
+  if (flareState.mesh && flareState.mesh.parent) scene.remove(flareState.mesh);
+  flareState.active = false; flareState.timer = 0;
+}
+
+/* ═══════════════════════════════════════════
+   WEAPON SWITCHING
+   ═══════════════════════════════════════════ */
+// Stow the active weapon's ammo, equip idx, restore its ammo, rebuild the
+// viewmodel. Owned-only; a denied switch is silent. Brief fire delay so a
+// switch can't instantly fire the new gun.
+function switchWeapon(idx) {
+  if (idx < 0 || idx >= WEAPONS.length || idx === player.weaponIdx) return;
+  if (player.isDown || !weaponOwned(idx)) return;
+  player.weaponAmmo[player.weaponIdx] = { clip: player.clipAmmo, reserve: player.reserveAmmo };
+  player.weaponIdx = idx;
+  let a = player.weaponAmmo[idx];
+  if (!a) { a = { clip: wpnClip(WEAPONS[idx]), reserve: wpnReserve(WEAPONS[idx]) }; player.weaponAmmo[idx] = a; }
+  player.clipAmmo = a.clip;
+  player.reserveAmmo = a.reserve;
+  player.isReloading = false;
+  player.reloadTimer = 0;
+  player.fireTimer = 0.18;
+  document.getElementById('reloadBarContainer').style.opacity = '0';
+  hudSetStyle('ammoWarning', 'opacity', '0');
+  createGun();
+  playWeaponSwitch();
+  updateHUD();
+}
+// Scroll to the next/prev OWNED weapon.
+function cycleWeapon(dir) {
+  const n = WEAPONS.length;
+  for (let step = 1; step <= n; step++) {
+    const idx = ((player.weaponIdx + dir * step) % n + n) % n;
+    if (weaponOwned(idx)) { switchWeapon(idx); return; }
+  }
+}
+
+// Build the per-pellet direction rays for a shot: 1 clean ray for a no-spread
+// weapon, else N rays randomly distributed in the weapon's spread cone. The
+// SHOOTER generates these and (in MP) ships them so the host resolves the very
+// same rays — combat already being non-deterministic (damage variance / drops),
+// the spread randomness rides along with it.
+function buildPelletRays(baseDir, w) {
+  const rays = [];
+  if (w.pellets <= 1 && !w.spread) { rays.push(baseDir.clone().normalize()); return rays; }
+  const up = Math.abs(baseDir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(baseDir, up).normalize();
+  const realUp = new THREE.Vector3().crossVectors(right, baseDir).normalize();
+  const n = Math.max(1, w.pellets);
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * w.spread; // uniform over the disc
+    rays.push(baseDir.clone()
+      .addScaledVector(right, Math.cos(a) * r)
+      .addScaledVector(realUp, Math.sin(a) * r)
+      .normalize());
+  }
+  return rays;
+}
+
+// Resolve ONE pellet against boss → (enemy vs balloon, nearest wins), applying
+// the weapon's distance-faloff damage. Shared by the local host shot and the
+// host's resolution of a remote client's pellet (shooterConn routes the kill
+// reward / balloon aggro). Returns { hit, killed, point, kind }.
+// dmgMult defaults to the LOCAL player's shop damage; a remote client's shot
+// passes its own multiplier (client-trusted, same as before) so the host scores
+// it with the shooter's upgrades, not the host's.
+function resolveCombatPellet(origin, dir, w, shooterConn, dmgMult) {
+  const mult = dmgMult != null ? dmgMult : shopStats.damageMult;
+  const ray = new THREE.Raycaster(origin.clone(), dir.clone().normalize(), 0.1, w.range);
+  const dmgAt = (dist) => w.damage * mult * wpnFalloff(w, dist) * (0.9 + Math.random() * 0.3);
+  if (bossEntity && bossEntity.alive) {
+    const bHit = raycastBoss(ray);
+    if (bHit) {
+      damageBoss(dmgAt(origin.distanceTo(bHit)));
+      return { hit: true, killed: false, point: bHit.clone(), kind: 'boss' };
+    }
+  }
+  const res = raycastEnemies(ray, origin);
+  const bres = balloons.length > 0 ? raycastBalloons(ray, origin) : null;
+  if (bres && (!res || bres.dist < origin.distanceTo(res.point))) {
+    popBalloon(bres.balloon, shooterConn);
+    return { hit: true, killed: false, point: bres.point.clone(), kind: 'balloon' };
+  }
+  if (res) {
+    const killed = applyEnemyHit(res.enemy, dmgAt(origin.distanceTo(res.point)), shooterConn);
+    return { hit: true, killed, point: res.point.clone(), kind: 'enemy' };
+  }
+  return { hit: false, killed: false, point: null, kind: null };
+}
+
+// Cosmetics for one pellet: trail to the impact, sparks, and a wall decal on a
+// miss. bodyPoint (an enemy/boss/balloon hit) overrides the wall raycast.
+function drawPelletFx(gunTip, origin, dir, w, bodyPoint) {
+  let end, isWall = false, normal = null;
+  if (bodyPoint) {
+    end = bodyPoint;
+  } else {
+    const wh = raycastWall(origin, dir, w.range);
+    if (wh) { end = wh.point; isWall = true; normal = wh.normal; }
+    else end = origin.clone().add(dir.clone().normalize().multiplyScalar(w.range));
+  }
+  spawnBulletTrail(gunTip, end);
+  spawnImpactSparks(end, w.pellets > 1 ? 2 : (w.sound === 'smg' ? 2 : 4));
+  if (isWall) spawnBulletHole(end, normal);
+}
+
+// Where a flare's light plants: the wall it strikes (pulled back slightly) or a
+// capped throw distance, so the glow lands in the room rather than at max range.
+function flareImpactPoint(origin, dir, w) {
+  const THROW = 14;
+  const wh = raycastWall(origin, dir, THROW);
+  if (wh) return wh.point.clone().addScaledVector(dir.clone().normalize(), -0.3);
+  return origin.clone().add(dir.clone().normalize().multiplyScalar(THROW));
+}
+
+function ammoWarnAndHud() {
+  if (player.clipAmmo === 0 && player.reserveAmmo > 0) hudSetStyle('ammoWarning', 'opacity', '1');
+  updateHUD();
+}
+
 function playerShoot() {
   if (player.isDown) return; // MP: downed players can't shoot
   if (player.isReloading || player.fireTimer > 0 || player.clipAmmo <= 0) return;
+  const w = curWeapon();
   player.clipAmmo--;
-  player.fireTimer = FIRE_RATE * shopStats.fireRateMult;
-  gunRecoil = 0.15;
-  muzzleFlashTimer = 0.08;
-  playGunshot();
+  player.fireTimer = wpnFireRate(w);
+  gunRecoil = w.recoil;
+  muzzleFlashTimer = w.muzzleTime;
+  playWeaponShot(w.sound);
 
   // Screen flash
   document.getElementById('muzzleOverlay').style.opacity = '1';
   setTimeout(() => document.getElementById('muzzleOverlay').style.opacity = '0', 45);
 
-  // Raycast
-  const dir = new THREE.Vector3(0, 0, -1);
-  dir.applyQuaternion(camera.quaternion);
-  const ray = new THREE.Raycaster(camera.position.clone(), dir, 0.1, GUN_RANGE);
+  const baseDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const rays = buildPelletRays(baseDir, w);
 
-  // MP HOST: clients' shots reach peers via the 'shoot' relay; the host's own
-  // shots need this explicit cosmetic broadcast (net.js — trail/flash/sound).
-  if (netState.role === 'host') netAnnounceShot(camera.position, dir);
-
-  // Compute gun tip world position for bullet trail start
-  const gunTip = new THREE.Vector3(0, 0, -0.3);
+  // Gun tip (world) for trail starts
+  const gunTip = new THREE.Vector3(0, 0, -0.32);
   if (gunGroup) gunTip.applyMatrix4(gunGroup.matrixWorld);
   else gunTip.copy(camera.position);
 
-  // Default trail end = max range in firing direction
-  let trailEnd = camera.position.clone().add(dir.clone().multiplyScalar(GUN_RANGE));
-  const effectiveDamage = GUN_DAMAGE * shopStats.damageMult;
+  // MP HOST: clients' shots reach peers via the 'shoot' relay; the host's own
+  // shots need this explicit cosmetic broadcast (net.js — carries weapon + rays).
+  if (netState.role === 'host') netAnnounceShot(camera.position, baseDir, rays, w.id);
 
-  // MP CLIENT: this machine has no authoritative enemies — everything above
-  // (ammo, recoil, flash, sound) already played for zero-latency feel; send the
-  // ray to the host, which resolves the hit. The outcome comes back via the
-  // next enemy snapshot (hp drop / death).
+  // MP CLIENT: no authoritative enemies here — play cosmetics locally and send
+  // the rays to the host, which resolves damage (result returns via snapshot).
   if (netIsClient()) {
-    netSendShoot(camera.position, dir);
-    spawnBulletTrail(gunTip, trailEnd);
-    if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-      hudSetStyle('ammoWarning', 'opacity', '1');
-    }
-    updateHUD();
+    netSendShoot(camera.position, baseDir, rays, w.id);
+    for (const rd of rays) drawPelletFx(gunTip, camera.position, rd, w, null);
+    if (w.flare) plantFlare(flareImpactPoint(camera.position, baseDir, w));
+    ammoWarnAndHud();
     return;
   }
 
-  // Check boss hit
-  if (bossEntity && bossEntity.alive) {
-    const bHit = raycastBoss(ray);
-    if (bHit) {
-      const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
-      damageBoss(dmg);
-      playHit();
-      hitmarkerTimer = 0.18;
-      hitmarkerKill = false;
-      trailEnd = bHit.clone();
-      spawnBulletTrail(gunTip, trailEnd);
-
-      if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-        hudSetStyle('ammoWarning', 'opacity', '1');
-      }
-      updateHUD();
-      return;
-    }
+  // HOST / SOLO: resolve every pellet authoritatively.
+  let anyHit = false, kills = 0;
+  for (const rd of rays) {
+    const r = resolveCombatPellet(camera.position, rd, w, null);
+    if (r.hit) { anyHit = true; if (r.killed) kills++; }
+    drawPelletFx(gunTip, camera.position, rd, w, r.point);
   }
-
-  // Nearest thing the ray crosses wins: enemy or (Level Fun) a balloon — a
-  // mob standing in front of a balloon still takes the bullet.
-  const res = raycastEnemies(ray, camera.position);
-  const bres = balloons.length > 0 ? raycastBalloons(ray, camera.position) : null;
-  if (bres && (!res || bres.dist < camera.position.distanceTo(res.point))) {
-    trailEnd = bres.point.clone();
-    popBalloon(bres.balloon, null); // null = the host's own shot
-    hitmarkerTimer = 0.18;
-    hitmarkerKill = false;
-  } else if (res) {
-    trailEnd = res.point.clone();
-    const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
-    const killed = applyEnemyHit(res.enemy, dmg);
+  if (anyHit) {
     playHit();
     hitmarkerTimer = 0.18;
-    hitmarkerKill = killed;
-    if (killed) player.kills++;
+    hitmarkerKill = kills > 0;
+    player.kills += kills;
   }
-
-  // Spawn bullet trail
-  spawnBulletTrail(gunTip, trailEnd);
-
-  if (player.clipAmmo === 0 && player.reserveAmmo > 0) {
-    hudSetStyle('ammoWarning', 'opacity', '1');
-  }
-  updateHUD();
+  if (w.flare) plantFlare(flareImpactPoint(camera.position, baseDir, w));
+  ammoWarnAndHud();
 }
 
 /* ── shared hitscan + hit application ──
@@ -2990,30 +3383,22 @@ function applyEnemyHit(e, dmg, shooterConn) {
 // move host-side if this ever goes public).
 function netResolveRemoteShot(d, fromConn) {
   const origin = new THREE.Vector3(d.ox, d.oy, d.oz);
-  const dir = new THREE.Vector3(d.dx, d.dy, d.dz).normalize();
-  const ray = new THREE.Raycaster(origin, dir, 0.1, GUN_RANGE);
-  const dmg = GUN_DAMAGE * (d.m || 1) * (0.9 + Math.random() * 0.3);
-
-  if (bossEntity && bossEntity.alive && raycastBoss(ray)) {
-    damageBoss(dmg);
-    return;
-  }
-  // Same nearest-wins balloon check as playerShoot — a client's relayed shot
-  // pops balloons too, and the trap aggros onto THAT client (fromConn).
-  const res = raycastEnemies(ray, origin);
-  const bres = balloons.length > 0 ? raycastBalloons(ray, origin) : null;
-  if (bres && (!res || bres.dist < origin.distanceTo(res.point))) {
-    popBalloon(bres.balloon, fromConn);
-    return;
-  }
-  if (res) applyEnemyHit(res.enemy, dmg, fromConn);
+  const w = WEAPONS[d.w] || WEAPONS[0];
+  // Pellet rays the client actually fired (d.p); fall back to the single aim dir
+  // for a one-ray weapon. Each is resolved with the shooter's own damage mult.
+  const rays = (d.p && d.p.length)
+    ? d.p.map(p => new THREE.Vector3(p[0], p[1], p[2]).normalize())
+    : [new THREE.Vector3(d.dx, d.dy, d.dz).normalize()];
+  for (const rd of rays) resolveCombatPellet(origin, rd, w, fromConn, d.m || 1);
 }
 
 function playerReload() {
   if (player.isDown) return; // MP: downed players can't reload
-  if (player.isReloading || player.clipAmmo === shopStats.clipSize || player.reserveAmmo <= 0) return;
+  const w = curWeapon();
+  if (player.isReloading || player.clipAmmo >= wpnClip(w) || player.reserveAmmo <= 0) return;
   player.isReloading = true;
-  player.reloadTimer = RELOAD_TIME;
+  player.reloadTimer = w.reloadTime;
+  player.reloadDuration = w.reloadTime; // for the HUD bar fill ratio (per-weapon)
   playReload();
   document.getElementById('reloadBarContainer').style.opacity = '1';
   hudSetStyle('ammoWarning', 'opacity', '0');
@@ -3097,9 +3482,10 @@ function updatePlayer(dt) {
 
   if (player.isReloading) {
     player.reloadTimer -= dt;
-    document.getElementById('reloadBarFill').style.width = ((1 - player.reloadTimer / RELOAD_TIME) * 100) + '%';
+    const rdur = player.reloadDuration || RELOAD_TIME;
+    document.getElementById('reloadBarFill').style.width = ((1 - player.reloadTimer / rdur) * 100) + '%';
     if (player.reloadTimer <= 0) {
-      const take = Math.min(shopStats.clipSize - player.clipAmmo, player.reserveAmmo);
+      const take = Math.min(wpnClip(curWeapon()) - player.clipAmmo, player.reserveAmmo);
       player.clipAmmo += take;
       player.reserveAmmo -= take;
       player.isReloading = false;
@@ -3153,7 +3539,7 @@ function advanceFloor() {
   currentWave = 1;
   player.floorReached = currentFloor;
   player.health = Math.min(shopStats.maxHealth, player.health + 35);
-  player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize * 3);
+  floorReserveTopUp(); // ~3 mags back across the equipped gun + every stashed gun
 
   const theme = generateCurrentFloor();
   netOnHostStart(currentFloor, floorSeed); // MP: rebuild all clients on this floor
@@ -3464,6 +3850,7 @@ function updateHUD() {
   // new string (= a new layout pass) on literally every frame
   hudSetStyle('healthFill', 'width', (player.health / shopStats.maxHealth * 100).toFixed(1) + '%');
   hudSetStyle('staminaFill', 'width', (player.stamina / MAX_STAMINA * 100).toFixed(1) + '%');
+  hudSetText('ammoWeapon', curWeapon().name);
   hudSetText('ammoCurrent', String(player.clipAmmo));
   hudSetText('ammoReserve', '/ ' + player.reserveAmmo);
   hudSetText('hudFloor', 'Level ' + currentFloor);
@@ -3577,8 +3964,6 @@ function startGame() {
 
   player.health = shopStats.maxHealth;
   player.stamina = MAX_STAMINA;
-  player.clipAmmo = shopStats.clipSize;
-  player.reserveAmmo = shopStats.reserveMax;
   player.isReloading = false;
   player.kills = 0;
   player.floorReached = 0;
@@ -3597,12 +3982,19 @@ function startGame() {
   shopStats = {
     damageMult: 1.0,
     fireRateMult: 1.0,
-    clipSize: CLIP_SIZE,
+    clipMult: 1.0,
     staminaRegenMult: 1.0,
-    reserveMax: RESERVE_MAX,
+    reserveMult: 1.0,
     maxHealth: MAX_HEALTH,
   };
   for (const k in shopUpgrades) shopUpgrades[k].bought = false;
+
+  // WEAPONS: back to the pistol with a full ammo bank for every gun. Owned
+  // weapons reset with the shop above (per-run, like upgrades).
+  player.weaponIdx = 0;
+  initWeaponBank();
+  player.clipAmmo = player.weaponAmmo[0].clip;
+  player.reserveAmmo = player.weaponAmmo[0].reserve;
 
   const theme = generateCurrentFloor();
   // MP: the HOST announces the run (floor + seed) so connected clients start
@@ -3777,6 +4169,10 @@ document.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyR' && gameState === 'playing') playerReload();
   if (e.code === 'KeyF' && gameState === 'playing') toggleFlashlight();
+  // Weapon select 1-4 (Digit row + numpad). Owned-only switch is handled inside.
+  if (gameState === 'playing' && /^(Digit|Numpad)[1-4]$/.test(e.code)) {
+    switchWeapon(parseInt(e.code.slice(-1), 10) - 1);
+  }
   if (DEV_MODE && e.code === 'KeyL' && gameState === 'playing') { // PART 1: dev-only debug labels
     window.debugLabels = !window.debugLabels;     // DEV: toggle enemy type labels
     console.log('debug labels:', window.debugLabels); // confirms the L handler fired
@@ -3793,6 +4189,12 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Scroll wheel cycles through OWNED weapons (down = next, up = previous).
+document.addEventListener('wheel', e => {
+  if (gameState !== 'playing' || document.pointerLockElement !== document.body) return;
+  cycleWeapon(e.deltaY > 0 ? 1 : -1);
+}, { passive: true });
 
 document.addEventListener('mousemove', e => {
   if (gameState !== 'playing' || document.pointerLockElement !== document.body) return;
@@ -3956,6 +4358,7 @@ document.getElementById('sliderVolAmbient').addEventListener('input', e => {
 // Upgrade tracks: tier 1 above tier 2 in a labeled column each, so the
 // prerequisite chains read top-down instead of being an unordered pile.
 const SHOP_TRACKS = [
+  { title: 'ARSENAL',   keys: ['wpn_shotgun', 'wpn_smg', 'wpn_flare'] },
   { title: 'FIREPOWER', keys: ['damage1', 'damage2'] },
   { title: 'TRIGGER',   keys: ['firerate1', 'firerate2'] },
   { title: 'MAGAZINE',  keys: ['mag1', 'mag2'] },
@@ -4010,10 +4413,15 @@ function updateShopUI() {
             up.bought = true;
             up.apply();
 
-            // Heal/ammo fill up to new max on upgrades
+            // Heal/ammo fill up to the new max on upgrades (now multiplier-based).
             if (key.includes('health')) player.health = shopStats.maxHealth;
-            if (key.includes('mag')) player.clipAmmo = shopStats.clipSize;
-            if (key.includes('reserve')) player.reserveAmmo = shopStats.reserveMax;
+            if (key.includes('mag')) player.clipAmmo = wpnClip(curWeapon());
+            if (key.includes('reserve')) player.reserveAmmo = wpnReserve(curWeapon());
+            // Weapon unlock: stock it full and equip it for instant feedback.
+            if (up.weapon != null) {
+              player.weaponAmmo[up.weapon] = { clip: wpnClip(WEAPONS[up.weapon]), reserve: wpnReserve(WEAPONS[up.weapon]) };
+              switchWeapon(up.weapon);
+            }
 
             div.classList.add('shop-flash');
             playReload();
@@ -4159,6 +4567,8 @@ function animate() {
     updateAmbient(dt);
     updateWaterFX(dt); // pools floors: water UV drift + caustics pulse (no-op elsewhere)
     updateBulletTrails(dt);
+    updateImpactSparks(dt); // pooled spark particles fly out + fade (no lights)
+    updateFlares(dt);       // flare light/bead countdown (no-op when idle)
     updateAmmoPickups(dt);
     updateBalloons(dt); // Level Fun: balloon bob/sway (no-op elsewhere — empty list)
     updateHUD();

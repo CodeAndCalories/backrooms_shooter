@@ -24,6 +24,53 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Weapon system + 3 new guns + visual polish landed (June 11, UNPLAYED):**
+  - **Weapon definition system:** WEAPONS table (main.js) — each gun = stats
+    (damage/fireRate/clipSize/reserveMax/reloadTime/range/pellets/spread/falloff)
+    + a procedural viewmodel builder + sound id + flags. Weapon 0 (Pistol) uses
+    the ORIGINAL pistol constants verbatim (headless-proven byte-identical).
+    Switch on keys 1-4 (Digit+Numpad) and scroll wheel (cycles OWNED guns only).
+    Per-weapon ammo BANK (player.weaponAmmo[]) stowed/restored on switch;
+    player.clipAmmo/reserveAmmo always mirror the active gun so HUD/reload/shoot
+    read one place. HUD shows the equipped weapon name.
+  - **Shop made multiplier-based so upgrades scale every gun:** mag1/mag2 are now
+    clipMult 1.5/2.5 (pistol still 12→18→30 EXACT), reserve1 is reserveMult 1.5
+    (pistol 84→126, was 120). damage/fireRate were already mults. shopStats lost
+    clipSize/reserveMax, gained clipMult/reserveMult.
+  - **THREE NEW GUNS** (ARSENAL shop track, per-player like upgrades, reset each
+    run): SHOTGUN [2] $450 — 8 pellets, 0.105rad spread, steep falloff
+    (1→0.25 over 7-26u), slow 0.85s fire, 6 clip, heavy procedural boom. SMG [3]
+    $500 — 0.062s fire, 11 dmg, 30 clip / 180 reserve, slight spread, snappy
+    crack. FLARE [4] $350 — 20 dmg, 1.1s, 1 clip; impact PLANTS LIGHT for 8s.
+  - **FLARE LIGHT within the 32-light budget:** dropped CEILING_LIGHT_BUDGET
+    26→25 (still covers the worst real 5x5=25 placement; only the 1 spare pad is
+    gone — zero visual change) and added ONE persistent flare slot (intensity 0
+    when idle, planted at the impact, flickers down over 8s). Recreated per floor
+    like bossLight. 25+boss1+proj3+exit1+muzzle1+flare1 = 32 point lights held.
+  - **Visual polish (all guns):** distinct primitive viewmodels per gun (twin
+    wood-stocked shotgun / boxy railed SMG / fat orange break-action flare),
+    per-weapon muzzle-flash color+scale on the existing muzzle slot, pooled
+    impact SPARKS (64 emissive boxes, fly+fade, NO lights), pooled bullet-hole
+    DECALS (max 20 dark quads, oldest recycled, oriented to the wall normal).
+    Sparks/decals/flare-bead all use the already-pinned MeshStandardMaterial
+    (no-map) program family (same as the teammate muzzle flash) — NO new shader
+    program. New grid-DDA raycastWall (cosmetics only: trail clip + spark/decal
+    placement; combat raycasts UNCHANGED, so hit logic is untouched).
+  - **CO-OP / PROTOCOL ADDITION: 'shoot' & 'shot_fx' now carry `w` (weapon id)
+    and, for shotguns, `p` (the pellet dir array the shooter actually fired —
+    host resolves the same rays).** Single-ray guns omit p. Host resolves each
+    pellet with the shooter's own damage mult + the weapon's falloff. Teammate
+    shot_fx renders the right weapon's trails/sound and plants the flare light
+    for the whole party (single slot — most recent flare wins). Old builds would
+    misread it: BOTH PLAYERS ON NEW BUILD (already required).
+  - Headless: tools/test_weapons.js (7 groups — table/pistol-unchanged, stat
+    helpers under mults, falloff curve, pellet-ray cone math, raycastWall DDA,
+    switchWeapon bank+owned-gate, light-budget invariant). All existing suites
+    still green (esc_shop 8/8, balloons, boss_scaling, lobby 19/19, sim 4200/4200).
+  - **Needs a browser/co-op session:** viewmodel silhouettes + recoil feel, the
+    4 gun sounds in the mix, shotgun pellet spread/falloff feel, flare lighting a
+    Dark Pools room, spark/decal density + decal orientation on real walls, PROG
+    counter stability on the dev HUD, and live co-op pellet/flare sync.
 - **Co-op boss HP scaling landed (June 11, UNPLAYED in co-op):** bossHpFor
   (enemies.js, pure/extractable) = themeBase × loop bonus × (1 + 0.75×(players-1));
   player count from new netActivePlayerCount (host + OPEN peers, downed still
@@ -120,9 +167,9 @@ additive glow sprites on emissives gets 80% later).
 3. **Scripted scare events** (after ecology): starter set of 3-4 — lights cut for 5s,
    mob that freezes until looked at, distant roar, door slam. Proximity/timer
    triggered, designed not random.
-4. **Gun/visual polish pass**: better procedural viewmodel (current = 24 primitive
-   boxes), muzzle light flash, impact sparks/decals on walls. Teammate shot effects
-   already landed — verify in co-op.
+4. ~~**Gun/visual polish pass**~~ DONE June 11 (unplayed) — folded into the
+   weapon system batch: distinct per-gun viewmodels, per-weapon muzzle flash,
+   pooled impact sparks + bullet-hole decals. See CURRENT STATE.
 5. **Lore objectives** (biggest scope — parked last): "find item + kill" — per-level
    configurable gate condition (kills OR item OR boss) slotting into existing
    kill-gate system. Needs item spawns, pickup, objective HUD.
@@ -133,8 +180,10 @@ additive glow sprites on emissives gets 80% later).
 - Random scares — rejected in favor of designed scripted moments
 
 ## KNOWN AUDIT FACTS (reference)
-- Light slots: ambient 1, ceiling ≤26 (+ budget pads to exactly 26), boss glow 1,
-  boss projectiles 3, exit beacon 1, flashlight spot 1, muzzle flash 1
+- Light slots (32 point + 1 spot + 1 ambient): ambient 1, ceiling ≤25 (+ budget
+  pads to exactly 25 — was 26, dropped 1 for the flare), boss glow 1, boss
+  projectiles 3, exit beacon 1, muzzle flash 1, FLARE 1 (= 32 point); flashlight
+  is the 1 spot
 - Textures: walls/floors 256px, ceiling 128px, mob sprites 256px Nearest-filtered
 - Full per-theme palette table lives in LEVEL_THEMES (main.js:40-407)
 

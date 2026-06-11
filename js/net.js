@@ -727,12 +727,20 @@ onMessage('damaged', (d) => {
 
 /* ── client shooting → host resolution ── */
 
-function netSendShoot(origin, dir) {
-  sendToHost('shoot', {
+// PROTOCOL: 'shoot' now also carries w (weapon id) and, for multi-pellet guns,
+// p (the array of pellet dir vectors the client actually fired — host resolves
+// the very same rays). Single-ray weapons omit p and use dx/dy/dz. Both players
+// on the new build (already required by prior protocol additions).
+function netSendShoot(origin, dir, rays, weaponId) {
+  const r3 = v => Math.round(v * 1000) / 1000;
+  const msg = {
     ox: netR2(origin.x), oy: netR2(origin.y), oz: netR2(origin.z),
-    dx: Math.round(dir.x * 1000) / 1000, dy: Math.round(dir.y * 1000) / 1000, dz: Math.round(dir.z * 1000) / 1000,
-    m: shopStats.damageMult // this client's shop damage multiplier (client-trusted; fine for friend co-op)
-  });
+    dx: r3(dir.x), dy: r3(dir.y), dz: r3(dir.z),
+    m: shopStats.damageMult, // this client's shop damage mult (client-trusted; fine for friend co-op)
+    w: weaponId | 0
+  };
+  if (rays && rays.length > 1) msg.p = rays.map(v => [r3(v.x), r3(v.y), r3(v.z)]);
+  sendToHost('shoot', msg);
 }
 
 onMessage('shoot', (d, fromConn) => {
@@ -740,11 +748,11 @@ onMessage('shoot', (d, fromConn) => {
   if (netState.role !== 'host' || gameState !== 'playing' || !d) return;
   netResolveRemoteShot(d, fromConn);
   // Cosmetic: show this client's shot here, and relay it to the OTHER clients
-  // as 'shot_fx' (damage already handled above — fx only).
-  netShowRemoteShot(fromConn.peer, [d.ox, d.oy, d.oz], [d.dx, d.dy, d.dz]);
+  // as 'shot_fx' (damage already handled above — fx only). Carry weapon + pellets.
+  netShowRemoteShot(fromConn.peer, [d.ox, d.oy, d.oz], [d.dx, d.dy, d.dz], d.w, d.p);
   for (const conn of netState.peers) {
     if (conn !== fromConn && conn.open) {
-      conn.send({ t: 'shot_fx', d: { id: fromConn.peer, o: [d.ox, d.oy, d.oz], d: [d.dx, d.dy, d.dz] } });
+      conn.send({ t: 'shot_fx', d: { id: fromConn.peer, o: [d.ox, d.oy, d.oz], d: [d.dx, d.dy, d.dz], w: d.w, p: d.p } });
     }
   }
 });
@@ -754,18 +762,22 @@ onMessage('shoot', (d, fromConn) => {
 
 // Host's own shots have no 'shoot' message to derive from — broadcast directly.
 // Called from playerShoot (main.js) when hosting.
-function netAnnounceShot(origin, dir) {
+function netAnnounceShot(origin, dir, rays, weaponId) {
   if (netState.role !== 'host' || netState.peers.length === 0) return;
-  sendToAll('shot_fx', {
+  const r3 = v => Math.round(v * 1000) / 1000;
+  const msg = {
     id: netState.myId,
     o: [netR2(origin.x), netR2(origin.y), netR2(origin.z)],
-    d: [Math.round(dir.x * 1000) / 1000, Math.round(dir.y * 1000) / 1000, Math.round(dir.z * 1000) / 1000]
-  });
+    d: [r3(dir.x), r3(dir.y), r3(dir.z)],
+    w: weaponId | 0
+  };
+  if (rays && rays.length > 1) msg.p = rays.map(v => [r3(v.x), r3(v.y), r3(v.z)]);
+  sendToAll('shot_fx', msg);
 }
 
 onMessage('shot_fx', (d) => {
   if (!netIsClient() || gameState !== 'playing' || !d || d.id === netState.myId) return;
-  netShowRemoteShot(d.id, d.o, d.d);
+  netShowRemoteShot(d.id, d.o, d.d, d.w, d.p);
 });
 
 // Render a teammate's shot: the same fading trail the shooter saw (full range,
@@ -773,12 +785,23 @@ onMessage('shot_fx', (d) => {
 // blob at the avatar, and a distance-attenuated gunshot. Both flash mesh and
 // trail ride the existing bulletTrails fade/dispose loop. Emissive standard
 // material — already-pinned program family, no lights.
-function netShowRemoteShot(id, o, dv) {
+function netShowRemoteShot(id, o, dv, weaponId, rays) {
   if (typeof scene === 'undefined' || !scene || gameState !== 'playing') return;
   const origin = new THREE.Vector3(o[0], o[1], o[2]);
-  const dir = new THREE.Vector3(dv[0], dv[1], dv[2]).normalize();
-  spawnBulletTrail(origin.clone().add(dir.clone().multiplyScalar(0.4)),
-                   origin.clone().add(dir.clone().multiplyScalar(GUN_RANGE)));
+  const w = (typeof WEAPONS !== 'undefined' && WEAPONS[weaponId]) ? WEAPONS[weaponId] : null;
+  const range = w ? w.range : GUN_RANGE;
+  // All pellet dirs the shooter fired (or the single aim dir).
+  const dirs = (rays && rays.length)
+    ? rays.map(p => new THREE.Vector3(p[0], p[1], p[2]).normalize())
+    : [new THREE.Vector3(dv[0], dv[1], dv[2]).normalize()];
+  const primary = dirs[0];
+  for (const dir of dirs) {
+    const gunTip = origin.clone().add(dir.clone().multiplyScalar(0.4));
+    // Reuse the local cosmetic path (wall-clipped trail + sparks + decal) when
+    // available, so a teammate's shot looks just like your own.
+    if (w && typeof drawPelletFx === 'function') drawPelletFx(gunTip, origin, dir, w, null);
+    else spawnBulletTrail(gunTip, origin.clone().add(dir.clone().multiplyScalar(range)));
+  }
   const flash = new THREE.Mesh(
     new THREE.SphereGeometry(0.07, 6, 6),
     new THREE.MeshStandardMaterial({
@@ -786,10 +809,16 @@ function netShowRemoteShot(id, o, dv) {
       transparent: true, opacity: 0.9
     })
   );
-  flash.position.copy(origin).add(dir.clone().multiplyScalar(0.45));
+  flash.position.copy(origin).add(primary.clone().multiplyScalar(0.45));
   scene.add(flash);
   bulletTrails.push({ mesh: flash, life: 0.07 });
-  playRemoteGunshot(origin.distanceTo(player.pos));
+  // Flare: light the area for the whole party on dark floors (single slot — the
+  // most recent flare, local or remote, wins it).
+  if (w && w.flare && typeof plantFlare === 'function' && typeof flareImpactPoint === 'function') {
+    plantFlare(flareImpactPoint(origin, primary, w));
+  }
+  if (typeof playRemoteShot === 'function') playRemoteShot(w ? w.sound : 'pistol', origin.distanceTo(player.pos));
+  else playRemoteGunshot(origin.distanceTo(player.pos));
 }
 
 /* ── host snapshot broadcast (called from netUpdate) ── */
@@ -1027,7 +1056,7 @@ function netClientLoadFloor(floor, seed) {
   currentWave = 1;
   player.floorReached = currentFloor;
   player.health = Math.min(shopStats.maxHealth, player.health + 35);
-  player.reserveAmmo = Math.min(shopStats.reserveMax, player.reserveAmmo + shopStats.clipSize * 3);
+  floorReserveTopUp(); // ~3 mags back across the equipped gun + every stashed gun
   generateCurrentFloor();
   buildMazeScene(); // its teardown clears all mirrors via netOnSceneTeardown
   updateHUD();
