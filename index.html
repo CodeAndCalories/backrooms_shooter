@@ -21,15 +21,26 @@
   <button class="menu-btn" id="btnControls">Controls</button>
   <button class="menu-btn" id="btnCoop">Co-op <span class="coop-beta-tag">beta</span></button>
 
-  <!-- ════ CO-OP (BETA) — Phase 1 connection panel. Wired by js/net.js; no game-start logic yet. ════ -->
+  <!-- ════ CO-OP — lobby panel. Wired by js/net.js (name, host/join, roster, ready/start). ════ -->
   <div id="coopPanel" style="display:none;">
     <div class="coop-title">Co-op (Beta)</div>
     <div class="coop-room-code" id="coopRoomCode" style="display:none;"></div>
-    <div class="coop-row">
+    <div class="coop-row" id="coopNameRow" style="margin-bottom:8px;">
+      <input class="coop-input coop-name-input" id="coopNameInput" maxlength="12" placeholder="YOUR NAME" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="coop-row" id="coopJoinRow">
       <button class="coop-btn" id="btnHostGame">Host</button>
       <span class="coop-or">or</span>
       <input class="coop-input" id="coopCodeInput" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false">
       <button class="coop-btn" id="btnJoinGame">Join</button>
+    </div>
+    <div id="coopLobby" style="display:none;">
+      <div class="coop-lobby-head" id="coopLobbyHead"></div>
+      <div class="coop-lobby-list" id="coopLobbyList"></div>
+      <div class="coop-row" style="margin-top:10px;">
+        <button class="coop-btn" id="btnReady" style="display:none;">Ready</button>
+        <button class="coop-btn coop-start-btn" id="btnStartCoop" style="display:none;">Start</button>
+      </div>
     </div>
     <div class="coop-status" id="coopStatus">Play with up to 5 players</div>
   </div>
@@ -166,6 +177,12 @@
 
   <!-- CO-OP: down/revive status (shown only while this player is down; js/net.js) -->
   <div id="downedMsg" style="display:none;"></div>
+  <div id="revivePrompt" style="display:none;"></div>
+  <!-- MP party goal — top center: "ELIMINATIONS n/m" → "EXIT OPEN" (pulsing) -->
+  <div class="goal-hud" id="goalHud" style="display:none;">
+    <div class="goal-hud-text" id="goalHudText"></div>
+    <div class="goal-hud-bar"><div class="goal-hud-fill" id="goalHudFill"></div></div>
+  </div>
 
   <div class="minimap-container"><canvas class="minimap-canvas" id="minimapCanvas" width="190" height="190"></canvas></div>
 </div>

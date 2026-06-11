@@ -84,10 +84,13 @@ function netWireConnection(conn, label) {
     netUiStatus();
     sendTo(conn, 'ping', { sent: Date.now() }); // both sides ping on open → proves both directions
     if (netState.role === 'host') {
-      // Assign the joiner a slot (name "P<slot+1>" + color) and re-broadcast
-      // the full roster so every client can label every avatar.
-      if (!(conn.peer in netRoster)) netRoster[conn.peer] = netNextSlot++;
-      sendToAll('roster', { slots: netRoster });
+      // Slot the joiner into the roster (their 'hi' fills in the name) and
+      // re-broadcast so every client can label every avatar + lobby row.
+      netHostAddPlayer(conn.peer, '');
+    }
+    if (netState.role === 'client') {
+      sendTo(conn, 'hi', { name: netMyName() }); // introduce myself by display name
+      netUiRenderLobby();
     }
   });
 
@@ -101,6 +104,7 @@ function netWireConnection(conn, label) {
       // Drop the leaver's avatar here and on every remaining client.
       netAvatarRemove(conn.peer);
       sendToAll('player_left', { id: conn.peer });
+      netHostRemovePlayer(conn.peer); // roster + lobby update everywhere
       // A downed player leaving may make the wipe-check true for the rest.
       netDownPeers.delete(conn.peer);
       netCheckPartyOver();
@@ -143,14 +147,17 @@ function netReset() {
   // Phase-2 state: drop all remote avatars + roster; back to a fully inert solo.
   netAvatarsClear();
   netRoster = {};
-  netNextSlot = 1;
+  netMyReady = false;
   netPendingStart = null;
+  netUiRenderLobby();
   // Phase-3 state: drop all enemy/boss/projectile mirrors (client side).
   netOnSceneTeardown();
   // Phase-4 state: back to solo rules — no down state, no downed overlay.
   netDownPeers.clear();
   if (typeof player !== 'undefined') { player.isDown = false; player.reviveProgress = 0; }
+  netBeingRevivedUntil = -1;
   netShowDownedMsg(false);
+  netShowRevivePrompt(false);
 }
 
 /* ── host / join ── */
@@ -170,7 +177,8 @@ function hostGame() {
     netState.role = 'host';
     netState.myId = id;
     netState.roomCode = code;
-    netRoster[id] = 0; // the host is always slot 0 ("P1", gold)
+    netSaveMyName();
+    netHostInitSelf(netMyName()); // host = slot 0 (P1 yellow), always ready
     console.log(`[net] hosting room ${code} (peer id ${id})`);
     netUiShowCode(code);
   });
@@ -206,6 +214,8 @@ function joinGame(code) {
   peer.on('open', (id) => {
     netState.role = 'client';
     netState.myId = id;
+    netState.roomCode = code; // shown in the lobby header
+    netSaveMyName();
     console.log(`[net] joining room ${code} as ${id}`);
     // Reliable + JSON: the wire format for ALL game traffic (see header).
     const conn = peer.connect(NET_ID_PREFIX + code, { reliable: true, serialization: 'json' });
@@ -252,21 +262,106 @@ onMessage('room_full', () => {
      client --pos {x,y,z,yaw}-----------------> host
      host   --pos {id, x,y,z,yaw}------------> every client   (own + relayed)
      host   --game_start {floor, seed}-------> every client   (on Noclip In)
-     host   --roster {slots:{peerId:slot}}---> every client   (on each join)
+     client --hi {name}----------------------> host           (on connect)
+     host   --roster {players:{id:{slot,name,ready}}}-> all   (join/name/ready/leave)
+     client --ready {r}----------------------> host           (lobby toggle)
      host   --player_left {id}---------------> every client   (on a disconnect)
    ═══════════════════════════════════════════════════════════════ */
 
 const NET_POS_HZ = 15;            // position send rate
 const NET_AVATAR_LERP = 0.1;      // remote avatar smoothing: ~10% of the gap per frame
 const NET_EYE_HEIGHT = 1.6;       // player.pos.y is EYE height; avatar group origin is at the feet
-const NET_PLAYER_COLORS = [0xd4c36a, 0x44aaff, 0xff6644, 0x44ff88, 0xff44ff]; // by slot; 0 = host
+// Hazmat suit color per slot: P1 yellow, P2 green, P3 red, P4 blue, P5 purple.
+const NET_PLAYER_COLORS = [0xf2d22e, 0x3fd964, 0xe8413a, 0x3f7be8, 0xa64ae8];
+const NET_NAME_KEY = 'brfps_name';
+const NET_NAME_MAX = 12;
 
-let netRoster = {};               // peerId -> slot (host-assigned by join order; host = 0)
-let netNextSlot = 1;              // host-side slot allocator
-const netAvatars = new Map();     // peerId -> { id, group, builtSlot, target:{x,y,z,yaw} }
+let netRoster = {};               // peerId -> { slot, name, ready } (host-authoritative)
+const netAvatars = new Map();     // peerId -> { id, group, builtSlot, builtName, target:{x,y,z,yaw} }
 let netPosAccum = 0;              // send-rate accumulator (netUpdate)
 let netPendingStart = null;       // client: game_start received while still loading models
 let netStartingFromHost = false;  // lets the host-driven startGame() through netGateStart
+let netMyReady = false;           // client: my lobby ready state
+
+// Display names are user input that crosses the wire — keep them to a safe
+// charset on BOTH ends (host sanitizes again before rebroadcasting).
+function netCleanName(s) {
+  return String(s || '').replace(/[^A-Za-z0-9 _\-]/g, '').trim().slice(0, NET_NAME_MAX);
+}
+
+function netMyName() {
+  let v = '';
+  const input = document.getElementById('coopNameInput');
+  if (input) v = input.value;
+  if (!v) { try { v = localStorage.getItem(NET_NAME_KEY) || ''; } catch (e) {} }
+  return netCleanName(v);
+}
+
+function netSaveMyName() {
+  try { localStorage.setItem(NET_NAME_KEY, netMyName()); } catch (e) {}
+}
+
+function netSlotOf(id) { const e = netRoster[id]; return e ? e.slot : 0; }
+function netNameOf(id) {
+  const e = netRoster[id];
+  return (e && e.name) ? e.name : 'P' + (netSlotOf(id) + 1);
+}
+function netColorOf(id) { return NET_PLAYER_COLORS[netSlotOf(id) % NET_PLAYER_COLORS.length]; }
+
+/* ── host-side roster management (named functions → headless-testable) ── */
+
+// Lowest free slot, so a rejoiner gets the leaver's color back.
+function netLowestFreeSlot() {
+  const used = new Set(Object.values(netRoster).map(e => e.slot));
+  let s = 0;
+  while (used.has(s)) s++;
+  return s;
+}
+
+// hostGame: put the host itself in the roster (slot 0, always ready).
+function netHostInitSelf(name) {
+  netRoster = { [netState.myId]: { slot: 0, name: netCleanName(name), ready: true } };
+  netUiRenderLobby();
+}
+
+function netHostAddPlayer(id, name) {
+  if (!netRoster[id]) netRoster[id] = { slot: netLowestFreeSlot(), name: netCleanName(name), ready: false };
+  else if (name) netRoster[id].name = netCleanName(name);
+  netBroadcastRoster();
+}
+
+function netHostRemovePlayer(id) {
+  delete netRoster[id];
+  netBroadcastRoster();
+}
+
+function netHostSetReady(id, ready) {
+  if (netRoster[id]) netRoster[id].ready = !!ready;
+  netBroadcastRoster();
+}
+
+function netAllReady() {
+  const all = Object.values(netRoster);
+  return all.length > 0 && all.every(e => e.ready);
+}
+
+function netBroadcastRoster() {
+  sendToAll('roster', { players: netRoster });
+  netUiRenderLobby();
+  netUiStatus();
+}
+
+// Client → host on connect: introduce myself by name.
+onMessage('hi', (d, fromConn) => {
+  if (netState.role !== 'host') return;
+  netHostAddPlayer(fromConn.peer, d && d.name);
+});
+
+// Client lobby READY toggle → host updates + rebroadcasts.
+onMessage('ready', (d, fromConn) => {
+  if (netState.role !== 'host') return;
+  netHostSetReady(fromConn.peer, d && d.r);
+});
 
 /* ── game start (shared world) ── */
 
@@ -315,20 +410,22 @@ function netTryStart() {
   }
 }
 
-/* ── roster (host-assigned slots → names "P1..P5" + colors) ── */
+/* ── roster sync (host → clients: slots, names, ready states) ── */
 
 onMessage('roster', (d) => {
   if (netState.role !== 'client' || !d) return;
-  netRoster = d.slots || {};
+  netRoster = d.players || {};
+  if (netRoster[netState.myId]) netMyReady = !!netRoster[netState.myId].ready;
   console.log('[net] roster:', JSON.stringify(netRoster));
-  // If an avatar was built before its slot was known, rebuild it with the
-  // right color/name on its next pos update.
+  // If an avatar was built before its slot/name was known, rebuild it with the
+  // right color/label on its next pos update.
   for (const av of netAvatars.values()) {
-    if (av.group && av.builtSlot !== netSlotOf(av.id)) netAvatarDisposeGroup(av);
+    if (av.group && (av.builtSlot !== netSlotOf(av.id) || av.builtName !== netNameOf(av.id))) {
+      netAvatarDisposeGroup(av);
+    }
   }
+  netUiRenderLobby();
 });
-
-function netSlotOf(id) { return netRoster[id] !== undefined ? netRoster[id] : 0; }
 
 /* ── position stream ── */
 
@@ -338,7 +435,8 @@ function netUpdate(dt) {
   if (netPendingStart) netTryStart();
   if (netState.role === 'solo') return;
 
-  netUpdateDownState(dt); // down/revive progress (no-op unless this player is down)
+  netUpdateDownState(dt);   // down/revive progress (no-op unless this player is down)
+  netUpdateReviverSide(dt); // HOLD-E revive prompt/signal (no-op unless near a downed mate)
 
   // Outbound: my eye position + yaw at NET_POS_HZ while actually playing.
   if (gameState === 'playing') {
@@ -407,33 +505,48 @@ function netAvatarUpdate(id, p) {
   if (!av.group && typeof scene !== 'undefined' && scene) netAvatarBuild(av);
 }
 
-// Simple capsule: cylinder body + sphere head (+ dark visor showing facing),
-// distinct color per slot. Deliberately NO PointLight (fixed light budget) and
-// no new shader families: untextured MeshStandardMaterial is pinned by
-// ammoPickupMat, the label's map+transparent SpriteMaterial by the keepalives.
+// HAZMAT SUIT figure — body, hood, visor, backpack tank, arm stubs, all
+// primitives. One COLORED suit material per player (slot color; the down-tint
+// targets it) + one dark material for visor/tank. Deliberately NO PointLight
+// (fixed light budget) and no new shader families: untextured
+// MeshStandardMaterial is pinned by ammoPickupMat, the label's map+transparent
+// SpriteMaterial by the keepalives.
 function netAvatarBuild(av) {
   const slot = netSlotOf(av.id);
+  const name = netNameOf(av.id);
   const color = NET_PLAYER_COLORS[slot % NET_PLAYER_COLORS.length];
 
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0.35, roughness: 0.6
+  const suitMat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.28, roughness: 0.75
   });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.3, 1.1, 10), bodyMat);
-  body.position.y = 0.85;
-  group.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), bodyMat);
-  head.position.y = 1.52;
-  group.add(head);
-  const visor = new THREE.Mesh(
-    new THREE.BoxGeometry(0.18, 0.06, 0.08),
-    new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2 })
-  );
-  visor.position.set(0, 1.55, -0.16); // -z = look direction at yaw 0, matching the camera
-  group.add(visor);
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x14181c, roughness: 0.25, metalness: 0.4 });
 
-  const label = netMakeNameLabel('P' + (slot + 1));
-  label.position.y = 2.0;
+  const legs = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.26, 0.55, 10), suitMat);
+  legs.position.y = 0.28;
+  group.add(legs);
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.33, 0.78, 10), suitMat);
+  torso.position.y = 0.93;
+  group.add(torso);
+  const hood = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), suitMat);
+  hood.position.y = 1.48;
+  hood.scale.set(1, 1.08, 1); // slightly tall — hood, not head
+  group.add(hood);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.13, 0.06), darkMat);
+  visor.position.set(0, 1.48, -0.21); // -z = look direction at yaw 0, matching the camera
+  group.add(visor);
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.46, 8), darkMat);
+  tank.position.set(0, 1.02, 0.24); // small air tank on the back
+  group.add(tank);
+  const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.085, 0.6, 8), suitMat);
+  armL.position.set(-0.38, 0.95, 0); armL.rotation.z = 0.16;
+  group.add(armL);
+  const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.085, 0.6, 8), suitMat);
+  armR.position.set(0.38, 0.95, 0); armR.rotation.z = -0.16;
+  group.add(armR);
+
+  const label = netMakeNameLabel(name, color);
+  label.position.y = 2.05;
   group.add(label);
 
   group.position.set(av.target.x, av.target.y - NET_EYE_HEIGHT, av.target.z); // snap on (re)build
@@ -441,32 +554,38 @@ function netAvatarBuild(av) {
   scene.add(group);
   av.group = group;
   av.builtSlot = slot;
+  av.builtName = name;
   // Down/revive (Phase 4): keep refs for the dark-red "down" tint, and re-apply
   // it if this avatar was rebuilt (e.g. new floor) while its player is down.
-  av.bodyMat = bodyMat;
+  av.bodyMat = suitMat;
   av.baseColor = color;
   if (av.down) netSetAvatarDown(av.id, true);
 }
 
-// Camera-facing name tag — same canvas-text approach as the dev debug labels,
-// but always on in co-op. depthTest:false keeps it readable through walls.
-function netMakeNameLabel(text) {
+// Camera-facing name tag, readable at distance: big canvas text with a black
+// halo + a colored outline matching the player's suit. depthTest:false keeps
+// it visible through walls (find your teammates).
+function netMakeNameLabel(text, color) {
   const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 64;
+  canvas.width = 512; canvas.height = 96;
   const ctx = canvas.getContext('2d');
-  ctx.font = 'bold 34px monospace';
+  ctx.font = 'bold 52px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.lineWidth = 6;
+  ctx.lineWidth = 14;
   ctx.strokeStyle = '#000000';
-  ctx.strokeText(text, 128, 32);
+  ctx.strokeText(text, 256, 48);
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = '#' + (color || 0xffffff).toString(16).padStart(6, '0');
+  ctx.strokeText(text, 256, 48);
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(text, 128, 32);
+  ctx.fillText(text, 256, 48);
   const tex = new THREE.CanvasTexture(canvas);
+  texMarkSRGB(tex); // main.js — sRGB at creation (labels are built at runtime)
   tex.minFilter = THREE.LinearFilter;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
   const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(0.9, 0.22, 1);
+  sprite.scale.set(1.7, 0.32, 1);
   sprite.renderOrder = 999;
   return sprite;
 }
@@ -500,11 +619,14 @@ function netAvatarsClear() {
 // references — the next pos from each player rebuilds them in the new scene.
 // A new floor also REVIVES everyone (down state doesn't carry across floors).
 function netOnSceneRebuilt() {
-  for (const av of netAvatars.values()) { av.group = null; av.bodyMat = null; av.down = false; }
+  for (const av of netAvatars.values()) { av.group = null; av.bodyMat = null; av.down = false; av.reviveProg = 0; }
   netDownPeers.clear();
   player.isDown = false;
   player.reviveProgress = 0;
+  netBeingRevivedUntil = -1;
+  netLastSentProg = -1;
   netShowDownedMsg(false);
+  netShowRevivePrompt(false);
   netExitReqT = -10;
 }
 
@@ -602,8 +724,60 @@ function netSendShoot(origin, dir) {
 
 onMessage('shoot', (d, fromConn) => {
   // main.js — host's authoritative raycast; fromConn = who fired (kill credit)
-  if (netState.role === 'host' && gameState === 'playing' && d) netResolveRemoteShot(d, fromConn);
+  if (netState.role !== 'host' || gameState !== 'playing' || !d) return;
+  netResolveRemoteShot(d, fromConn);
+  // Cosmetic: show this client's shot here, and relay it to the OTHER clients
+  // as 'shot_fx' (damage already handled above — fx only).
+  netShowRemoteShot(fromConn.peer, [d.ox, d.oy, d.oz], [d.dx, d.dy, d.dz]);
+  for (const conn of netState.peers) {
+    if (conn !== fromConn && conn.open) {
+      conn.send({ t: 'shot_fx', d: { id: fromConn.peer, o: [d.ox, d.oy, d.oz], d: [d.dx, d.dy, d.dz] } });
+    }
+  }
 });
+
+/* ── teammate shot FX (cosmetic only — see playerShoot/netResolveRemoteShot
+   for the damage paths, which are unchanged) ── */
+
+// Host's own shots have no 'shoot' message to derive from — broadcast directly.
+// Called from playerShoot (main.js) when hosting.
+function netAnnounceShot(origin, dir) {
+  if (netState.role !== 'host' || netState.peers.length === 0) return;
+  sendToAll('shot_fx', {
+    id: netState.myId,
+    o: [netR2(origin.x), netR2(origin.y), netR2(origin.z)],
+    d: [Math.round(dir.x * 1000) / 1000, Math.round(dir.y * 1000) / 1000, Math.round(dir.z * 1000) / 1000]
+  });
+}
+
+onMessage('shot_fx', (d) => {
+  if (!netIsClient() || gameState !== 'playing' || !d || d.id === netState.myId) return;
+  netShowRemoteShot(d.id, d.o, d.d);
+});
+
+// Render a teammate's shot: the same fading trail the shooter saw (full range,
+// like local trails — they don't clip on walls either), a brief muzzle-flash
+// blob at the avatar, and a distance-attenuated gunshot. Both flash mesh and
+// trail ride the existing bulletTrails fade/dispose loop. Emissive standard
+// material — already-pinned program family, no lights.
+function netShowRemoteShot(id, o, dv) {
+  if (typeof scene === 'undefined' || !scene || gameState !== 'playing') return;
+  const origin = new THREE.Vector3(o[0], o[1], o[2]);
+  const dir = new THREE.Vector3(dv[0], dv[1], dv[2]).normalize();
+  spawnBulletTrail(origin.clone().add(dir.clone().multiplyScalar(0.4)),
+                   origin.clone().add(dir.clone().multiplyScalar(GUN_RANGE)));
+  const flash = new THREE.Mesh(
+    new THREE.SphereGeometry(0.07, 6, 6),
+    new THREE.MeshStandardMaterial({
+      color: 0xffcc66, emissive: 0xffaa33, emissiveIntensity: 2.5,
+      transparent: true, opacity: 0.9
+    })
+  );
+  flash.position.copy(origin).add(dir.clone().multiplyScalar(0.45));
+  scene.add(flash);
+  bulletTrails.push({ mesh: flash, life: 0.07 });
+  playRemoteGunshot(origin.distanceTo(player.pos));
+}
 
 /* ── host snapshot broadcast (called from netUpdate) ── */
 
@@ -763,11 +937,14 @@ function netClientUpdate(dt) {
     // exact y/bob/facing presentation rules from updateEnemies.
     m.mesh.position.x += (m.tx - m.mesh.position.x) * NET_AVATAR_LERP;
     m.mesh.position.z += (m.tz - m.mesh.position.z) * NET_AVATAR_LERP;
+    // pools: mirrors wade exactly like the host's mobs (mobGroundOffset is
+    // grid-derived, and the grid is seeded-identical on every machine)
+    const wadeY = mobGroundOffset(m.mesh.position.x, m.mesh.position.z);
     if (m.mesh.isGroup) {
       if (m.mesh.userData.float !== undefined) {
         m.mesh.position.y = m.mesh.userData.float + Math.sin(t * 2 + m.tx) * 0.18;
       } else {
-        m.mesh.position.y = 0.05 + Math.sin(t * 14) * 0.05;
+        m.mesh.position.y = 0.05 + Math.sin(t * 14) * 0.05 + wadeY;
       }
       if (m.mesh.userData.isModel) {
         const near = netNearestOf(ppl, m.mesh.position.x, m.mesh.position.z);
@@ -776,6 +953,7 @@ function netClientUpdate(dt) {
     } else {
       let yPos = (m.scale * 2.5) / 2;
       if (m.type === 'phantom') yPos += Math.sin(Date.now() * 0.003 + m.mesh.position.x) * 0.4;
+      else yPos += wadeY;
       m.mesh.position.y = yPos;
     }
   }
@@ -1014,6 +1192,7 @@ onMessage('revived', (d, fromConn) => {
 onMessage('down_state', (d) => {
   if (!netIsClient() || !d) return;
   netSetAvatarDown(d.id, d.down);
+  if (!d.down) { const av = netAvatars.get(d.id); if (av) av.reviveProg = 0; }
 });
 
 function netSetAvatarDown(id, down) {
@@ -1049,49 +1228,147 @@ onMessage('party_over', () => {
   gameOver();
 });
 
-function netShowDownedMsg(on, prog) {
+let netDownedMsgHtml = ''; // change-detect cache (this runs every frame)
+function netShowDownedMsg(on, prog, reviverName) {
   const el = document.getElementById('downedMsg');
   if (!el) return;
-  if (!on) { el.style.display = 'none'; return; }
-  el.style.display = 'block';
-  el.textContent = (prog > 0)
-    ? `REVIVING… ${Math.floor(prog * 100)}%`
-    : 'YOU ARE DOWN — a teammate can revive you';
+  if (!on) { if (netDownedMsgHtml !== '') { netDownedMsgHtml = ''; el.style.display = 'none'; } return; }
+  const pct = Math.floor((prog || 0) * 100);
+  let line;
+  if (reviverName) line = `${reviverName.toUpperCase()} IS REVIVING YOU… ${pct}%`;
+  else if (prog > 0) line = `REVIVE PAUSED — ${pct}%`;
+  else line = 'YOU ARE DOWN — a teammate can hold [E] near you';
+  // reviverName comes from netCleanName'd roster entries — safe charset.
+  const html = `<div>${line}</div><div class="revive-bar"><div class="revive-bar-fill" style="width:${pct}%"></div></div>`;
+  if (html !== netDownedMsgHtml) { netDownedMsgHtml = html; el.innerHTML = html; el.style.display = 'block'; }
 }
 
-// While down, any teammate who is NOT down standing within range fills the
-// revive bar; it drains (half speed) when they step away. Runs on the DOWNED
-// player's machine — it has everyone's positions via the avatars.
+/* ── HOLD-E revive ──
+   The REVIVER drives it: stand within range of a downed teammate and HOLD E.
+   While held, the reviver streams 'reviving' signals (8Hz) routed to the
+   downed player's machine, which owns the progress bar exactly as before
+   (accumulate while signals are fresh, decay at half speed otherwise) and
+   streams 'revive_prog' back so the reviver's bar matches. Releasing E just
+   stops the signals → progress pauses, then decays. */
+
+let netBeingRevivedUntil = -1; // downed side: how long the last 'reviving' signal stays fresh
+let netReviverName = '';       // downed side: who's reviving me (for the HUD line)
+let netReviveSendAccum = 0;    // reviver side: signal pacing
+let netReviveProgAccum = 0;    // downed side: progress broadcast pacing
+let netLastSentProg = -1;
+
+function netUpdateReviverSide(dt) {
+  if (gameState !== 'playing' || player.isDown) { netShowRevivePrompt(false); return; }
+  let best = null, bestD2 = NET_REVIVE_RANGE * NET_REVIVE_RANGE;
+  for (const av of netAvatars.values()) {
+    if (!av.down) continue;
+    const dx = av.target.x - player.pos.x, dz = av.target.z - player.pos.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < bestD2) { bestD2 = d2; best = av; }
+  }
+  if (!best) { netShowRevivePrompt(false); return; }
+  const holding = !!keys['KeyE'];
+  netShowRevivePrompt(true, netNameOf(best.id), holding, best.reviveProg || 0);
+  if (holding) {
+    netReviveSendAccum += dt;
+    if (netReviveSendAccum >= 0.12) {
+      netReviveSendAccum = 0;
+      if (netState.role === 'client') sendToHost('reviving', { id: best.id });
+      else for (const conn of netState.peers) {
+        if (conn.peer === best.id) { sendTo(conn, 'reviving', { id: best.id, from: netState.myId }); break; }
+      }
+    }
+  }
+}
+
+onMessage('reviving', (d, fromConn) => {
+  if (!d || !d.id) return;
+  if (netState.role === 'host') {
+    if (d.id === netState.myId) { netOnRevivingMe(fromConn.peer); return; } // I'm the target
+    for (const conn of netState.peers) { // relay to the downed player's machine
+      if (conn.peer === d.id && conn.open) { conn.send({ t: 'reviving', d: { id: d.id, from: fromConn.peer } }); break; }
+    }
+  } else if (d.id === netState.myId) {
+    netOnRevivingMe(d.from);
+  }
+});
+
+function netOnRevivingMe(fromId) {
+  if (!player.isDown) return;
+  netBeingRevivedUntil = clock.getElapsedTime() + 0.35; // signal stays fresh between 8Hz packets
+  netReviverName = netNameOf(fromId);
+}
+
+// Downed side: progress owner. Accumulates while 'reviving' signals are fresh,
+// decays at half speed otherwise; streams the % to everyone for the reviver bar.
 function netUpdateDownState(dt) {
   if (!player.isDown || gameState !== 'playing') return;
-  let nearHelper = false;
-  for (const av of netAvatars.values()) {
-    if (av.down) continue;
-    const dx = av.target.x - player.pos.x, dz = av.target.z - player.pos.z;
-    if (dx * dx + dz * dz < NET_REVIVE_RANGE * NET_REVIVE_RANGE) { nearHelper = true; break; }
-  }
-  if (nearHelper) {
+  const active = clock.getElapsedTime() < netBeingRevivedUntil;
+  if (active) {
     player.reviveProgress += dt;
-    if (player.reviveProgress >= NET_REVIVE_TIME) netRevive();
-    else netShowDownedMsg(true, player.reviveProgress / NET_REVIVE_TIME);
+    if (player.reviveProgress >= NET_REVIVE_TIME) {
+      netBroadcastReviveProg(0);
+      netRevive();
+      return;
+    }
   } else if (player.reviveProgress > 0) {
     player.reviveProgress = Math.max(0, player.reviveProgress - dt * 0.5);
-    netShowDownedMsg(true, player.reviveProgress / NET_REVIVE_TIME);
+  }
+  netShowDownedMsg(true, player.reviveProgress / NET_REVIVE_TIME, active ? netReviverName : '');
+  netReviveProgAccum += dt;
+  if (netReviveProgAccum >= 0.12) {
+    netReviveProgAccum = 0;
+    const p = Math.round(player.reviveProgress / NET_REVIVE_TIME * 50) / 50;
+    if (p !== netLastSentProg) { netLastSentProg = p; netBroadcastReviveProg(p); }
   }
 }
 
-/* ── CO-OP (BETA) menu panel ──
-   Markup lives in index.html (#coopPanel); styles in css/style.css.
-   This only toggles the panel and routes button clicks — no game-start
-   logic yet, connecting just logs on both sides. */
+function netBroadcastReviveProg(p) {
+  if (netState.role === 'host') sendToAll('revive_prog', { id: netState.myId, p });
+  else sendToHost('revive_prog', { p });
+}
+
+onMessage('revive_prog', (d, fromConn) => {
+  if (!d) return;
+  let id = d.id;
+  if (netState.role === 'host') {
+    id = fromConn.peer; // trust the connection, not the payload
+    for (const conn of netState.peers) {
+      if (conn !== fromConn && conn.open) conn.send({ t: 'revive_prog', d: { id, p: d.p } });
+    }
+  }
+  const av = netAvatars.get(id);
+  if (av) av.reviveProg = d.p || 0;
+});
+
+// Reviver-side prompt + progress bar ("HOLD [E] TO REVIVE <name>" → "REVIVING <name>…").
+let netRevivePromptHtml = '';
+function netShowRevivePrompt(on, name, holding, prog) {
+  const el = document.getElementById('revivePrompt');
+  if (!el) return;
+  if (!on) { if (netRevivePromptHtml !== '') { netRevivePromptHtml = ''; el.style.display = 'none'; } return; }
+  const n = (name || '').toUpperCase();
+  const pct = Math.floor((prog || 0) * 100);
+  const html = holding
+    ? `<div>REVIVING ${n}… ${pct}%</div><div class="revive-bar"><div class="revive-bar-fill" style="width:${pct}%"></div></div>`
+    : `<div>HOLD [E] TO REVIVE ${n}</div>`;
+  if (html !== netRevivePromptHtml) { netRevivePromptHtml = html; el.innerHTML = html; el.style.display = 'block'; }
+}
+
+/* ── CO-OP LOBBY panel ──
+   Markup lives in index.html (#coopPanel + #coopLobby); styles in
+   css/style.css. After hosting/joining, the host/join row hides and the lobby
+   shows "ROOM <CODE> — n/5 PLAYERS", a live colored player list with ready
+   states, a READY toggle (clients), and START (host; bright when all ready,
+   clickable anyway = force start). */
 
 function netUiStatus(text) {
   const el = document.getElementById('coopStatus');
   if (!el) return;
   if (text === undefined) {
-    // default line: connection summary
-    if (netState.role === 'host') text = `${netState.peers.length}/${NET_MAX_CLIENTS} players joined`;
-    else if (netState.role === 'client') text = netState.peers.length ? 'Connected to host' : 'Connecting…';
+    const n = Object.keys(netRoster).length;
+    if (netState.role === 'host') text = `${n}/${NET_MAX_CLIENTS + 1} players — waiting in lobby`;
+    else if (netState.role === 'client') text = netState.peers.length ? 'In lobby — ready up!' : 'Connecting…';
     else text = 'Play with up to 5 players';
   }
   el.textContent = text;
@@ -1100,7 +1377,60 @@ function netUiStatus(text) {
 function netUiShowCode(code) {
   const codeEl = document.getElementById('coopRoomCode');
   if (codeEl) { codeEl.textContent = code; codeEl.style.display = 'block'; }
-  netUiStatus(`Share this code — 0/${NET_MAX_CLIENTS} players joined`);
+  netUiStatus();
+}
+
+// Rebuild the lobby DOM from netRoster. Called on every roster/membership
+// change (cheap — at most 5 rows) and safe headless (all lookups null-guarded).
+function netUiRenderLobby() {
+  const lobby = document.getElementById('coopLobby');
+  if (!lobby) return;
+  const joinRow = document.getElementById('coopJoinRow');
+  const nameRow = document.getElementById('coopNameRow');
+  const inLobby = netState.role !== 'solo';
+  lobby.style.display = inLobby ? 'block' : 'none';
+  if (joinRow) joinRow.style.display = inLobby ? 'none' : 'flex';
+  if (nameRow) nameRow.style.display = inLobby ? 'none' : 'flex'; // name locked once connected
+  if (!inLobby) return;
+
+  const entries = Object.entries(netRoster).sort((a, b) => a[1].slot - b[1].slot);
+  const head = document.getElementById('coopLobbyHead');
+  if (head) head.textContent = `ROOM ${netState.roomCode || '?????'} — ${entries.length}/${NET_MAX_CLIENTS + 1} PLAYERS`;
+
+  const list = document.getElementById('coopLobbyList');
+  if (list) {
+    list.innerHTML = '';
+    for (const [id, e] of entries) {
+      const row = document.createElement('div');
+      row.className = 'coop-lobby-row';
+      const dot = document.createElement('span');
+      dot.className = 'coop-dot';
+      dot.style.background = '#' + NET_PLAYER_COLORS[e.slot % NET_PLAYER_COLORS.length].toString(16).padStart(6, '0');
+      const nm = document.createElement('span');
+      nm.className = 'coop-lobby-name';
+      nm.textContent = (e.name || 'P' + (e.slot + 1)) + (id === netState.myId ? ' (you)' : '');
+      const st = document.createElement('span');
+      st.className = 'coop-lobby-ready' + (e.ready ? ' is-ready' : '');
+      st.textContent = e.slot === 0 ? 'HOST' : (e.ready ? 'READY' : '. . .');
+      row.append(dot, nm, st);
+      list.appendChild(row);
+    }
+  }
+
+  const btnReady = document.getElementById('btnReady');
+  if (btnReady) {
+    btnReady.style.display = netState.role === 'client' ? 'inline-block' : 'none';
+    btnReady.textContent = netMyReady ? 'UNREADY' : 'READY';
+    btnReady.classList.toggle('is-ready', netMyReady);
+  }
+  const btnStart = document.getElementById('btnStartCoop');
+  if (btnStart) {
+    btnStart.style.display = netState.role === 'host' ? 'inline-block' : 'none';
+    const ready = Object.values(netRoster).filter(e => e.ready).length;
+    const all = netAllReady();
+    btnStart.textContent = all ? 'START' : `START (${ready}/${entries.length} READY)`;
+    btnStart.classList.toggle('all-ready', all);
+  }
 }
 
 (function netUiInit() {
@@ -1119,5 +1449,32 @@ function netUiShowCode(code) {
   codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinGame(codeInput.value); });
   codeInput.addEventListener('input', () => {
     codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, NET_CODE_LEN);
+  });
+
+  // Display name: prefill from localStorage, sanitize as typed, persist.
+  const nameInput = document.getElementById('coopNameInput');
+  if (nameInput) {
+    try { nameInput.value = localStorage.getItem(NET_NAME_KEY) || ''; } catch (e) {}
+    nameInput.addEventListener('input', () => {
+      const clean = netCleanName(nameInput.value);
+      if (nameInput.value !== clean) nameInput.value = clean;
+      netSaveMyName();
+    });
+  }
+
+  // Lobby buttons: READY toggle (client) / START (host — force-start allowed).
+  const btnReady = document.getElementById('btnReady');
+  if (btnReady) btnReady.addEventListener('click', () => {
+    if (netState.role !== 'client') return;
+    netMyReady = !netMyReady;
+    if (netRoster[netState.myId]) netRoster[netState.myId].ready = netMyReady; // optimistic
+    sendToHost('ready', { r: netMyReady });
+    netUiRenderLobby();
+  });
+  const btnStart = document.getElementById('btnStartCoop');
+  if (btnStart) btnStart.addEventListener('click', () => {
+    if (netState.role !== 'host') return;
+    if (!netAllReady()) console.log('[net] force-starting with unready players');
+    startGame(); // netOnHostStart inside broadcasts game_start to the room
   });
 })();

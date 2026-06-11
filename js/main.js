@@ -41,6 +41,8 @@ const LEVEL_THEMES = [
   {
     id: 0,
     archetype: 'rooms',
+    // open-office lobby: MANY big rooms, wide flowing connections
+    genParams: { roomCount: [7, 10], roomW: [3, 7], roomH: [3, 5], widen: 0.35, doorMax: 2 },
     name: "The Lobby",
     subtitle: "Mono-yellow purgatory. ~600 million sq miles of empty rooms.",
     wallColor: '#c9b968', wallColor2: '#b5a855',
@@ -59,6 +61,8 @@ const LEVEL_THEMES = [
   {
     id: 1,
     archetype: 'rooms',
+    // warehouse district: medium rooms, some widened corridors
+    genParams: { roomCount: [6, 8], roomW: [2, 5], roomH: [2, 5], widen: 0.25, doorMax: 2 },
     name: "Habitable Zone",
     subtitle: "Concrete warehouses stretching into infinity.",
     wallColor: '#707070', wallColor2: '#606060',
@@ -77,6 +81,8 @@ const LEVEL_THEMES = [
   {
     id: 2,
     archetype: 'rooms',
+    // maintenance tunnels: tight + mazy — few small rooms, almost no widening
+    genParams: { roomCount: [4, 6], roomW: [2, 3], roomH: [2, 3], widen: 0.10, doorMax: 1 },
     name: "Pipe Dreams",
     subtitle: "Maintenance tunnels. The machinery never stops.",
     wallColor: '#4a4035', wallColor2: '#3d352c',
@@ -94,16 +100,19 @@ const LEVEL_THEMES = [
   },
   {
     id: 3,
-    archetype: 'rooms',
+    archetype: 'pools', // sunken pool basins in wide-archway halls (generatePools)
+    genParams: { cols: [2, 3], rows: [2, 2], poolChance: 0.85, bridgeChance: 0.5 },
+    // BRIGHT variant: clear turquoise water, shallow wade-able basins
+    water: { depth: 1.2, surfaceDrop: 0.3, color: 0x35d8e8, opacity: 0.4, slow: 0.55, underAlpha: 0.45, causticColor: 0x7df0ff, causticIntensity: 0.5 },
     name: "The Poolrooms",
     subtitle: "Endless tiled pools. The water is warm. You are not alone.",
-    wallColor: '#d0e8f0', wallColor2: '#b8d8e8',
-    floorColor: '#88ccdd', floorColor2: '#70b8cc',
-    ceilColor: '#e0f0f8',
-    fogColor: 0x0a1820, fogNear: 2, fogFar: 35,
-    lightColor: 0x66ddff, lightIntensity: 0.9,
-    ambientColor: 0x88ccee, ambientIntensity: 0.12,
-    bgColor: 0x061218,
+    wallColor: '#e9e4d4', wallColor2: '#dcd6c4',
+    floorColor: '#cfe6e6', floorColor2: '#bdd9da',
+    ceilColor: '#f2eee2',
+    fogColor: 0x0e1a1c, fogNear: 2, fogFar: 35,
+    lightColor: 0xffeec8, lightIntensity: 0.9,
+    ambientColor: 0xcfe8e4, ambientIntensity: 0.12,
+    bgColor: 0x081416,
     mazeSize: 9,
     floorType: 'tile',
     decorations: 'water',
@@ -112,7 +121,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 4,
-    archetype: 'rooms',
+    archetype: 'arena', // boss floors always use generateBossArena — label is informational
     name: "BOSS — The Warden",
     subtitle: "Something massive guards this threshold.",
     wallColor: '#3a1010', wallColor2: '#2a0808',
@@ -139,6 +148,8 @@ const LEVEL_THEMES = [
   {
     id: 5,
     archetype: 'rooms',
+    // party venue: a handful of HUGE halls, very open flow between them
+    genParams: { roomCount: [5, 7], roomW: [4, 7], roomH: [4, 6], widen: 0.45, doorMax: 2 },
     name: "Level Fun =)",
     subtitle: "Come play with us! We have cake! =) =) =)",
     wallColor: '#ff88aa', wallColor2: '#88ddff',
@@ -157,6 +168,8 @@ const LEVEL_THEMES = [
   {
     id: 6,
     archetype: 'rooms',
+    // transformer maze: tight corridors, sparse small switch-rooms
+    genParams: { roomCount: [4, 6], roomW: [2, 4], roomH: [2, 3], widen: 0.12, doorMax: 1 },
     name: "The Electrical Station",
     subtitle: "Buzzing transformers. The air tastes like copper.",
     wallColor: '#3a4050', wallColor2: '#2c3340',
@@ -210,7 +223,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 9,
-    archetype: 'rooms',
+    archetype: 'arena', // boss floors always use generateBossArena — label is informational
     name: "BOSS — The Amalgam",
     subtitle: "It has consumed everything on this level. You're next.",
     wallColor: '#1a1020', wallColor2: '#120818',
@@ -236,7 +249,8 @@ const LEVEL_THEMES = [
   },
   {
     id: 10,
-    archetype: 'rooms',
+    archetype: 'chambers', // wards + corridors: a denser chamber grid reads as hospital wards
+    genParams: { cols: [3, 4], rows: [2, 3] },
     name: "The Hospital",
     subtitle: "Fluorescent lights. Sterile halls. Something on the gurney moved.",
     wallColor: '#c8c8c0', wallColor2: '#b0b0a8',
@@ -290,7 +304,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 13,
-    archetype: 'rooms',
+    archetype: 'open', // cold-storage warehouse: open ground between big freezer-rack blocks
     name: "The Freezer",
     subtitle: "Sub-zero. Your breath crystallizes. Something exhales behind you.",
     wallColor: '#8898a8', wallColor2: '#7888a0',
@@ -308,7 +322,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 14,
-    archetype: 'rooms',
+    archetype: 'arena', // boss floors always use generateBossArena — label is informational
     name: "BOSS — The Hive Mind",
     subtitle: "A thousand voices speak as one. It wants you to join.",
     wallColor: '#2a1a2a', wallColor2: '#1a0a1a',
@@ -349,6 +363,29 @@ const LEVEL_THEMES = [
     decorations: 'none',
     enemyTint: 0.4,
     darknessLevel: 0.5
+  },
+  {
+    id: 16,
+    archetype: 'pools',
+    genParams: { cols: [2, 3], rows: [2, 3], poolChance: 0.9, bridgeChance: 0.6 },
+    // DARK variant: near-opaque black-teal water, basins too deep for a normal
+    // jump (the in-water push-off in updatePlayer scales with depth), head goes
+    // UNDER the surface while wading (underwater overlay kicks in).
+    water: { depth: 2.5, surfaceDrop: 0.5, color: 0x041e22, opacity: 0.93, slow: 0.5, underAlpha: 0.82, causticColor: 0x16454c, causticIntensity: 0.3 },
+    name: "The Dark Pools",
+    subtitle: "The water remembers everyone who ever swam here. Listen.",
+    wallColor: '#2c3c3c', wallColor2: '#223030',
+    floorColor: '#16282a', floorColor2: '#102022',
+    ceilColor: '#1c2c2c',
+    fogColor: 0x020809, fogNear: 0.5, fogFar: 14,
+    lightColor: 0x2e8e8e, lightIntensity: 0.35,
+    ambientColor: 0x0e3438, ambientIntensity: 0.04,
+    bgColor: 0x010505,
+    mazeSize: 10,
+    floorType: 'tile',
+    decorations: 'water',
+    enemyTint: 0.7,
+    darknessLevel: 0.85
   }
 ];
 
@@ -426,6 +463,11 @@ function markFloorBeaten(i) {
 function isFloorUnlocked(i) { return i === 0 || beatenFloors.has(i - 1); }
 let keys = {}, mouseDown = false, rightMouseDown = false;
 let mazeWalls = [], mazeGrid = [];
+// 'pools' archetype state (see generatePools/buildPoolsGeometry). mazeGrid cell
+// value 2 = sunken pool basin: walkable floor at -poolWater.depth, water on top.
+let poolRects = [];   // basin cell-rects for the current pools floor
+let poolWater = null; // active theme.water (null on every other floor — physics no-op)
+let poolFx = null;    // animated water/caustics handles (floor-owned, rebuilt per floor)
 let enemies = [], lights = [];
 let exitZone = null, exitMesh = null, exitLight = null;
 let gunGroup = null, gunRecoil = 0, gunSwayX = 0, gunSwayY = 0;
@@ -519,6 +561,18 @@ function hexToRgb(hex) {
   };
 }
 
+// Every canvas-generated texture must be tagged sRGB AT CREATION: the renderer
+// outputs sRGB (init), so linear-tagged maps render shifted/muddy. NEVER toggle
+// encoding on a live texture — it changes the shader program variant and forces
+// a mid-game recompile hitch. The program-keepalive pin texture carries the
+// same tag so the pinned program variants are the ones the world actually uses.
+let srgbCanvasTexCount = 0;
+function texMarkSRGB(tex) {
+  tex.encoding = THREE.sRGBEncoding;
+  srgbCanvasTexCount++;
+  return tex;
+}
+
 function createWallTexture(theme) {
   const c = document.createElement('canvas'); c.width = 256; c.height = 256;
   const ctx = c.getContext('2d');
@@ -559,7 +613,7 @@ function createWallTexture(theme) {
         `rgba(${base.r - 10 + Math.random() * 20},${base.g - 10 + Math.random() * 20},${base.b - 10 + Math.random() * 20},0.15)`;
       ctx.fillRect(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 3, 1 + Math.random() * 6);
     }
-  } else if (theme.id === 3 || theme.id === 11) {
+  } else if (theme.id === 3 || theme.id === 11 || theme.id === 16) {
     ctx.strokeStyle = 'rgba(100,180,200,0.3)'; ctx.lineWidth = 2;
     for (let x = 0; x < 256; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 256); ctx.stroke(); }
     for (let y = 0; y < 256; y += 32) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke(); }
@@ -599,6 +653,7 @@ function createWallTexture(theme) {
   ctx.putImageData(id, 0, 0);
 
   const tex = new THREE.CanvasTexture(c);
+  texMarkSRGB(tex);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
@@ -661,6 +716,7 @@ function createFloorTexture(theme) {
   ctx.putImageData(id, 0, 0);
 
   const tex = new THREE.CanvasTexture(c);
+  texMarkSRGB(tex);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(2, 2);
   return tex;
@@ -690,6 +746,7 @@ function createCeilingTexture(theme) {
   }
 
   const tex = new THREE.CanvasTexture(c);
+  texMarkSRGB(tex);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(2, 2);
   return tex;
@@ -732,13 +789,34 @@ function getThemeTextures(theme) {
    ═══════════════════════════════════════════ */
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } }
 
-function generateMaze(w, h) {
-  mazeGrid = [];
-  for (let y = 0; y < h * 2 + 1; y++) { mazeGrid[y] = []; for (let x = 0; x < w * 2 + 1; x++) mazeGrid[y][x] = 0; }
+// 'rooms' archetype — THE backrooms generator. A recursive-backtracker maze is
+// only the corridor skeleton; a heavy seeded room pass then carves overlapping
+// room clusters whose exposed edges are re-WALLED and connected through punched
+// 1-2-cell doorways (rooms read as rooms, not open bleed), and a fraction of
+// corridor cells are bulged to 2 wide. Per-theme structure knobs ride in
+// theme.genParams (all optional, defaults below):
+//   roomCount [min,max] — rooms carved per floor; overlaps merge into irregular
+//                         open areas, which is intentional (liminal)
+//   roomW/roomH [min,max] — room interior size in grid cells
+//   widen 0..1          — fraction of corridor cells widened to 2 cells
+//   doorMax             — doorways punched per room (1..doorMax)
+// A final flood-fill REPAIR pass tunnels extra door-like openings to any region
+// the room walls sealed off, so connectivity is guaranteed for every seed.
+// Everything draws only from the seeded rng() in deterministic order — co-op
+// machines regenerate the identical grid from the floor seed.
+const MAZE_GEN_DEFAULTS = { roomCount: [6, 8], roomW: [2, 5], roomH: [2, 5], widen: 0.3, doorMax: 2 };
 
+function generateMaze(w, h, theme) {
+  const P = Object.assign({}, MAZE_GEN_DEFAULTS, (theme && theme.genParams) || {});
+  const gw = w * 2 + 1, gh = h * 2 + 1;
+  const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
+
+  // 1. Corridor skeleton (recursive backtracker on the cell lattice).
   const visited = [];
   for (let y = 0; y < h; y++) { visited[y] = []; for (let x = 0; x < w; x++) visited[y][x] = false; }
-
   function carve(cx, cy) {
     visited[cy][cx] = true;
     mazeGrid[cy * 2 + 1][cx * 2 + 1] = 1;
@@ -754,28 +832,148 @@ function generateMaze(w, h) {
   }
   carve(0, 0);
 
+  // 2. Extra loop openings so the maze isn't a strict tree.
   const extra = Math.floor(w * h * 0.15);
   for (let i = 0; i < extra; i++) {
-    const rx = 1 + Math.floor(rng() * (w * 2 - 1));
-    const ry = 1 + Math.floor(rng() * (h * 2 - 1));
+    const rx = 1 + Math.floor(rng() * (gw - 2));
+    const ry = 1 + Math.floor(rng() * (gh - 2));
     if (mazeGrid[ry][rx] === 0) {
       let nb = 0;
-      if (ry > 0 && mazeGrid[ry - 1][rx]) nb++;
-      if (ry < h * 2 && mazeGrid[ry + 1][rx]) nb++;
-      if (rx > 0 && mazeGrid[ry][rx - 1]) nb++;
-      if (rx < w * 2 && mazeGrid[ry][rx + 1]) nb++;
+      if (mazeGrid[ry - 1][rx]) nb++;
+      if (mazeGrid[ry + 1][rx]) nb++;
+      if (mazeGrid[ry][rx - 1]) nb++;
+      if (mazeGrid[ry][rx + 1]) nb++;
       if (nb >= 2) mazeGrid[ry][rx] = 1;
     }
   }
 
-  const numRooms = 3 + Math.floor(rng() * 3);
-  for (let r = 0; r < numRooms; r++) {
-    const rw = 2 + Math.floor(rng() * 3);
-    const rh = 2 + Math.floor(rng() * 3);
-    const rx = 1 + Math.floor(rng() * (w * 2 - rw - 1));
-    const ry = 1 + Math.floor(rng() * (h * 2 - rh - 1));
+  // 3. Corridor widening: bulge a seeded fraction of corridor cells by opening
+  // one orthogonal wall neighbour. Runs BEFORE the room pass so room walls (and
+  // their doorway feel) aren't eroded. Opening a wall next to floor can only
+  // merge regions, never split them.
+  if (P.widen > 0) {
+    for (let y = 1; y < gh - 1; y++) {
+      for (let x = 1; x < gw - 1; x++) {
+        if (mazeGrid[y][x] !== 1 || rng() >= P.widen) continue;
+        const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+        const [dx, dy] = dirs[Math.floor(rng() * 4)];
+        const nx = x + dx, ny = y + dy;
+        if (nx > 0 && nx < gw - 1 && ny > 0 && ny < gh - 1) mazeGrid[ny][nx] = 1;
+      }
+    }
+  }
+
+  // 4. Room pass. Each room: carve the interior, re-wall the perimeter ring
+  // (except where it would cut into an earlier room — overlaps merge into
+  // bigger irregular halls), then punch door-like openings. Rooms placed with
+  // interiors in 2..gw-3 so the ring (±1) never touches the outer border.
+  const inRoom = [];
+  for (let y = 0; y < gh; y++) { inRoom[y] = []; for (let x = 0; x < gw; x++) inRoom[y][x] = false; }
+  const nRooms = ri(P.roomCount[0], P.roomCount[1]);
+  for (let r = 0; r < nRooms; r++) {
+    const rw = ri(P.roomW[0], P.roomW[1]);
+    const rh = ri(P.roomH[0], P.roomH[1]);
+    if (rw > gw - 5 || rh > gh - 5) continue; // grid too small for this room
+    const rx = 2 + Math.floor(rng() * (gw - rw - 4));
+    const ry = 2 + Math.floor(rng() * (gh - rh - 4));
     for (let dy = 0; dy < rh; dy++) for (let dx = 0; dx < rw; dx++) {
-      if (ry + dy < h * 2 + 1 && rx + dx < w * 2 + 1) mazeGrid[ry + dy][rx + dx] = 1;
+      mazeGrid[ry + dy][rx + dx] = 1;
+      inRoom[ry + dy][rx + dx] = true;
+    }
+    // Perimeter ring → wall. This is what makes a room a ROOM: without it the
+    // carve just bleeds open into every corridor it grazed.
+    for (let x = rx - 1; x <= rx + rw; x++) {
+      if (!inRoom[ry - 1][x]) mazeGrid[ry - 1][x] = 0;
+      if (!inRoom[ry + rh][x]) mazeGrid[ry + rh][x] = 0;
+    }
+    for (let y = ry; y < ry + rh; y++) {
+      if (!inRoom[y][rx - 1]) mazeGrid[y][rx - 1] = 0;
+      if (!inRoom[y][rx + rw]) mazeGrid[y][rx + rw] = 0;
+    }
+    // Doorways: 1..doorMax openings, each 1-2 cells, on random sides. A door
+    // into solid wall is a harmless alcove — the repair pass below guarantees
+    // the room itself ends up connected regardless.
+    const doors = 1 + Math.floor(rng() * P.doorMax);
+    for (let d = 0; d < doors; d++) {
+      const side = Math.floor(rng() * 4);
+      const dw = 1 + Math.floor(rng() * 2);
+      if (side < 2) {
+        const wy = side === 0 ? ry - 1 : ry + rh;
+        const x0 = rx + Math.floor(rng() * Math.max(1, rw - dw + 1));
+        for (let k = 0; k < dw && x0 + k < rx + rw; k++) mazeGrid[wy][x0 + k] = 1;
+      } else {
+        const wx = side === 2 ? rx - 1 : rx + rw;
+        const y0 = ry + Math.floor(rng() * Math.max(1, rh - dw + 1));
+        for (let k = 0; k < dw && y0 + k < ry + rh; k++) mazeGrid[y0 + k][wx] = 1;
+      }
+    }
+  }
+
+  // 5. Spawn + exit anchors stay floor no matter what the rooms overwrote.
+  // (buildMazeScene spawns at (1,1) and searches the exit from (gw-2, gh-2).)
+  mazeGrid[1][1] = 1;
+  mazeGrid[gh - 2][gw - 2] = 1;
+
+  // 6. Connectivity guarantee (exit reachability + co-op determinism both
+  // depend on this): tunnel doorways to anything the room walls sealed off.
+  mazeRepairConnectivity(gw, gh);
+}
+
+// Flood-fill from the spawn cell (1,1); while any floor region is unreached,
+// BFS the SHORTEST wall path from the reached set to it and carve that path
+// (1-2 cells in practice — it reads as just another doorway). Pure scan-order
+// BFS, no rng: deterministic, so every co-op machine repairs identically.
+// Border walls are never carved (search is confined to the 1..gw-2 interior).
+function mazeRepairConnectivity(gw, gh) {
+  const floodFrom = () => {
+    const seen = [];
+    for (let y = 0; y < gh; y++) seen.push(new Array(gw).fill(false));
+    const q = [[1, 1]];
+    seen[1][1] = true;
+    while (q.length) {
+      const [x, y] = q.pop();
+      if (mazeGrid[y - 1] && mazeGrid[y - 1][x] === 1 && !seen[y - 1][x]) { seen[y - 1][x] = true; q.push([x, y - 1]); }
+      if (mazeGrid[y + 1] && mazeGrid[y + 1][x] === 1 && !seen[y + 1][x]) { seen[y + 1][x] = true; q.push([x, y + 1]); }
+      if (mazeGrid[y][x - 1] === 1 && !seen[y][x - 1]) { seen[y][x - 1] = true; q.push([x - 1, y]); }
+      if (mazeGrid[y][x + 1] === 1 && !seen[y][x + 1]) { seen[y][x + 1] = true; q.push([x + 1, y]); }
+    }
+    return seen;
+  };
+  for (let guard = 0; guard < 256; guard++) {
+    const seen = floodFrom();
+    let disconnected = false;
+    for (let y = 1; y < gh - 1 && !disconnected; y++)
+      for (let x = 1; x < gw - 1; x++)
+        if (mazeGrid[y][x] === 1 && !seen[y][x]) { disconnected = true; break; }
+    if (!disconnected) return;
+
+    // BFS outward from ALL reached floor cells, stepping through wall cells,
+    // until the wavefront touches an unreached floor cell; carve the wall path.
+    const visited = [];
+    for (let y = 0; y < gh; y++) visited.push(new Array(gw).fill(false));
+    const prev = new Map(); // 'x,y' of a wall cell -> parent 'x,y'
+    const q = [];
+    for (let y = 1; y < gh - 1; y++)
+      for (let x = 1; x < gw - 1; x++)
+        if (seen[y][x]) { visited[y][x] = true; q.push([x, y]); }
+    let hit = null;
+    for (let qi = 0; qi < q.length && !hit; qi++) {
+      const [x, y] = q[qi];
+      for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 1 || ny < 1 || nx > gw - 2 || ny > gh - 2 || visited[ny][nx]) continue;
+        visited[ny][nx] = true;
+        prev.set(nx + ',' + ny, x + ',' + y);
+        if (mazeGrid[ny][nx] === 1) { hit = [nx, ny]; break; } // unreached floor found
+        q.push([nx, ny]); // wall cell — keep tunnelling
+      }
+    }
+    if (!hit) return; // no path even through walls — cannot happen on these grids
+    let key = prev.get(hit[0] + ',' + hit[1]);
+    while (key && prev.has(key)) { // walk back over the wall cells, carving
+      const c = key.split(',');
+      mazeGrid[+c[1]][+c[0]] = 1;
+      key = prev.get(key);
     }
   }
 }
@@ -810,7 +1008,11 @@ function generateBossArena(size) {
    archetypes ('caves', 'office', ...) as additional cases here.
    ═══════════════════════════════════════════ */
 function generateLevel(theme, w, h) {
+  poolRects = []; // only generatePools fills this; everyone else has no basins
   switch (theme.archetype) {
+    case 'pools':
+      generatePools(w, h, theme);
+      break;
     case 'open':
       generateOpen(w, h);
       break;
@@ -821,12 +1023,103 @@ function generateLevel(theme, w, h) {
       generateLinear(w, h);
       break;
     case 'chambers':
-      generateChambers(w, h);
+      generateChambers(w, h, theme);
       break;
     case 'rooms':
     default:
-      generateMaze(w, h);
+      generateMaze(w, h, theme);
       break;
+  }
+}
+
+// 'pools' archetype — interconnected POOL HALLS (Poolrooms / Dark Pools).
+// An irregular hall grid (jittered column/row boundaries → varying hall sizes)
+// is carved fully open; every adjacent pair of halls connects through a WIDE
+// 2-4-cell archway punched in the shared wall (open flow, not maze corridors).
+// Most halls get a SUNKEN POOL BASIN: cell value 2 = walkable lowered floor at
+// y = -theme.water.depth, rendered as water by buildPoolsGeometry. Pools are
+// inset >=1 cell from the hall edge, so a dry tiled DECK rings every basin —
+// the deck network (value 1) alone is connected by construction (ring +
+// archways + grid-connected hall graph), so pools can never gate progress and
+// spawn (1,1) / exit (gw-2, gh-2) always sit on dry deck. Big pools sometimes
+// keep a 1-cell deck BRIDGE across the middle (reads as a raised walkway
+// between two pools). Pool rects are recorded in poolRects for the renderer.
+// Grid contract grows: 0 = wall, 1 = deck floor, 2 = pool basin. Seeded rng()
+// only → co-op machines regenerate the identical grid.
+function generatePools(w, h, theme) {
+  const G = (theme && theme.genParams) || {};
+  const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+  const gw = w * 2 + 1, gh = h * 2 + 1;
+
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
+
+  // 1. Hall grid with jittered boundaries. Clamped so halls stay >=4 wide
+  // (1-cell deck ring + a >=2-cell pool needs 4).
+  let cols = G.cols ? ri(G.cols[0], G.cols[1]) : 2 + (rng() < 0.5 ? 1 : 0);
+  let rows = G.rows ? ri(G.rows[0], G.rows[1]) : 2;
+  const innerW = gw - 2, innerH = gh - 2;
+  while (cols > 2 && Math.floor((innerW - (cols - 1)) / cols) < 5) cols--;
+  while (rows > 2 && Math.floor((innerH - (rows - 1)) / rows) < 5) rows--;
+  const colB = [], rowB = []; // wall line positions between halls
+  for (let c = 1; c < cols; c++) colB.push(Math.round((innerW + 1) * c / cols) + ri(-1, 1));
+  for (let r = 1; r < rows; r++) rowB.push(Math.round((innerH + 1) * r / rows) + ri(-1, 1));
+
+  // Hall rects from the boundary lines.
+  const x0s = [1, ...colB.map(b => b + 1)], x1s = [...colB.map(b => b - 1), gw - 2];
+  const y0s = [1, ...rowB.map(b => b + 1)], y1s = [...rowB.map(b => b - 1), gh - 2];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    for (let y = y0s[r]; y <= y1s[r]; y++) for (let x = x0s[c]; x <= x1s[c]; x++) mazeGrid[y][x] = 1;
+  }
+
+  // 2. Wide archways through every shared wall (hall graph = connected grid).
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (c < cols - 1) { // right neighbour, opening along the shared column
+      const wx = colB[c], lo = y0s[r], hi = y1s[r];
+      const span = hi - lo + 1, aw = Math.min(span, ri(2, 4));
+      const start = lo + ri(0, span - aw);
+      for (let k = 0; k < aw; k++) mazeGrid[start + k][wx] = 1;
+    }
+    if (r < rows - 1) { // neighbour below, opening along the shared row
+      const wy = rowB[r], lo = x0s[c], hi = x1s[c];
+      const span = hi - lo + 1, aw = Math.min(span, ri(2, 4));
+      const start = lo + ri(0, span - aw);
+      for (let k = 0; k < aw; k++) mazeGrid[wy][start + k] = 1;
+    }
+  }
+
+  // 3. Sunken pools: inset >=1 cell from the hall edge (deck ring survives).
+  const poolChance = G.poolChance !== undefined ? G.poolChance : 0.85;
+  const bridgeChance = G.bridgeChance !== undefined ? G.bridgeChance : 0.5;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const hx0 = x0s[c], hx1 = x1s[c], hy0 = y0s[r], hy1 = y1s[r];
+    const hw = hx1 - hx0 + 1, hh = hy1 - hy0 + 1;
+    if (hw < 4 || hh < 4 || rng() >= poolChance) continue;
+    // jittered inset for varying pool sizes/positions inside the hall
+    const px0 = hx0 + 1 + (hw > 5 ? ri(0, 1) : 0);
+    const px1 = hx1 - 1 - (hw > 5 ? ri(0, 1) : 0);
+    const py0 = hy0 + 1 + (hh > 5 ? ri(0, 1) : 0);
+    const py1 = hy1 - 1 - (hh > 5 ? ri(0, 1) : 0);
+    if (px1 - px0 < 1 || py1 - py0 < 1) continue; // pools are >=2x2 cells
+    for (let y = py0; y <= py1; y++) for (let x = px0; x <= px1; x++) mazeGrid[y][x] = 2;
+    // Raised walkway: a 1-cell deck bridge across the middle of a big pool,
+    // splitting it into two recorded basins (each gets its own water + lips).
+    const pw = px1 - px0 + 1, ph = py1 - py0 + 1;
+    if ((pw >= 4 || ph >= 4) && rng() < bridgeChance) {
+      if (pw >= ph) {
+        const bx = px0 + 1 + ri(0, pw - 3); // keeps >=1 pool cell each side
+        for (let y = py0; y <= py1; y++) mazeGrid[y][bx] = 1;
+        poolRects.push({ x0: px0, y0: py0, x1: bx - 1, y1: py1 });
+        poolRects.push({ x0: bx + 1, y0: py0, x1: px1, y1: py1 });
+      } else {
+        const by = py0 + 1 + ri(0, ph - 3);
+        for (let x = px0; x <= px1; x++) mazeGrid[by][x] = 1;
+        poolRects.push({ x0: px0, y0: py0, x1: px1, y1: by - 1 });
+        poolRects.push({ x0: px0, y0: by + 1, x1: px1, y1: py1 });
+      }
+    } else {
+      poolRects.push({ x0: px0, y0: py0, x1: px1, y1: py1 });
+    }
   }
 }
 
@@ -837,17 +1130,23 @@ function generateLevel(theme, w, h) {
 // the room-adjacency graph a fully-connected grid → guaranteed flood-fill connected.
 // Same mazeGrid contract (0=wall, 1=floor); spawn (1,1) and exit (gw-2,gh-2) land inside
 // the first/last rooms. Deterministic via rng().
-function generateChambers(w, h) {
+function generateChambers(w, h, theme) {
   const gw = w * 2 + 1, gh = h * 2 + 1;
 
   // 1. Solid everywhere; rooms get carved out below.
   mazeGrid = [];
   for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
 
-  // 2. Room grid: 2 or 3 columns, 2 rows → 2x2 or 3x2 big rooms.
-  const cols = 2 + (rng() < 0.5 ? 1 : 0);
-  const rows = 2;
+  // 2. Room grid. Default: 2-3 columns x 2 rows of big halls. Themes can shape
+  // the grid via genParams.cols/rows [min,max] (e.g. Hospital 3-4x2-3 = wards,
+  // Poolrooms 2-3x2 = big pool halls). Clamped so rooms stay >=3 cells wide.
+  const G = (theme && theme.genParams) || {};
+  const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+  let cols = G.cols ? ri(G.cols[0], G.cols[1]) : 2 + (rng() < 0.5 ? 1 : 0);
+  let rows = G.rows ? ri(G.rows[0], G.rows[1]) : 2;
   const innerW = gw - 2, innerH = gh - 2;                 // playable band is indices 1..gw-2 / 1..gh-2
+  while (cols > 2 && Math.floor((innerW - (cols - 1)) / cols) < 3) cols--;
+  while (rows > 2 && Math.floor((innerH - (rows - 1)) / rows) < 3) rows--;
   const colW = Math.floor((innerW - (cols - 1)) / cols);  // room width  (1-cell wall between cols)
   const rowH = Math.floor((innerH - (rows - 1)) / rows);  // room height (1-cell wall between rows)
 
@@ -1275,6 +1574,10 @@ function warmUpFlashlight() {
 function createProgramKeepalive() {
   programKeepalive = new THREE.Group();
   const tex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  // sRGB to MATCH the world textures (texMarkSRGB): map encoding is part of the
+  // program cache key, so a linear pin here would pin the WRONG variants and
+  // every floor would recompile. White decodes to white — visually a no-op.
+  tex.encoding = THREE.sRGBEncoding;
   tex.needsUpdate = true;
   const quad = new THREE.PlaneGeometry(1, 1);
   const pin = (obj) => {
@@ -1287,6 +1590,9 @@ function createProgramKeepalive() {
   pin(new THREE.Mesh(quad, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05, side: THREE.DoubleSide })));
   pin(new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })));
   pin(new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, alphaTest: 0.1, depthWrite: false })));
+  //   5. MeshBasicMaterial + map, DoubleSide   (pool caustics — the ONE new
+  //      program family the water system adds; water itself reuses family 2)
+  pin(new THREE.Mesh(quad, new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide })));
   camera.add(programKeepalive);
 }
 
@@ -1333,7 +1639,9 @@ const ammoPickupMat = new THREE.MeshStandardMaterial({
 
 function createAmmoPickup(wx, wz, id) {
   const mesh = new THREE.Mesh(ammoPickupGeo, ammoPickupMat);
-  const baseY = 0.18;
+  // Pools: a kill-drop over a basin sinks to the pool floor (same height on
+  // every machine — floorHeightAt is grid-derived, and the grid is seeded).
+  const baseY = 0.18 + floorHeightAt(wx, wz);
   mesh.position.set(wx, baseY, wz);
   scene.add(mesh);
   ammoPickups.push({ id, mesh, x: wx, z: wz, baseY, phase: ammoPickups.length * 1.7 });
@@ -1459,6 +1767,7 @@ function buildMazeScene() {
 
   while (scene.children.length > 0) scene.remove(scene.children[0]);
   mazeWalls = []; enemies = []; lights = []; flickerTimers = [];
+  poolFx = null; poolWater = null; // pools materials died in the traverse above
   ammoPickups = [];
   bossEntity = null;
   bossProjectiles = [];
@@ -1482,24 +1791,18 @@ function buildMazeScene() {
 
   const gw = mazeGrid[0].length, gh = mazeGrid.length;
 
-  // Floor
-  const floorGeo = new THREE.PlaneGeometry(gw * CELL, gh * CELL);
-  floorGeo.rotateX(-Math.PI / 2);
-  const floorMesh = new THREE.Mesh(floorGeo, floorMat);
-  floorMesh.position.set(gw * CELL / 2, 0, gh * CELL / 2);
-  scene.add(floorMesh);
-
-  // Poolrooms water plane
-  if (theme.id === 3) {
-    const waterGeo = new THREE.PlaneGeometry(gw * CELL, gh * CELL);
-    waterGeo.rotateX(-Math.PI / 2);
-    const waterMat = new THREE.MeshStandardMaterial({
-      color: 0x44aacc, transparent: true, opacity: 0.35,
-      roughness: 0.1, metalness: 0.3
-    });
-    const waterMesh = new THREE.Mesh(waterGeo, waterMat);
-    waterMesh.position.set(gw * CELL / 2, 0.15, gh * CELL / 2);
-    scene.add(waterMesh);
+  // Floor. Pools floors swap the single slab for per-cell deck quads + sunken
+  // basins + water/caustics (the old full-grid Poolrooms water plane is gone —
+  // water now lives only inside the basins).
+  if (theme.archetype === 'pools' && theme.water) {
+    poolWater = theme.water; // physics/audio/decorations read this from here on
+    buildPoolsGeometry(theme, gw, gh, floorMat, wallMat);
+  } else {
+    const floorGeo = new THREE.PlaneGeometry(gw * CELL, gh * CELL);
+    floorGeo.rotateX(-Math.PI / 2);
+    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+    floorMesh.position.set(gw * CELL / 2, 0, gh * CELL / 2);
+    scene.add(floorMesh);
   }
 
   // Ceiling
@@ -1786,8 +2089,12 @@ function addDecorations(theme, gw, gh) {
     const colMat = new THREE.MeshStandardMaterial({ color: 0xd0e0e8, roughness: 0.3, metalness: 0.1 });
     for (let y = 3; y < gh - 2; y += 5) for (let x = 3; x < gw - 2; x += 5) {
       if (isOpenArea(x, y, gw, gh) && Math.random() < 0.5) {
-        const col = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, WALL_H, 12), colMat);
-        col.position.set(x * CELL + CELL / 2, WALL_H / 2, y * CELL + CELL / 2);
+        // A column standing in a basin runs all the way down to the POOL floor
+        // (rising out of the water), not just to deck level.
+        const fh = floorHeightAt(x * CELL + CELL / 2, y * CELL + CELL / 2);
+        const colH = WALL_H - fh;
+        const col = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, colH, 12), colMat);
+        col.position.set(x * CELL + CELL / 2, fh + colH / 2, y * CELL + CELL / 2);
         scene.add(col);
         mazeWalls.push({ minX: x * CELL + CELL / 2 - 0.25, maxX: x * CELL + CELL / 2 + 0.25, minZ: y * CELL + CELL / 2 - 0.25, maxZ: y * CELL + CELL / 2 + 0.25 });
       }
@@ -1850,6 +2157,228 @@ function isOpenArea(x, y, gw, gh) {
     if (ny < 0 || ny >= gh || nx < 0 || nx >= gw || mazeGrid[ny][nx] === 0) return false;
   }
   return true;
+}
+
+/* ═══════════════════════════════════════════
+   POOLS — sunken basins, water surface, fake caustics
+   Built only on 'pools' floors (Poolrooms / Dark Pools). Everything renders
+   from FOUR merged meshes (deck+basin floors, basin lip walls, water surfaces,
+   caustics) — no per-pool draw calls, no render targets, no new lights.
+   Textures are session-cached (userData.themeCached spares them the floor
+   teardown); the materials are floor-owned and rebuilt every visit.
+   ═══════════════════════════════════════════ */
+
+// Ground height at a world position: 0 everywhere except inside a pool basin.
+// The ONLY source of truth for walkable height — player physics, pickups,
+// decorations and mob wading all read this.
+function floorHeightAt(x, z) {
+  if (!poolWater) return 0;
+  const cx = Math.floor(x / CELL), cy = Math.floor(z / CELL);
+  const row = mazeGrid[cy];
+  return (row && row[cx] === 2) ? -poolWater.depth : 0;
+}
+
+// Mobs WADE rather than dive: sink to ~55% of basin depth so they stay visible
+// above even the near-opaque Dark Pools water. Used by updateEnemies +
+// raycastEnemies (host) and the netClientUpdate mirrors (clients).
+function mobGroundOffset(x, z) {
+  const fh = floorHeightAt(x, z);
+  return fh < 0 ? fh * 0.55 : 0;
+}
+
+let waterTexCache = null, causticsTexCache = null;
+
+// Soft ripple-noise sheet, tinted/faded by the per-theme water material.
+function getWaterTexture() {
+  if (waterTexCache) return waterTexCache;
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 256, 256);
+  // wrapped strokes (drawn at 3x3 offsets) keep the texture tileable
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * 256, y = Math.random() * 256;
+    const rx = 12 + Math.random() * 30, ry = 3 + Math.random() * 8;
+    const dark = Math.random() < 0.6;
+    ctx.strokeStyle = dark ? `rgba(40,80,90,${0.04 + Math.random() * 0.08})`
+                           : `rgba(255,255,255,${0.06 + Math.random() * 0.10})`;
+    ctx.lineWidth = 1 + Math.random() * 2;
+    for (const ox of [-256, 0, 256]) for (const oy of [-256, 0, 256]) {
+      ctx.beginPath();
+      ctx.ellipse(x + ox, y + oy, rx, ry, Math.random() * Math.PI, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  texMarkSRGB(tex);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.userData = { themeCached: true }; // session-cached — exempt from floor teardown
+  waterTexCache = tex;
+  return tex;
+}
+
+// FAKE CAUSTICS: a black sheet webbed with bright arc filaments. Scrolled +
+// opacity-pulsed by updateWaterFX and blended additively onto basin floors and
+// lip walls — the signature poolrooms shimmer with zero render-target cost.
+function getCausticsTexture() {
+  if (causticsTexCache) return causticsTexCache;
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 70; i++) {
+    const x = Math.random() * 256, y = Math.random() * 256;
+    const r = 8 + Math.random() * 22;
+    const a0 = Math.random() * Math.PI * 2, a1 = a0 + 1.2 + Math.random() * 2.2;
+    ctx.strokeStyle = `rgba(255,255,255,${0.15 + Math.random() * 0.35})`;
+    ctx.lineWidth = 1 + Math.random() * 2;
+    for (const ox of [-256, 0, 256]) for (const oy of [-256, 0, 256]) {
+      ctx.beginPath();
+      ctx.arc(x + ox, y + oy, r, a0, a1);
+      ctx.stroke();
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  texMarkSRGB(tex);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.userData = { themeCached: true };
+  causticsTexCache = tex;
+  return tex;
+}
+
+// Tiny merged-quad builder: corners CCW as seen from the face's front side.
+function poolsQuadBuilder() {
+  return {
+    pos: [], uv: [], idx: [],
+    add(p1, p2, p3, p4, u1, u2, u3, u4) {
+      const b = this.pos.length / 3;
+      this.pos.push(...p1, ...p2, ...p3, ...p4);
+      this.uv.push(...u1, ...u2, ...u3, ...u4);
+      this.idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+    },
+    build() {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
+      g.setIndex(this.idx);
+      g.computeVertexNormals();
+      return g;
+    }
+  };
+}
+
+function buildPoolsGeometry(theme, gw, gh, floorMat, wallMat) {
+  const W = theme.water;
+  const D = W.depth, surfY = -W.surfaceDrop;
+  const floors = poolsQuadBuilder();  // deck cells + basin floors (theme floor texture)
+  const lips = poolsQuadBuilder();    // basin inner walls (theme wall texture)
+  const water = poolsQuadBuilder();   // one surface quad per basin
+  const caus = poolsQuadBuilder();    // caustics overlay: basin floors + lips
+
+  // Deck: one quad per non-basin cell at y=0. UVs span 0..1 across the whole
+  // grid (the shared theme texture's repeat does the tiling), matching the
+  // exact look of the single floor slab other archetypes use.
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    if (mazeGrid[y][x] === 2) continue;
+    const x0 = x * CELL, x1 = x0 + CELL, z0 = y * CELL, z1 = z0 + CELL;
+    floors.add([x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0],
+      [x / gw, y / gh], [x / gw, (y + 1) / gh], [(x + 1) / gw, (y + 1) / gh], [(x + 1) / gw, y / gh]);
+  }
+
+  const CAUS_UV = 0.5; // caustics/water texture tiles per grid cell
+  for (const r of poolRects) {
+    const x0 = r.x0 * CELL, x1 = (r.x1 + 1) * CELL;
+    const z0 = r.y0 * CELL, z1 = (r.y1 + 1) * CELL;
+    const cw = r.x1 - r.x0 + 1, ch = r.y1 - r.y0 + 1;
+
+    // basin floor (same theme floor texture, just lower)
+    floors.add([x0, -D, z0], [x0, -D, z1], [x1, -D, z1], [x1, -D, z0],
+      [r.x0 / gw, r.y0 / gh], [r.x0 / gw, (r.y1 + 1) / gh], [(r.x1 + 1) / gw, (r.y1 + 1) / gh], [(r.x1 + 1) / gw, r.y0 / gh]);
+
+    // 4 lip walls, from basin floor up to deck level (wallMat is DoubleSide,
+    // so winding is irrelevant). One wall-texture tile per cell horizontally,
+    // depth/WALL_H of a tile vertically (no squashed tiles).
+    const vTile = D / WALL_H;
+    lips.add([x0, -D, z0], [x0, 0, z0], [x1, 0, z0], [x1, -D, z0], [0, 0], [0, vTile], [cw, vTile], [cw, 0]); // north
+    lips.add([x0, -D, z1], [x0, 0, z1], [x1, 0, z1], [x1, -D, z1], [0, 0], [0, vTile], [cw, vTile], [cw, 0]); // south
+    lips.add([x0, -D, z0], [x0, 0, z0], [x0, 0, z1], [x0, -D, z1], [0, 0], [0, vTile], [ch, vTile], [ch, 0]); // west
+    lips.add([x1, -D, z0], [x1, 0, z0], [x1, 0, z1], [x1, -D, z1], [0, 0], [0, vTile], [ch, vTile], [ch, 0]); // east
+
+    // water surface (DoubleSide: Dark Pools puts the camera under it)
+    water.add([x0, surfY, z0], [x0, surfY, z1], [x1, surfY, z1], [x1, surfY, z0],
+      [0, 0], [0, ch * CAUS_UV], [cw * CAUS_UV, ch * CAUS_UV], [cw * CAUS_UV, 0]);
+
+    // caustics: basin floor sheet + the 4 lips, nudged 3cm off the surfaces
+    caus.add([x0, -D + 0.03, z0], [x0, -D + 0.03, z1], [x1, -D + 0.03, z1], [x1, -D + 0.03, z0],
+      [0, 0], [0, ch * CAUS_UV], [cw * CAUS_UV, ch * CAUS_UV], [cw * CAUS_UV, 0]);
+    const cv = D / CELL * CAUS_UV;
+    caus.add([x0, -D, z0 + 0.03], [x0, 0, z0 + 0.03], [x1, 0, z0 + 0.03], [x1, -D, z0 + 0.03], [0, 0], [0, cv], [cw * CAUS_UV, cv], [cw * CAUS_UV, 0]);
+    caus.add([x0, -D, z1 - 0.03], [x0, 0, z1 - 0.03], [x1, 0, z1 - 0.03], [x1, -D, z1 - 0.03], [0, 0], [0, cv], [cw * CAUS_UV, cv], [cw * CAUS_UV, 0]);
+    caus.add([x0 + 0.03, -D, z0], [x0 + 0.03, 0, z0], [x0 + 0.03, 0, z1], [x0 + 0.03, -D, z1], [0, 0], [0, cv], [ch * CAUS_UV, cv], [ch * CAUS_UV, 0]);
+    caus.add([x1 - 0.03, -D, z0], [x1 - 0.03, 0, z0], [x1 - 0.03, 0, z1], [x1 - 0.03, -D, z1], [0, 0], [0, cv], [ch * CAUS_UV, cv], [ch * CAUS_UV, 0]);
+  }
+
+  scene.add(new THREE.Mesh(floors.build(), floorMat));
+  scene.add(new THREE.Mesh(lips.build(), wallMat));
+
+  // Floor-owned materials (teardown disposes them); textures are the cached
+  // singletons. Standard+map(+DoubleSide) programs are already pinned by the
+  // keepalive; basic+map+DoubleSide (caustics) gets its own pin there.
+  const waterMat = new THREE.MeshStandardMaterial({
+    map: getWaterTexture(), color: W.color, transparent: true, opacity: W.opacity,
+    roughness: 0.15, metalness: 0.25, depthWrite: false, side: THREE.DoubleSide
+  });
+  const causMat = new THREE.MeshBasicMaterial({
+    map: getCausticsTexture(), color: W.causticColor, transparent: true,
+    opacity: W.causticIntensity, blending: THREE.AdditiveBlending,
+    depthWrite: false, side: THREE.DoubleSide
+  });
+  const causMesh = new THREE.Mesh(caus.build(), causMat);
+  causMesh.renderOrder = 1; // caustics under the water sheet
+  scene.add(causMesh);
+  const waterMesh = new THREE.Mesh(water.build(), waterMat);
+  waterMesh.renderOrder = 2;
+  scene.add(waterMesh);
+
+  poolFx = { waterMat, causMat, base: W.causticIntensity, t: 0 };
+}
+
+// Per-frame water animation: UV drift on the (shared, repeat-wrapped) textures
+// + a slow opacity pulse on the caustics. Pure uniform updates — no canvas
+// redraws, no extra draw calls.
+function updateWaterFX(dt) {
+  if (!poolFx) return;
+  poolFx.t += dt;
+  const t = poolFx.t;
+  poolFx.waterMat.map.offset.set(t * 0.018, t * 0.011);
+  poolFx.causMat.map.offset.set(t * 0.012 + Math.sin(t * 0.2) * 0.08, t * 0.016);
+  poolFx.causMat.opacity = poolFx.base * (0.75 + 0.25 * Math.sin(t * 1.7));
+}
+
+// In-water player feedback: entry splash, wading footfalls, underwater tint.
+// The overlay is a CSS div (zero render cost) that only ever shows when the
+// EYE is below the water plane — i.e. wading through Dark Pools basins.
+let waterOverlayEl = null, wadeTimer = 0, wasInWater = false;
+function updateWaterPlayerFX(dt, isMoving, inWater) {
+  if (inWater && !wasInWater) playSplash();
+  wasInWater = inWater;
+  if (inWater && isMoving) {
+    wadeTimer -= dt;
+    if (wadeTimer <= 0) { wadeTimer = 0.4 + Math.random() * 0.15; playWade(); }
+  }
+  if (!waterOverlayEl) {
+    waterOverlayEl = document.createElement('div');
+    waterOverlayEl.style.cssText =
+      'position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:5;opacity:0;transition:opacity 0.2s;';
+    document.body.appendChild(waterOverlayEl);
+  }
+  const under = inWater && poolWater && player.pos.y < -poolWater.surfaceDrop;
+  if (under) {
+    const c = poolWater.color, r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    waterOverlayEl.style.background =
+      `rgba(${r >> 1},${g >> 1},${b >> 1},${poolWater.underAlpha})`;
+    waterOverlayEl.style.opacity = '1';
+  } else {
+    waterOverlayEl.style.opacity = '0';
+  }
 }
 
 /* ═══════════════════════════════════════════
@@ -1928,6 +2457,10 @@ function playerShoot() {
   const dir = new THREE.Vector3(0, 0, -1);
   dir.applyQuaternion(camera.quaternion);
   const ray = new THREE.Raycaster(camera.position.clone(), dir, 0.1, GUN_RANGE);
+
+  // MP HOST: clients' shots reach peers via the 'shoot' relay; the host's own
+  // shots need this explicit cosmetic broadcast (net.js — trail/flash/sound).
+  if (netState.role === 'host') netAnnounceShot(camera.position, dir);
 
   // Compute gun tip world position for bullet trail start
   const gunTip = new THREE.Vector3(0, 0, -0.3);
@@ -2009,6 +2542,7 @@ function raycastEnemies(ray, origin) {
   for (const e of enemies) {
     if (!e.alive) continue;
     let boxSize, boxCenter;
+    const wade = mobGroundOffset(e.pos.x, e.pos.z); // pools: hitbox follows the wading visual
     if (e.mesh.isGroup) {
       // 3D wire figure: armature is ~2.5m tall and ~0.7m wide at the arms.
       // Use the true VISUAL height (NOT e.height, which is gameplay-only) so
@@ -2016,11 +2550,11 @@ function raycastEnemies(ray, origin) {
       // 0.9m so the outstretched arms are coverable.
       const visH = 2.5 * WIRE_VISUAL_SCALE;
       boxSize = new THREE.Vector3(0.9, visH, 0.9);
-      boxCenter = e.pos.clone().setY(visH * 0.5);
+      boxCenter = e.pos.clone().setY(visH * 0.5 + wade);
     } else {
       // sprite mobs: unchanged
       boxSize = new THREE.Vector3(e.scale * 1.5, e.height * 1.1, e.scale * 1.5);
-      boxCenter = e.pos.clone().setY(e.height * 0.5);
+      boxCenter = e.pos.clone().setY(e.height * 0.5 + wade);
     }
     const box = new THREE.Box3().setFromCenterAndSize(boxCenter, boxSize);
     const hit = ray.ray.intersectBox(box, new THREE.Vector3());
@@ -2121,7 +2655,11 @@ function updatePlayer(dt) {
   if (isMoving) moveDir.normalize();
 
   player.isSprinting = keys['ShiftLeft'] && isMoving && player.stamina > 0 && player.onGround;
-  const speed = MOVE_SPEED * (player.isSprinting ? SPRINT_MULT : 1) * (player.isADS ? 0.6 : 1);
+  // Pools: wading below the water line slows you (per-theme theme.water.slow).
+  const inWater = !!poolWater && floorHeightAt(player.pos.x, player.pos.z) < 0 &&
+                  (player.pos.y - 1.6) < -poolWater.surfaceDrop + 0.05;
+  const speed = MOVE_SPEED * (player.isSprinting ? SPRINT_MULT : 1) * (player.isADS ? 0.6 : 1) *
+                (inWater ? poolWater.slow : 1);
 
   if (player.isSprinting) player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN * dt);
   else player.stamina = Math.min(shopStats.maxHealth, player.stamina + STAMINA_REGEN * shopStats.staminaRegenMult * dt);
@@ -2134,13 +2672,28 @@ function updatePlayer(dt) {
     if (newX + pRad > w.minX && newX - pRad < w.maxX && player.pos.z + pRad > w.minZ && player.pos.z - pRad < w.maxZ) canX = false;
     if (player.pos.x + pRad > w.minX && player.pos.x - pRad < w.maxX && newZ + pRad > w.minZ && newZ - pRad < w.maxZ) canZ = false;
   }
+  // Pools: the basin lip is a height step, not an AABB. You can always walk IN
+  // (drop), but climbing OUT needs your feet above (deck - 0.55m) — i.e. a
+  // jump. While airborne over the lip the same check lets you through.
+  if (poolWater) {
+    const footY = player.pos.y - 1.6;
+    if (canX && floorHeightAt(newX, player.pos.z) > footY + 0.55) canX = false;
+    if (canZ && floorHeightAt(player.pos.x, newZ) > footY + 0.55) canZ = false;
+  }
   if (canX) player.pos.x = newX;
   if (canZ) player.pos.z = newZ;
 
-  if (keys['Space'] && player.onGround && !player.isDown) { player.vel.y = JUMP_V; player.onGround = false; }
-  player.vel.y -= GRAVITY * dt;
+  if (keys['Space'] && player.onGround && !player.isDown) {
+    // In water: push off the pool floor hard enough to clear the lip — Dark
+    // Pools basins (2.5m) are deeper than a normal jump (apex ~1.45m) reaches.
+    player.vel.y = inWater ? Math.sqrt(2 * GRAVITY * (poolWater.depth + 0.7)) : JUMP_V;
+    player.onGround = false;
+  }
+  player.vel.y -= GRAVITY * (inWater ? 0.45 : 1) * dt; // buoyant sink/rise in water
   player.pos.y += player.vel.y * dt;
-  if (player.pos.y <= 1.6) { player.pos.y = 1.6; player.vel.y = 0; player.onGround = true; }
+  const groundEyeY = floorHeightAt(player.pos.x, player.pos.z) + 1.6;
+  if (player.pos.y <= groundEyeY) { player.pos.y = groundEyeY; player.vel.y = 0; player.onGround = true; }
+  updateWaterPlayerFX(dt, isMoving, inWater);
 
   // ACCESSIBILITY: NO head bob — camera stays perfectly steady
   camera.position.set(player.pos.x, player.pos.y, player.pos.z);
@@ -2352,6 +2905,13 @@ function updateMinimap(dt) {
     sig += '|B' + bossBlip.x.toFixed(1) + ',' + bossBlip.z.toFixed(1);
   }
   if (exitZone && isCellSeen(exitZone.x, exitZone.z)) sig += '|E' + exitZone.x + ',' + exitZone.z;
+  // MP: teammates are ALWAYS visible (no fog check — you should always be able
+  // to find your team), so they always join the signature.
+  if (netState.role !== 'solo') {
+    for (const av of netAvatars.values()) {
+      if (av.group) sig += '|T' + av.group.position.x.toFixed(1) + ',' + av.group.position.z.toFixed(1) + ',' + (av.down ? 1 : 0);
+    }
+  }
   if (sig === minimapSig) return;
   minimapSig = sig;
 
@@ -2374,6 +2934,8 @@ function updateMinimap(dt) {
     for (let x = 0; x < gw; x++) {
       if (fog && !seenGrid[y][x]) {
         ctx.fillStyle = 'rgba(0,0,0,0.88)';
+      } else if (mazeGrid[y][x] === 2) {
+        ctx.fillStyle = 'rgba(30,120,160,0.6)'; // pool basin — water blue
       } else if (mazeGrid[y][x] === 1) {
         ctx.fillStyle = 'rgba(60,80,60,0.4)';
       } else {
@@ -2435,6 +2997,35 @@ function updateMinimap(dt) {
     ctx.stroke();
   }
 
+  // MP: teammate markers — slot-colored arrow dots, drawn through fog (the sig
+  // pass above already included them unconditionally). Downed = red ring.
+  if (netState.role !== 'solo') {
+    for (const av of netAvatars.values()) {
+      if (!av.group) continue;
+      const tx = av.group.position.x / CELL * cellW;
+      const tz = av.group.position.z / CELL * cellH;
+      const col = '#' + netColorOf(av.id).toString(16).padStart(6, '0');
+      ctx.beginPath();
+      ctx.arc(tx, tz, 3, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      // facing tick (same forward mapping as the local player arrow below)
+      ctx.beginPath();
+      ctx.moveTo(tx, tz);
+      ctx.lineTo(tx - Math.sin(av.target.yaw) * 6, tz - Math.cos(av.target.yaw) * 6);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      if (av.down) {
+        ctx.beginPath();
+        ctx.arc(tx, tz, 6, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,40,40,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  }
+
   // Player
   const px = player.pos.x / CELL * cellW;
   const pz = player.pos.z / CELL * cellH;
@@ -2476,6 +3067,7 @@ const _hudEls = {};
 const _hudCache = {};
 function hudEl(id) { return _hudEls[id] || (_hudEls[id] = document.getElementById(id)); }
 function hudSetText(id, v) { if (_hudCache['t:' + id] !== v) { _hudCache['t:' + id] = v; hudEl(id).textContent = v; } }
+let _goalHudOpen = false; // class-toggle cache for the party-goal pulse state
 function hudSetStyle(id, prop, v) {
   const k = prop + ':' + id;
   if (_hudCache[k] !== v) { _hudCache[k] = v; hudEl(id).style[prop] = v; }
@@ -2491,13 +3083,22 @@ function updateHUD() {
   hudSetText('ammoReserve', '/ ' + player.reserveAmmo);
   hudSetText('hudFloor', 'Level ' + currentFloor);
   hudSetText('hudLevelName', theme.name);
-  // MP: append the party's kill-gate progress in co-op (host counts kills
-  // authoritatively; clients mirror via the snapshot's `k`).
-  let waveTxt = theme.isBoss ? 'BOSS' : 'Wave ' + currentWave;
-  if (netState.role !== 'solo' && !theme.isBoss) {
-    waveTxt += floorKills >= killTarget ? ' · EXIT OPEN' : ` · Kills ${floorKills}/${killTarget}`;
+  hudSetText('hudWave', theme.isBoss ? 'BOSS' : 'Wave ' + currentWave);
+  // PARTY GOAL — top center, co-op only (solo has no kill gate; boss floors
+  // gate on the boss itself). Host counts kills authoritatively; clients
+  // mirror via the snapshot's `k`. Personal kills stay in hudKills below.
+  if (netState.role !== 'solo' && !theme.isBoss && killTarget > 0) {
+    const open = floorKills >= killTarget;
+    hudSetStyle('goalHud', 'display', 'block');
+    hudSetText('goalHudText', open ? 'EXIT OPEN — FIND THE EXIT' : `ELIMINATIONS ${floorKills}/${killTarget}`);
+    hudSetStyle('goalHudFill', 'width', Math.min(100, floorKills / killTarget * 100).toFixed(0) + '%');
+    if (open !== _goalHudOpen) {
+      _goalHudOpen = open;
+      hudEl('goalHud').classList.toggle('goal-open', open);
+    }
+  } else {
+    hudSetStyle('goalHud', 'display', 'none');
   }
-  hudSetText('hudWave', waveTxt);
   hudSetText('hudKills', 'Kills: ' + player.kills);
   hudSetText('hudMoney', '$' + playerMoney);
 
@@ -2716,6 +3317,7 @@ function makeDebugLabel(text) {
   ctx.fillText(text, 128, 32);
 
   const tex = new THREE.CanvasTexture(canvas);
+  texMarkSRGB(tex);
   tex.minFilter = THREE.LinearFilter;
   // depthTest off so the label is readable even through the mob/walls
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
@@ -3004,6 +3606,10 @@ function init() {
 
   clock = new THREE.Clock();
 
+  // initSpriteTextures above created the mob-sprite batch; theme/water/label
+  // textures are tagged the same way lazily as they're first created.
+  console.log(`[TEX] sRGB encoding applied to ${srgbCanvasTexCount} canvas textures`);
+
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -3097,6 +3703,7 @@ function animate() {
     updateLights(dt);
     updateHUDTimers(dt);
     updateAmbient(dt);
+    updateWaterFX(dt); // pools floors: water UV drift + caustics pulse (no-op elsewhere)
     updateBulletTrails(dt);
     updateAmmoPickups(dt);
     updateHUD();

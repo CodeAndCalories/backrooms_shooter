@@ -13,6 +13,7 @@ function createTextureFromCanvas(drawFn, width = 256, height = 256) {
   const ctx = canvas.getContext('2d');
   drawFn(ctx, width, height);
   const tex = new THREE.CanvasTexture(canvas);
+  texMarkSRGB(tex); // main.js — sRGB at creation (called from init, after main.js parsed)
   tex.magFilter = THREE.NearestFilter;
   tex.minFilter = THREE.NearestFilter;
   return tex;
@@ -1032,7 +1033,10 @@ function updateEnemies(dt) {
       if (m > 0) { moveX /= m; moveZ /= m; }
     }
 
-    const spd = e.speed * dt;
+    // Pools: mobs WADE through basins — slowed, and sunk below deck level
+    // (visual offset applied to the mesh below; raycastEnemies matches it).
+    const wadeY = mobGroundOffset(e.pos.x, e.pos.z);
+    const spd = e.speed * (wadeY < 0 ? 0.6 : 1) * dt;
     const eRad = 0.3;
     let newX = e.pos.x + moveX * spd;
     let newZ = e.pos.z + moveZ * spd;
@@ -1058,7 +1062,9 @@ function updateEnemies(dt) {
 
     let yPos = (e.scale * 2.5) / 2;
     if (e.type === 'phantom') {
-      yPos += Math.sin(Date.now() * 0.003 + e.pos.x) * 0.4;
+      yPos += Math.sin(Date.now() * 0.003 + e.pos.x) * 0.4; // flies — no wading
+    } else {
+      yPos += wadeY; // pools: half-sunk while crossing a basin
     }
     e.mesh.position.set(e.pos.x, yPos, e.pos.z);
     if (e.mesh.isGroup) {
@@ -1068,7 +1074,8 @@ function updateEnemies(dt) {
         e.mesh.position.y = e.mesh.userData.float + Math.sin(clock.getElapsedTime() * 2 + e.pos.x) * 0.18;
       } else {
         // grounded mob: bob around floor level so feet stay near y=0
-        e.mesh.position.y = 0.05 + Math.sin(clock.getElapsedTime() * 14) * 0.05;
+        // (pools: wadeY sinks them into the basin they're crossing)
+        e.mesh.position.y = 0.05 + Math.sin(clock.getElapsedTime() * 14) * 0.05 + wadeY;
       }
       // Loaded 3D models: face the player. Y-axis only (no tilt), so the bob above is
       // preserved. dx/dz are player − mob (lines above); faceOffset (default Math.PI)

@@ -361,6 +361,66 @@ function playFlashlightClick() {
   });
 }
 
+// MP: a TEAMMATE's gunshot — quieter and muffled with distance (net.js passes
+// the world-space distance to the shooter). Generic report on purpose: it
+// doesn't track each player's gun-sound setting.
+function playRemoteGunshot(dist) {
+  playSound(() => {
+    const gain = Math.max(0.03, 0.30 / (1 + dist * 0.09));
+    const dur = 0.14;
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      const t = i / audioCtx.sampleRate;
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 45) * 0.9;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass';
+    f.frequency.value = Math.max(500, 2400 - dist * 45); // farther = duller
+    const g = audioCtx.createGain(); g.gain.value = gain;
+    src.connect(f); f.connect(g); g.connect(sfxGain); src.start();
+  });
+}
+
+// Pools: body-drop splash on entering water (triggered by updateWaterPlayerFX
+// in main.js). Low-passed noise burst with a quick decay — reads as displaced
+// water without any sample assets.
+function playSplash() {
+  playSound(() => {
+    const dur = 0.45;
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      const t = i / audioCtx.sampleRate;
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 9) * 0.6;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900; f.Q.value = 0.7;
+    const g = audioCtx.createGain(); g.gain.value = 0.5;
+    src.connect(f); f.connect(g); g.connect(sfxGain); src.start();
+  });
+}
+
+// Pools: soft wading swish while moving through water — one per "footfall"
+// (main.js paces these on a ~0.4-0.55s timer). Quieter, shorter splash with a
+// randomized band so consecutive steps don't sound identical.
+function playWade() {
+  playSound(() => {
+    const dur = 0.18;
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      const t = i / audioCtx.sampleRate;
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-t * 16) * 0.5;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass';
+    f.frequency.value = 550 + Math.random() * 350; f.Q.value = 0.8;
+    const g = audioCtx.createGain(); g.gain.value = 0.16;
+    src.connect(f); f.connect(g); g.connect(sfxGain); src.start();
+  });
+}
+
 function startAmbient() {
   if (!audioCtx) return;
   if (humNode) { humNode.stop(); humNode = null; }
@@ -368,17 +428,20 @@ function startAmbient() {
   if (pipeNode) { clearInterval(pipeNode); pipeNode = null; }
 
   const theme = getTheme(currentFloor);
-  
-  if (theme.id === 3) {
-    // Poolrooms: Water drops
+
+  if (theme.water) {
+    // Pools floors (Poolrooms + Dark Pools): echoing water drops. The dark
+    // variant drips slower and lower-pitched.
+    const dark = (theme.darknessLevel || 0) > 0.5;
     poolNode = setInterval(() => {
       playSound(() => {
         const t = audioCtx.currentTime;
         const osc = audioCtx.createOscillator();
         const g = audioCtx.createGain();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(800 + Math.random() * 400, t);
-        osc.frequency.exponentialRampToValueAtTime(1200 + Math.random() * 200, t + 0.1);
+        const f0 = dark ? 350 : 800, f1 = dark ? 550 : 1200;
+        osc.frequency.setValueAtTime(f0 + Math.random() * 400, t);
+        osc.frequency.exponentialRampToValueAtTime(f1 + Math.random() * 200, t + 0.1);
         g.gain.setValueAtTime(0.05, t);
         g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
         
@@ -393,7 +456,7 @@ function startAmbient() {
         
         osc.start(t); osc.stop(t + 0.5);
       });
-    }, 1500);
+    }, dark ? 2400 : 1500);
   } else if (theme.id === 2) {
     // Pipe Dreams: Metallic clanks
     pipeNode = setInterval(() => {

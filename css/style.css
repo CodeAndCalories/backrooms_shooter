@@ -55,9 +55,35 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .coop-input:focus{outline:none;border-color:#d4c36a;}
 .coop-input::placeholder{color:#665e3a;letter-spacing:2px;}
 .coop-status{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
+
+/* CO-OP lobby (name, player list, ready/start — js/net.js renders the rows) */
+.coop-name-input{width:170px;letter-spacing:2px;}
+.coop-lobby-head{color:#d4c36a;font-size:0.75em;letter-spacing:3px;margin:8px 0;}
+.coop-lobby-list{display:flex;flex-direction:column;gap:4px;max-width:280px;margin:0 auto;}
+.coop-lobby-row{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,0.35);border:1px solid #d4c36a22;padding:4px 10px;font-size:0.75em;letter-spacing:1px;}
+.coop-dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto;}
+.coop-lobby-name{color:#cfc391;flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.coop-lobby-ready{color:#665e3a;font-size:0.9em;letter-spacing:2px;}
+.coop-lobby-ready.is-ready{color:#44ff88;}
+.coop-btn.is-ready{color:#44ff88;border-color:#44ff8866;}
+.coop-start-btn.all-ready{color:#0a0a06;background:#d4c36a;border-color:#d4c36a;font-weight:bold;}
+
+/* MP party goal — top center: ELIMINATIONS n/m → EXIT OPEN (pulsing) */
+.goal-hud{position:absolute;top:14px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none;}
+.goal-hud-text{color:#e8dca8;font-size:1.15em;letter-spacing:5px;text-transform:uppercase;text-shadow:0 0 14px rgba(212,195,106,0.5);}
+.goal-hud-bar{width:240px;height:4px;margin:6px auto 0;background:rgba(255,255,255,0.12);border:1px solid #d4c36a33;}
+.goal-hud-fill{height:100%;width:0%;background:linear-gradient(90deg,#d4c36a,#ffe892);transition:width 0.25s;}
+.goal-hud.goal-open .goal-hud-text{color:#5fff9c;text-shadow:0 0 18px rgba(60,255,140,0.7);animation:goalPulse 1.2s ease-in-out infinite;}
+.goal-hud.goal-open .goal-hud-fill{background:#5fff9c;}
+@keyframes goalPulse{0%,100%{opacity:1;}50%{opacity:0.45;}}
+
 /* CO-OP down/revive banner (js/net.js toggles + fills the text) */
 #downedMsg{position:absolute;top:62%;left:50%;transform:translateX(-50%);color:#ff4444;font-size:1.1em;letter-spacing:4px;text-transform:uppercase;text-shadow:0 0 25px rgba(255,0,0,0.7);animation:downedPulse 1.6s ease-in-out infinite;}
 @keyframes downedPulse{0%,100%{opacity:0.65;}50%{opacity:1;}}
+/* MP revive: reviver-side prompt + shared progress bar (also used in #downedMsg) */
+#revivePrompt{position:absolute;top:56%;left:50%;transform:translateX(-50%);color:#7ddcb8;font-size:1.0em;letter-spacing:3px;text-transform:uppercase;text-shadow:0 0 18px rgba(80,255,170,0.5);text-align:center;}
+.revive-bar{width:220px;height:5px;margin:8px auto 0;background:rgba(255,255,255,0.12);border:1px solid rgba(120,255,190,0.3);}
+.revive-bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#3fd98c,#9cffd0);}
 
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}
