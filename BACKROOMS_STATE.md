@@ -24,6 +24,18 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Co-op boss HP scaling landed (June 11, UNPLAYED in co-op):** bossHpFor
+  (enemies.js, pure/extractable) = themeBase × loop bonus × (1 + 0.75×(players-1));
+  player count from new netActivePlayerCount (host + OPEN peers, downed still
+  count). Computed ONCE in spawnBoss and locked — joins/leaves/downs never
+  re-scale (verified: nothing assigns to maxHp after creation). Solo is
+  bit-identical to the old formula. Clients get scaled hp/maxHp via the
+  existing snap.b — NO protocol change. Phases still 70/40/15% of maxHp.
+  DEV_MODE-gated spawn log (players/baseHp/scale/finalHp). Boss damage/speed/
+  phases/waves/killTarget untouched (duo mobs already feel rough — tune later).
+  Headless: tools/test_boss_scaling.js (6 check groups, incl. solo-unchanged
+  across loops + scale table + snapshot path). Needs a real duo session to
+  feel the 1.75x fight length.
 - **Black market + Level Fun batch landed (June 11, UNPLAYED):**
   - ESC centralized into ONE handler: market → pause → pause-the-game priority;
     pause menu and market are exclusive via openShop/closeShop/closeShopSilent

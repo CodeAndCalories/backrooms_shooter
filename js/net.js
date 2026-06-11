@@ -687,6 +687,19 @@ function netAllPlayers() {
   return list;
 }
 
+// HOST: how many players are in the fight — the local player plus every OPEN
+// peer connection. Deliberately NOT netAllPlayers(): downed players still
+// count (they're revivable mid-fight) and the empty-list fallback never
+// applies. Solo (and any non-host caller) → 1. Used by spawnBoss to scale
+// boss HP; the result is read ONCE at spawn and never re-applied.
+function netActivePlayerCount() {
+  let n = 1;
+  if (netState.role === 'host') {
+    for (const conn of netState.peers) if (conn.open) n++;
+  }
+  return n;
+}
+
 function netNearestOf(players, x, z) {
   let best = players[0], bestD2 = Infinity;
   for (const pl of players) {

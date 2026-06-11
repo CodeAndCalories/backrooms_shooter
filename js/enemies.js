@@ -551,6 +551,18 @@ function spawnEnemy(type, forcePos) {
 /* ═══════════════════════════════════════════
    BOSS SYSTEM
    ═══════════════════════════════════════════ */
+
+// Boss max HP: per-theme base × loop-depth bonus × CO-OP PLAYER-COUNT SCALE
+// (+75% base HP per extra player: 1→1.00x, 2→1.75x, 3→2.50x, 4→3.25x).
+// playerCount=1 reproduces the old formula EXACTLY — solo balance untouched.
+// PURE function (no globals beyond LEVEL_THEMES.length), extracted so the
+// headless suite can verify the real code (tools/test_boss_scaling.js).
+function bossHpFor(theme, floor, playerCount) {
+  const baseHp = theme.bossHp * (1 + Math.floor(floor / LEVEL_THEMES.length) * 0.3);
+  const bossHpScale = 1 + 0.75 * (playerCount - 1);
+  return { baseHp, bossHpScale, totalHp: baseHp * bossHpScale };
+}
+
 function spawnBoss() {
   if (netIsClient()) return; // MP: the boss is simulated on the host; clients mirror it
   const theme = getTheme(currentFloor);
@@ -590,7 +602,18 @@ function spawnBoss() {
   bossLight.intensity = 0.6;
   bossLight.position.set(bx, bh / 2, bz);
 
-  const totalHp = theme.bossHp * (1 + Math.floor(currentFloor / LEVEL_THEMES.length) * 0.3);
+  // CO-OP HP SCALING — computed ONCE here and locked in: joins, leaves,
+  // disconnects and downs mid-fight never re-scale (nothing in the codebase
+  // mutates maxHp after creation). spawnBoss is host-only (guard above), and
+  // clients receive the scaled hp/maxHp through the existing boss snapshot
+  // (snap.b = [hp, maxHp, phase, x, z]) — NO protocol change. Phases compare
+  // hp/maxHp against percentage thresholds, so 70/40/15% trigger naturally.
+  const playerCount = netActivePlayerCount();
+  const { baseHp, bossHpScale, totalHp } = bossHpFor(theme, currentFloor, playerCount);
+  if (DEV_MODE) {
+    console.log(`[boss] ${theme.bossName}: players=${playerCount}, baseHp=${Math.round(baseHp)}, ` +
+                `scale=${bossHpScale.toFixed(2)}x, finalHp=${Math.round(totalHp)}`);
+  }
 
   bossEntity = {
     mesh,
