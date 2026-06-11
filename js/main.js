@@ -251,7 +251,10 @@ const LEVEL_THEMES = [
     darknessLevel: 0.85,
     // Mid-game gut check: mixed roster (spiders join here), a touch tankier.
     mobs: { types: ['stalker', 'crawler', 'spider'], weights: [2, 2, 1], danger: ['danger_stalker', 'danger_crawler'],
-            speedMult: 0.95, hpMult: 1.15, countMult: 1.0, waveBase: 3, waveCap: 9 }
+            speedMult: 0.95, hpMult: 1.15, countMult: 1.0, waveBase: 3, waveCap: 9 },
+    // OBJECTIVE: the relics ARE the exit gate (kills not required — mobs still
+    // spawn as pressure). See the gate-condition system / spawnArtifacts.
+    gate: 'item', itemCount: 2, itemLabel: 'RELICS', itemName: 'relic'
   },
   {
     id: 9,
@@ -300,7 +303,9 @@ const LEVEL_THEMES = [
     // SIGNATURE: skinstealers (stalker model) stalking the wards + wretches
     // (crawler/bacteria model) on the gurneys. The flagship stalker floor.
     mobs: { types: ['stalker', 'crawler'], weights: [3, 2], danger: ['danger_stalker'],
-            speedMult: 1.05, hpMult: 1.1, countMult: 1.0, waveBase: 4, waveCap: 10 }
+            speedMult: 1.05, hpMult: 1.1, countMult: 1.0, waveBase: 4, waveCap: 10 },
+    // OBJECTIVE: recover the patient records to open the exit (kills not required).
+    gate: 'item', itemCount: 3, itemLabel: 'RECORDS', itemName: 'patient record'
   },
   {
     id: 11,
@@ -342,7 +347,9 @@ const LEVEL_THEMES = [
     darknessLevel: 0.6,
     // Quiet stacks, things between the shelves: phantom-led, slightly hardened.
     mobs: { types: ['phantom', 'stalker', 'spider'], weights: [2, 1, 1], danger: ['danger_stalker'],
-            speedMult: 1.0, hpMult: 1.05, countMult: 0.9, waveBase: 4, waveCap: 9 }
+            speedMult: 1.0, hpMult: 1.05, countMult: 0.9, waveBase: 4, waveCap: 9 },
+    // OBJECTIVE: find the lost files to open the exit (kills not required).
+    gate: 'item', itemCount: 3, itemLabel: 'FILES', itemName: 'lost file'
   },
   {
     id: 13,
@@ -596,6 +603,11 @@ let flashlight = null, flashlightOn = false;
 
 // Anti-linger
 let floorTimer = 0, dangerLevel = 0, dangerSpawnTimer = 0;
+
+// The single AmbientLight (the budget's "+1 ambient"), held at module scope so
+// the DISTANT ROAR scare can briefly dip its intensity (intensity-only, not a
+// point light — budget untouched). Reassigned every floor in buildMazeScene.
+let ambientLight = null;
 
 // Boss
 let bossEntity = null;
@@ -2102,6 +2114,125 @@ function updateAmmoPickups(dt) {
 }
 
 /* ═══════════════════════════════════════════
+   LORE OBJECTIVE — ARTIFACTS (item gate)
+   On item-gate floors (theme.gate === 'item') N glowing artifacts spawn far
+   from the spawn corner; collecting all of them opens the exit (the kills gate
+   is bypassed — mobs still spawn as pressure). SAME contract as ammo pickups:
+   ONE shared geometry+material (emissive, NO PointLight — light count stable),
+   sequential ids in seeded creation order so every co-op machine has the
+   identical artifact at the identical id. Placement uses a floorSeed-derived
+   prng (0 world-rng draws — like balloons/scares — so it can't shift exit/ammo
+   placement). Collection is shared + host-validated: any player walks over one,
+   it vanishes on every machine via 'artifact_taken' {id}, and each machine
+   counts its own (idempotent), so the HUD agrees everywhere; the host
+   re-validates the gate before advancing the floor.
+   ═══════════════════════════════════════════ */
+let artifacts = [];                 // { id, mesh, x, z, baseY, phase } — current floor only
+let artifactNextId = 0;             // reset per floor (seeded creation order)
+let artifactsTotal = 0, artifactsCollected = 0;
+const ARTIFACT_RADIUS = 1.3;        // walk-over distance
+
+// Shared resources — created once, NEVER disposed (keeps the MeshStandardMaterial
+// no-map program family pinned, same as ammoPickupMat). Teardown scene.remove()s
+// the meshes before the dispose traverse, so these are never caught by it.
+const artifactGeo = new THREE.OctahedronGeometry(0.3, 0);
+const artifactMat = new THREE.MeshStandardMaterial({
+  color: 0x123338, emissive: 0x55ddee, emissiveIntensity: 1.0,
+  roughness: 0.25, metalness: 0.4
+});
+
+function createArtifact(wx, wz, id) {
+  const mesh = new THREE.Mesh(artifactGeo, artifactMat);
+  const baseY = 0.95 + floorHeightAt(wx, wz);
+  mesh.position.set(wx, baseY, wz);
+  scene.add(mesh);
+  artifacts.push({ id, mesh, x: wx, z: wz, baseY, phase: artifacts.length * 1.3 });
+}
+
+// Called EVERY floor from buildMazeScene (resets the counters). Only item-gate
+// floors actually place artifacts.
+function spawnArtifacts(theme) {
+  for (const a of artifacts) scene.remove(a.mesh);
+  artifacts = [];
+  artifactNextId = 0;
+  artifactsCollected = 0;
+  artifactsTotal = 0;
+  if (theme.isBoss || (theme.gate || 'kills') !== 'item') return;
+  const n = theme.itemCount || 3;
+
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  // BFS path-distance from spawn (1,1) over floor cells — deterministic (grid is
+  // seeded). Same idea as pickExitCell, so artifacts land genuinely far away.
+  const dist = [];
+  for (let y = 0; y < gh; y++) dist.push(new Array(gw).fill(-1));
+  if (mazeGrid[1] && mazeGrid[1][1] === 1) {
+    dist[1][1] = 0;
+    const q = [[1, 1]];
+    for (let qi = 0; qi < q.length; qi++) {
+      const [x, y] = q[qi], d = dist[y][x] + 1;
+      if (y > 0 && mazeGrid[y - 1][x] === 1 && dist[y - 1][x] < 0) { dist[y - 1][x] = d; q.push([x, y - 1]); }
+      if (y < gh - 1 && mazeGrid[y + 1][x] === 1 && dist[y + 1][x] < 0) { dist[y + 1][x] = d; q.push([x, y + 1]); }
+      if (x > 0 && mazeGrid[y][x - 1] === 1 && dist[y][x - 1] < 0) { dist[y][x - 1] = d; q.push([x - 1, y]); }
+      if (x < gw - 1 && mazeGrid[y][x + 1] === 1 && dist[y][x + 1] < 0) { dist[y][x + 1] = d; q.push([x + 1, y]); }
+    }
+  }
+  const cands = [];
+  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) if (dist[y][x] > 0) cands.push({ x, y, d: dist[y][x] });
+  if (!cands.length) return;
+  // Far half by path distance; deterministic tie-break by scan order.
+  cands.sort((a, b) => b.d - a.d || a.y - b.y || a.x - b.x);
+  const pool = cands.slice(0, Math.max(n, Math.ceil(cands.length * 0.5)));
+
+  const sp = mulberry32((floorSeed ^ 0xA27FAC7) >>> 0); // dedicated stream, 0 world draws
+  const chosen = [], used = new Set();
+  let guard = 0;
+  while (chosen.length < n && guard++ < 600) {
+    const c = pool[Math.floor(sp() * pool.length)];
+    const key = c.y + ',' + c.x;
+    if (used.has(key)) continue;
+    // keep artifacts spaced (≥4 cells apart) so they're not clustered
+    if (chosen.some(ch => Math.abs(ch.x - c.x) + Math.abs(ch.y - c.y) < 4)) continue;
+    used.add(key); chosen.push(c);
+  }
+  // Spacing may starve a small floor — fill the remainder ignoring spacing.
+  for (let i = 0; chosen.length < n && i < pool.length; i++) {
+    const key = pool[i].y + ',' + pool[i].x;
+    if (!used.has(key)) { used.add(key); chosen.push(pool[i]); }
+  }
+  artifactsTotal = chosen.length;
+  for (const c of chosen) createArtifact(c.x * CELL + CELL / 2, c.y * CELL + CELL / 2, ++artifactNextId);
+}
+
+// Spin/bob; collect on the LOCAL player's walk-over (any player can collect).
+function updateArtifacts(dt) {
+  if (artifacts.length === 0) return;
+  const t = clock.getElapsedTime();
+  for (let i = artifacts.length - 1; i >= 0; i--) {
+    const a = artifacts[i];
+    a.mesh.rotation.y += dt * 1.4;
+    a.mesh.rotation.x += dt * 0.6;
+    a.mesh.position.y = a.baseY + Math.sin(t * 2 + a.phase) * 0.12;
+    const dx = a.x - player.pos.x, dz = a.z - player.pos.z;
+    if (dx * dx + dz * dz < ARTIFACT_RADIUS * ARTIFACT_RADIUS) {
+      if (collectArtifact(a.id)) { playArtifactPickup(); netAnnounceArtifactTaken(a.id); }
+    }
+  }
+}
+
+// Remove an artifact by id + count it. Idempotent (an id collected once) so the
+// host relay and the local walk-over can't double-count. Shared on ALL machines
+// (local collect + the 'artifact_taken' handler) → every HUD converges.
+function collectArtifact(id) {
+  const i = artifacts.findIndex(a => a.id === id);
+  if (i === -1) return false;
+  scene.remove(artifacts[i].mesh); // shared geo/mat — never disposed
+  artifacts.splice(i, 1);
+  artifactsCollected++;
+  updateHUD();
+  return true;
+}
+
+/* ═══════════════════════════════════════════
    RESOURCE DISPOSAL
    three.js never frees GPU resources on scene.remove() — geometry, materials
    and textures stay in VRAM until .dispose(). Ownership rules here:
@@ -2144,7 +2275,10 @@ function buildMazeScene() {
   for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
   bulletTrails = [];
   clearImpactFx(); // pull pooled sparks/decals/flare out before the dispose pass (shared geo/mats)
+  clearScares();   // pull active watcher sprites out too (shared mob textures) + reset effects
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
+  for (const a of artifacts) scene.remove(a.mesh);   // same pattern: shared artifact geo/mat stay out of the dispose traverse
+  artifacts = [];
   for (const b of balloons) scene.remove(b.mesh);    // same pattern: shared balloon geo/mats stay out of the dispose traverse
   balloons = [];
   scene.remove(camera); // gun + flashlight persist across floors (createGun disposes the old gun itself)
@@ -2242,8 +2376,8 @@ function buildMazeScene() {
 
   // Lights — reduce for dark levels
   const darkMult = 1 - (theme.darknessLevel || 0) * 0.7;
-  const ambLight = new THREE.AmbientLight(theme.ambientColor, theme.ambientIntensity * darkMult);
-  scene.add(ambLight);
+  ambientLight = new THREE.AmbientLight(theme.ambientColor, theme.ambientIntensity * darkMult);
+  scene.add(ambientLight);
 
   scene.add(camera);
   createGun();
@@ -2417,6 +2551,10 @@ function buildMazeScene() {
   floorKills = 0;
   killTarget = waveSizeFor(currentFloor, 1) + waveSizeFor(currentFloor, 2);
 
+  // Lore objective: on item-gate floors, seed N artifacts far from spawn (0
+  // world-rng draws — own prng). Resets the counters every floor either way.
+  spawnArtifacts(theme);
+
   // Place player
   player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
   player.vel.set(0, 0, 0);
@@ -2436,6 +2574,10 @@ function buildMazeScene() {
   floorTimer = 0;
   dangerLevel = 0;
   dangerSpawnTimer = LINGER_SPAWN_BASE;
+
+  // Scripted scares: seed this floor's trigger placement (deterministic, 0 world
+  // rng draws). Host evaluates them; clients wait for 'scare' broadcasts.
+  placeScareTriggers(theme);
 
   // New floor: wipe fog-of-war exploration and force the next minimap tick to
   // redraw (the signature — player spawn cell, empty enemy list — could
@@ -3676,6 +3818,9 @@ function updateMinimap(dt) {
     sig += '|B' + bossBlip.x.toFixed(1) + ',' + bossBlip.z.toFixed(1);
   }
   if (exitZone && isCellSeen(exitZone.x, exitZone.z)) sig += '|E' + exitZone.x + ',' + exitZone.z;
+  // Artifacts join the sig only once their cell is fog-revealed; collecting one
+  // drops it from `artifacts`, changing the sig → redraw.
+  for (const a of artifacts) if (isCellSeen(a.x, a.z)) sig += '|A' + a.x.toFixed(1) + ',' + a.z.toFixed(1);
   // MP: teammates are ALWAYS visible (no fog check — you should always be able
   // to find your team), so they always join the signature.
   if (netState.role !== 'solo') {
@@ -3737,6 +3882,22 @@ function updateMinimap(dt) {
     ctx.beginPath();
     ctx.arc(ex, ez, 7, 0, Math.PI * 2);
     ctx.strokeStyle = 'rgba(68,255,136,0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Artifacts — cyan markers, fog-gated like the exit (hidden until their cell
+  // is discovered). Collected ones are gone from `artifacts`, so they vanish.
+  for (const a of artifacts) {
+    if (!isCellSeen(a.x, a.z)) continue;
+    const ax = a.x / CELL * cellW, az = a.z / CELL * cellH;
+    ctx.beginPath();
+    ctx.arc(ax, az, 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(110,230,255,0.9)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ax, az, 5.5, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(110,230,255,0.35)';
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -3856,10 +4017,19 @@ function updateHUD() {
   hudSetText('hudFloor', 'Level ' + currentFloor);
   hudSetText('hudLevelName', theme.name);
   hudSetText('hudWave', theme.isBoss ? 'BOSS' : 'Wave ' + currentWave);
-  // PARTY GOAL — top center, co-op only (solo has no kill gate; boss floors
-  // gate on the boss itself). Host counts kills authoritatively; clients
-  // mirror via the snapshot's `k`. Personal kills stay in hudKills below.
-  if (netState.role !== 'solo' && !theme.isBoss && killTarget > 0) {
+  // OBJECTIVE GOAL — top center, reflects the floor's active gate condition.
+  //  • 'item'  : ARTIFACTS n/N (solo AND co-op — the objective always applies).
+  //  • 'kills' : ELIMINATIONS n/m (co-op only — solo has no kill gate).
+  //  • boss / no gate: hidden (the boss HP bar carries the boss goal).
+  const gate = theme.gate || 'kills';
+  if (!theme.isBoss && gate === 'item' && artifactsTotal > 0) {
+    const open = artifactsCollected >= artifactsTotal;
+    const label = theme.itemLabel || 'ARTIFACTS';
+    hudSetStyle('goalHud', 'display', 'block');
+    hudSetText('goalHudText', open ? 'EXIT OPEN — FIND THE EXIT' : `${label} ${artifactsCollected}/${artifactsTotal}`);
+    hudSetStyle('goalHudFill', 'width', Math.min(100, artifactsCollected / artifactsTotal * 100).toFixed(0) + '%');
+    if (open !== _goalHudOpen) { _goalHudOpen = open; hudEl('goalHud').classList.toggle('goal-open', open); }
+  } else if (netState.role !== 'solo' && !theme.isBoss && gate === 'kills' && killTarget > 0) {
     const open = floorKills >= killTarget;
     hudSetStyle('goalHud', 'display', 'block');
     hudSetText('goalHudText', open ? 'EXIT OPEN — FIND THE EXIT' : `ELIMINATIONS ${floorKills}/${killTarget}`);
@@ -3929,17 +4099,22 @@ function updateHUDTimers(dt) {
    LIGHTS
    ═══════════════════════════════════════════ */
 function updateLights(dt) {
-  for (const f of flickerTimers) {
-    f.timer -= dt;
-    if (f.timer <= 0) {
-      f.timer = f.nextFlicker;
-      f.nextFlicker = 0.5 + Math.random() * 6;
-      const orig = f.base;
-      f.light.intensity = orig * 0.05;
-      setTimeout(() => { f.light.intensity = orig; }, 40 + Math.random() * 80);
-      if (Math.random() < 0.35) {
-        setTimeout(() => { if (f.light) f.light.intensity = orig * 0.15; }, 150);
-        setTimeout(() => { if (f.light) f.light.intensity = orig; }, 200 + Math.random() * 60);
+  // While a scare owns the ceiling lights (LIGHTS OUT or the SLAM pulse), it
+  // drives their intensity directly every frame — skip the normal flicker so
+  // the two don't fight (its stray setTimeouts get overwritten next frame).
+  if (!scareOwnsLights()) {
+    for (const f of flickerTimers) {
+      f.timer -= dt;
+      if (f.timer <= 0) {
+        f.timer = f.nextFlicker;
+        f.nextFlicker = 0.5 + Math.random() * 6;
+        const orig = f.base;
+        f.light.intensity = orig * 0.05;
+        setTimeout(() => { f.light.intensity = orig; }, 40 + Math.random() * 80);
+        if (Math.random() < 0.35) {
+          setTimeout(() => { if (f.light) f.light.intensity = orig * 0.15; }, 150);
+          setTimeout(() => { if (f.light) f.light.intensity = orig; }, 200 + Math.random() * 60);
+        }
       }
     }
   }
@@ -3948,6 +4123,247 @@ function updateLights(dt) {
     exitMesh.rotation.y += dt * 0.6;
     exitMesh.material.emissiveIntensity = 0.4 + Math.sin(clock.getElapsedTime() * 2.5) * 0.25;
   }
+}
+
+/* ═══════════════════════════════════════════
+   SCRIPTED SCARE EVENTS — designed moments, not random.
+   Placement is SEEDED per floor (deterministic, 0 world-rng draws — a
+   floorSeed-derived prng like the Level Fun props), but the HOST owns trigger
+   evaluation + the which-event roll (spawn-composition model) and broadcasts
+   'scare' {type,data} so the whole party gets the same moment (net.js). Clients
+   never evaluate triggers — they only apply received scares. Constraints honored
+   here: ≤2 per floor, never < SCARE_SAFE_TIME after floor start, never on a boss
+   floor; lights only ever change INTENSITY (budget untouched); NO screen shake
+   (SLAM is a sound + a light pulse). The 4 effects run on EVERY machine via
+   updateScareEffects; trigger evaluation runs host/solo only.
+   ═══════════════════════════════════════════ */
+const SCARE_SAFE_TIME = 30;        // no scare in the first 30s of a floor
+const SCARE_TYPES = ['lightsout', 'watcher', 'roar', 'slam'];
+let scareTriggers = [];            // [{ wx, wz, kind:'prox'|'timer', at, radius, fired }]
+let scaresFiredThisFloor = 0;
+let scareMaxThisFloor = 0;
+// Active effects (run on all machines):
+let scareLightsOut = null;         // { t, phase }
+let scarePulse = 0;                // SLAM light-pulse countdown (s)
+let scareAmbientDim = null;        // { t, base } — DISTANT ROAR ambient dip
+let scareWatchers = [];            // [{ sprite, seen, away, life }]
+
+function scareOwnsLights() { return scareLightsOut !== null || scarePulse > 0; }
+
+// Seeded, deterministic per floor — placed at buildMazeScene time. Uses a
+// floorSeed-derived prng (NOT the world rng()), so it consumes ZERO world draws
+// and can't shift spawn/exit/ammo placement. Trigger WHERE is fixed; the host
+// still rolls WHICH event + WHEN it actually fires.
+function placeScareTriggers(theme) {
+  scareTriggers = [];
+  scaresFiredThisFloor = 0;
+  scareMaxThisFloor = 0;
+  scareLightsOut = null; scarePulse = 0; scareAmbientDim = null;
+  if (theme.isBoss) return; // no scares during a boss
+
+  const sp = mulberry32((floorSeed ^ 0x5CA3E5) >>> 0); // dedicated stream
+  // gather walkable floor cells reasonably far from the spawn cell (1,1-ish)
+  const cells = [];
+  for (let y = 0; y < mazeGrid.length; y++) {
+    const row = mazeGrid[y];
+    for (let x = 0; x < row.length; x++) {
+      if (row[x] !== 1 && row[x] !== 2) continue;
+      if (Math.abs(x - 1) + Math.abs(y - 1) < 6) continue; // keep clear of spawn
+      cells.push({ x, y });
+    }
+  }
+  if (cells.length === 0) return;
+
+  scareMaxThisFloor = 1 + (sp() < 0.55 ? 1 : 0); // 1 or 2 per floor
+  for (let i = 0; i < scareMaxThisFloor && cells.length; i++) {
+    const c = cells.splice(Math.floor(sp() * cells.length), 1)[0];
+    const wx = c.x * CELL + CELL / 2, wz = c.y * CELL + CELL / 2;
+    // ~half proximity-triggered, half on a timer window past the safe time
+    if (sp() < 0.5) {
+      scareTriggers.push({ wx, wz, kind: 'prox', radius: CELL * 1.8, fired: false });
+    } else {
+      scareTriggers.push({ wx, wz, kind: 'timer', at: SCARE_SAFE_TIME + 8 + sp() * 55, fired: false });
+    }
+  }
+}
+
+// HOST / SOLO only: evaluate triggers against the real floor clock + player.
+function updateScareTriggers(dt) {
+  if (netIsClient()) return;
+  if (scaresFiredThisFloor >= scareMaxThisFloor) return;
+  if (isBossFloor(currentFloor)) return;
+  if (floorTimer < SCARE_SAFE_TIME) return; // never within 30s of floor start
+
+  for (const tr of scareTriggers) {
+    if (tr.fired) continue;
+    let go = false;
+    if (tr.kind === 'prox') {
+      const dx = player.pos.x - tr.wx, dz = player.pos.z - tr.wz;
+      go = (dx * dx + dz * dz) < tr.radius * tr.radius;
+    } else {
+      go = floorTimer >= tr.at;
+    }
+    if (!go) continue;
+    tr.fired = true;
+    scaresFiredThisFloor++;
+    fireScare(tr);
+    break; // at most one per frame
+  }
+}
+
+// HOST / SOLO: roll which event (theme-flavored), build its data, apply it
+// locally AND broadcast so every player shares the moment.
+function fireScare(tr) {
+  const theme = getTheme(currentFloor);
+  let type = rollScareType(theme);
+  let data = {};
+  if (type === 'watcher') {
+    const spot = pickWatcherSpot();
+    if (spot) data = spot;
+    else type = 'roar'; // no decent corridor for a watcher → fall back to dread
+  }
+  if (type === 'slam' || type === 'roar') data = { x: tr.wx, z: tr.wz };
+  applyScare(type, data);
+  netBroadcastScare(type, data);
+}
+
+// Per-floor flavor: pools→roar, dark→lights out, Level Fun→watcher; everything
+// stays possible (base weight 1) so floors still vary.
+function rollScareType(theme) {
+  const w = { lightsout: 1, watcher: 1, roar: 1, slam: 1 };
+  if (theme.archetype === 'pools') w.roar += 3;
+  if ((theme.darknessLevel || 0) >= 0.6) w.lightsout += 3;
+  if (/Level Fun/.test(theme.name || '')) w.watcher += 3;
+  const total = w.lightsout + w.watcher + w.roar + w.slam;
+  let r = Math.random() * total;
+  for (const t of SCARE_TYPES) { r -= w[t]; if (r < 0) return t; }
+  return 'roar';
+}
+
+// Apply a scare locally. Called directly on the host/solo AND from the 'scare'
+// message on clients (net.js), so both sides reproduce the moment identically.
+function applyScare(type, data) {
+  if (type === 'lightsout') startLightsOut();
+  else if (type === 'watcher') spawnWatcher(data.x, data.z);
+  else if (type === 'roar') { playDistantRoar(); scareAmbientDim = { t: 1.0, base: ambientLight ? ambientLight.intensity : 0 }; }
+  else if (type === 'slam') { playSlam(scarePanToward(data.x, data.z)); scarePulse = 0.16; }
+}
+
+/* ── effect updates (run on EVERY machine) ── */
+function updateScareEffects(dt) {
+  // LIGHTS OUT — drop to ~5% over 0.4s, hold 5s, flicker back over ~1.3s.
+  if (scareLightsOut) {
+    const s = scareLightsOut; s.t += dt;
+    let mult;
+    if (s.t < 0.4) mult = 1 - (s.t / 0.4) * 0.95;            // 1 → 0.05
+    else if (s.t < 5.4) mult = 0.05;                          // hold dark
+    else if (s.t < 6.7) {
+      const k = (s.t - 5.4) / 1.3;                            // recover with a stutter
+      mult = 0.05 + (1 - 0.05) * k;
+      if (Math.sin(s.t * 47) > 0.6) mult *= 0.4;              // flicker on the way back
+    } else { mult = 1; }
+    for (const f of flickerTimers) f.light.intensity = f.base * mult;
+    if (s.t >= 6.7) { for (const f of flickerTimers) f.light.intensity = f.base; scareLightsOut = null; }
+  }
+
+  // SLAM light pulse — a sharp dip then partial, ~160ms (no screen shake).
+  if (scarePulse > 0) {
+    scarePulse -= dt;
+    const lit = scarePulse > 0.08 ? 0.2 : 0.65;
+    for (const f of flickerTimers) f.light.intensity = f.base * lit;
+    if (scarePulse <= 0) { scarePulse = 0; for (const f of flickerTimers) f.light.intensity = f.base; }
+  }
+
+  // DISTANT ROAR ambient dip — a smooth 1s dip-and-recover of the ambient light.
+  if (scareAmbientDim && ambientLight) {
+    const a = scareAmbientDim; a.t -= dt;
+    const k = Math.max(0, a.t);                               // 1 → 0
+    ambientLight.intensity = a.base * (1 - 0.3 * Math.sin(Math.PI * (1 - k)));
+    if (a.t <= 0) { ambientLight.intensity = a.base; scareAmbientDim = null; }
+  }
+
+  // THE WATCHER — static billboard; despawns when you look away then back, or get
+  // close. Each player evaluates against their OWN camera (per-viewpoint scare).
+  if (scareWatchers.length) {
+    const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+    for (let i = scareWatchers.length - 1; i >= 0; i--) {
+      const wch = scareWatchers[i];
+      wch.life -= dt;
+      const dx = wch.sprite.position.x - camera.position.x;
+      const dz = wch.sprite.position.z - camera.position.z;
+      const dist = Math.hypot(dx, dz);
+      const inView = (dx * fwd.x + dz * fwd.z) / (dist || 1) > 0.6 && dist < 45;
+      let gone = false;
+      if (dist < 5.5) gone = true;                            // got close
+      else if (wch.seen && wch.away && inView) gone = true;   // looked away → back
+      else {
+        if (inView) wch.seen = true;
+        else if (wch.seen) wch.away = true;
+      }
+      if (gone || wch.life <= 0) {
+        scene.remove(wch.sprite);
+        wch.sprite.material.dispose(); // per-instance material; .map is the SHARED mob texture — never disposed
+        scareWatchers.splice(i, 1);
+        if (gone) playWhisper();                              // silent on the safety-timeout despawn
+      }
+    }
+  }
+}
+
+function startLightsOut() {
+  scareLightsOut = { t: 0 };
+  playRumble();
+}
+
+// A still billboard down a corridor, facing the player (sprites auto-face the
+// camera). Cosmetic only — not an enemy: no AI, no contact damage, not in the
+// kill gate, not shootable. Reuses a shared mob sprite texture (pinned program
+// family) so no new shader program.
+function spawnWatcher(wx, wz) {
+  if (typeof spriteTextures === 'undefined') return;
+  const tex = spriteTextures['stalker'] || spriteTextures['phantom'] || spriteTextures['crawler'];
+  if (!tex) return;
+  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xffffff, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(2.6, 2.6, 1);
+  sprite.position.set(wx, 1.3, wz);
+  scene.add(sprite);
+  scareWatchers.push({ sprite, seen: false, away: false, life: 30 });
+}
+
+// HOST: pick a spot ~down the corridor the player faces (medium distance), short
+// of the wall. Returns {x,z} or null when there's no decent corridor (caller
+// falls back to a non-watcher scare). Uses the cosmetic wall raycast.
+function pickWatcherSpot() {
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-4) return null;
+  fwd.normalize();
+  const wall = raycastWall(player.pos, fwd, 32);
+  const corridor = wall ? wall.dist : 32;
+  if (corridor < 9) return null;            // too cramped for a medium-distance figure
+  const d = Math.min(corridor - 2.5, 22);   // a couple units short of the wall, capped
+  if (d < 7) return null;
+  return { x: player.pos.x + fwd.x * d, z: player.pos.z + fwd.z * d };
+}
+
+// Stereo pan [-1,1] from the listener's facing to a world point (+ = right).
+function scarePanToward(wx, wz) {
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  const rightX = -fwd.z, rightZ = fwd.x;   // forward rotated -90° about Y
+  let dx = wx - camera.position.x, dz = wz - camera.position.z;
+  const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
+  return Math.max(-1, Math.min(1, dx * rightX + dz * rightZ));
+}
+
+// Floor teardown: pull active watcher sprites out of the scene BEFORE the
+// dispose traverse (their .map is the shared mob texture — must not be caught),
+// and clear every active effect / trigger.
+function clearScares() {
+  for (const wch of scareWatchers) { if (wch.sprite.parent) scene.remove(wch.sprite); wch.sprite.material.dispose(); }
+  scareWatchers = [];
+  scareLightsOut = null; scarePulse = 0; scareAmbientDim = null;
+  scareTriggers = []; scaresFiredThisFloor = 0; scareMaxThisFloor = 0;
 }
 
 /* ═══════════════════════════════════════════
@@ -4560,8 +4976,10 @@ function animate() {
       updateBoss(dt);
       updateBossProjectiles(dt);
       updateAntiLinger(dt);
+      updateScareTriggers(dt); // host/solo only: fire scares (broadcasts to clients)
     }
     updateMinimap(dt);
+    updateScareEffects(dt);    // all machines: animate active lights-out/watcher/roar/slam
     updateLights(dt);
     updateHUDTimers(dt);
     updateAmbient(dt);
@@ -4570,6 +4988,7 @@ function animate() {
     updateImpactSparks(dt); // pooled spark particles fly out + fade (no lights)
     updateFlares(dt);       // flare light/bead countdown (no-op when idle)
     updateAmmoPickups(dt);
+    updateArtifacts(dt); // lore objective: bob/spin + walk-over collect (no-op off item floors)
     updateBalloons(dt); // Level Fun: balloon bob/sway (no-op elsewhere — empty list)
     updateHUD();
   }

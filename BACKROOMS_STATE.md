@@ -24,6 +24,73 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Lore objectives / item-gate system landed (June 11, UNPLAYED):**
+  - **Gate condition is now per-theme configurable** (`theme.gate`): 'kills'
+    (default, co-op only — unchanged), 'item' (collect N artifacts), 'boss'
+    (implicit on boss floors). `netExitGateOpen` (net.js) generalized: boss→always
+    open; item→`artifactsCollected >= artifactsTotal` (applies in SOLO **and**
+    co-op); kills→co-op-only as before. Exit still spawns normally; the gate just
+    decides when it opens.
+  - **ITEM OBJECTIVE:** glowing octahedron artifacts (emissive, **NO lights** —
+    MeshStandardMaterial no-map, already-pinned family; light budget untouched)
+    spawn at seeded cells far from spawn (BFS far-half + ≥4-cell spacing) via a
+    floorSeed-derived prng — **0 world-rng draws** (headless-proven), so exit/ammo
+    placement is undisturbed. Walk-over to collect; HUD goal shows
+    "RELICS/RECORDS/FILES n/N → EXIT OPEN". Minimap shows cyan markers only when
+    the cell is fog-revealed (like the exit). Mobs still spawn as pressure (kills
+    just aren't the gate).
+  - **Co-op:** any player can collect (shared progress, host-validated advance).
+    **PROTOCOL ADDITION: 'artifact_taken' {id}** — exact ammo-pickup pattern
+    (seeded sequential ids, idempotent count on every machine, host relays to the
+    other clients). Old builds miss it — both on new build.
+  - **Assigned floors:** The Crypt (2 relics), The Hospital (3 patient records),
+    The Archive (3 lost files) — kills NOT required there, the items ARE the gate.
+  - **Goal HUD** (top center) reflects the active objective type (ARTIFACTS vs
+    ELIMINATIONS vs hidden-on-boss).
+  - Audio: playArtifactPickup (ascending C-G-C chime) in audio.js.
+  - Headless: tools/test_artifacts.js (theme gate config, placement determinism +
+    0 world-rng draws, count/distinct/distance/id constraints over 400 seeds,
+    collect idempotency, netExitGateOpen across all gate types). Full suite green.
+  - **Needs a browser/co-op session:** artifact readability + glow, walk-over feel,
+    minimap fog-reveal of markers, the objective HUD on the 3 floors, and live
+    co-op shared collection + host-validated exit.
+- **Scripted scare events landed (June 11, UNPLAYED):** designed-moment system,
+  not random.
+  - **Placement** seeded per floor via a dedicated floorSeed-derived prng
+    (`mulberry32(floorSeed ^ 0x5CA3E5)`) — consumes 0 world rng() draws
+    (headless-proven), so spawn/exit/ammo order is untouched. 1-2 triggers/floor,
+    each proximity (enter a cell radius) OR timer-window. NEVER < 30s after floor
+    start, NEVER on a boss floor.
+  - **Host owns triggers + the which-event roll** (spawn-composition model);
+    clients never evaluate, they just apply. **PROTOCOL ADDITION: 'scare'
+    {type,data}** broadcast so the whole party shares the moment (data carries
+    only what each client needs to reproduce it from its OWN viewpoint). Old
+    builds log it unhandled and miss the scare — both players on new build.
+  - **4 events:** (1) LIGHTS OUT — all ceiling lights drop to ~5% over 0.4s,
+    hold 5s, flicker back (intensity ONLY; updateLights yields via
+    scareOwnsLights()), distant rumble. (2) THE WATCHER — a still mob-sprite
+    billboard placed ~down the corridor the player faces (host raycastWall pick);
+    cosmetic only (no AI/damage/kill-gate/not shootable), despawns with a
+    whisper the first time you look away then back, or get close; each player
+    evaluates against their OWN camera. (3) DISTANT ROAR — quieter boss-roar with
+    a feedback-delay reverb smear + a smooth 1s ambient-light dip. (4) SLAM —
+    stereo-PANNED door-bang (pan from each listener's facing) + a ~160ms light
+    pulse. **NO screen shake** (accessibility) — sound + light only.
+  - **Per-floor flavor (weighted, all types still possible):** pools→ROAR,
+    dark (darknessLevel≥0.6)→LIGHTS OUT, Level Fun→WATCHER.
+  - **Light budget intact:** zero new lights — every effect is intensity-only on
+    existing slots; the Watcher is a Sprite on the already-pinned SpriteMaterial+
+    map family. Effects run on all machines (updateScareEffects); triggers
+    host/solo only. clearScares() pulls watcher sprites out before the floor
+    teardown dispose pass (shared mob textures).
+  - Audio: playRumble / playDistantRoar (DelayNode feedback) / playWhisper /
+    playSlam(pan, StereoPanner) in audio.js.
+  - Headless: tools/test_scares.js (placement determinism + 0 world-rng draws,
+    ≤2/floor + spawn-clearance + timer≥30s constraints over 500 seeds, boss→0,
+    theme-flavor modality, intensity-only light invariant). Full suite green.
+  - **Needs a browser/co-op session:** the actual scare feel + pacing, watcher
+    look-away despawn timing, lights-out darkness depth, slam panning direction,
+    roar reverb mix, and live co-op shared-scare sync.
 - **Weapon system + 3 new guns + visual polish landed (June 11, UNPLAYED):**
   - **Weapon definition system:** WEAPONS table (main.js) — each gun = stats
     (damage/fireRate/clipSize/reserveMax/reloadTime/range/pellets/spread/falloff)
@@ -164,15 +231,20 @@ additive glow sprites on emissives gets 80% later).
 ## DESIGN ROADMAP (from June 10 design session — in order)
 1. ~~**Mob ecology pass**~~ DONE June 11 (unplayed) — see CURRENT STATE.
 2. ~~**Exit placement variety**~~ DONE June 11 (unplayed) — see CURRENT STATE.
-3. **Scripted scare events** (after ecology): starter set of 3-4 — lights cut for 5s,
-   mob that freezes until looked at, distant roar, door slam. Proximity/timer
-   triggered, designed not random.
+3. ~~**Scripted scare events**~~ DONE June 11 (unplayed) — starter set of 4
+   (lights out / the watcher / distant roar / slam), seeded triggers, host-owned
+   + 'scare' broadcast, per-floor flavor. See CURRENT STATE.
 4. ~~**Gun/visual polish pass**~~ DONE June 11 (unplayed) — folded into the
    weapon system batch: distinct per-gun viewmodels, per-weapon muzzle flash,
    pooled impact sparks + bullet-hole decals. See CURRENT STATE.
-5. **Lore objectives** (biggest scope — parked last): "find item + kill" — per-level
-   configurable gate condition (kills OR item OR boss) slotting into existing
-   kill-gate system. Needs item spawns, pickup, objective HUD.
+5. ~~**Lore objectives**~~ DONE June 11 (unplayed) — per-theme gate condition
+   (kills/item/boss), artifact spawns + pickup + objective HUD + minimap markers,
+   co-op 'artifact_taken' sync. Crypt/Hospital/Archive are item floors. See
+   CURRENT STATE.
+
+**The design roadmap is now fully cleared.** Possible next directions (unprioritized):
+more gate variants (escort/survive-timer), item lore text on pickup, per-floor
+objective variety, or circling back to the parked VISUAL FIX QUEUE (sRGB pass etc.).
 
 ## WHAT DIDN'T WORK / DECIDED AGAINST
 - Bloom via EffectComposer — parked (pipeline risk vs payoff)

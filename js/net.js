@@ -1104,8 +1104,13 @@ onMessage('reward', (d) => {
 // gate (the exit only exists after it dies). Co-op normal floors: the party's
 // combined kills must reach killTarget (host counts; clients mirror via snap.k).
 function netExitGateOpen() {
+  const theme = getTheme(currentFloor);
+  if (theme.isBoss) return true; // boss floors: the boss death spawns the exit
+  // ITEM gate: collect every artifact (applies in SOLO and co-op — the lore
+  // objective is the gate). The count is shared/host-validated (see main.js).
+  if ((theme.gate || 'kills') === 'item') return artifactsTotal > 0 ? artifactsCollected >= artifactsTotal : true;
+  // KILLS gate: co-op only (solo can leave freely).
   if (netState.role === 'solo') return true;
-  if (getTheme(currentFloor).isBoss) return true;
   return floorKills >= killTarget;
 }
 
@@ -1159,6 +1164,29 @@ onMessage('pickup_taken', (d, fromConn) => {
   }
 });
 
+/* ── lore-objective artifact sync (item gate) ──
+   Same shape as 'pickup_taken': whoever walks over an artifact removes it
+   locally and announces it; every other machine removes the SAME id (seeded
+   creation order) and counts it (idempotent), so the shared ARTIFACTS n/N
+   agrees everywhere. The exit advance stays host-validated (netExitGateOpen).
+   PROTOCOL ADDITION 'artifact_taken' {id} — both players on the new build. */
+function netAnnounceArtifactTaken(id) {
+  if (netState.role === 'solo' || id === undefined) return;
+  if (netState.role === 'host') sendToAll('artifact_taken', { id });
+  else sendToHost('artifact_taken', { id });
+}
+
+onMessage('artifact_taken', (d, fromConn) => {
+  if (netState.role === 'solo' || !d) return;
+  collectArtifact(d.id); // main.js — remove mesh + count (idempotent)
+  if (netState.role === 'host') {
+    // relay so the OTHER clients lose it + count it too
+    for (const conn of netState.peers) {
+      if (conn !== fromConn && conn.open) conn.send({ t: 'artifact_taken', d: { id: d.id } });
+    }
+  }
+});
+
 // Kill-drop pickups are host-authoritative (applyEnemyHit rolls the dice).
 function netBroadcastPickupSpawn(id, x, z) {
   if (netState.role === 'host') sendToAll('pickup_spawn', { id, x: netR2(x), z: netR2(z) });
@@ -1183,6 +1211,24 @@ function netBroadcastBalloonPop(id) {
 
 onMessage('balloon_pop', (d) => {
   if (netIsClient() && d && gameState === 'playing') netOnBalloonPop(d.id); // main.js
+});
+
+/* ── scripted scare events (main.js) ──
+   The HOST owns ALL scare triggers (proximity / timer windows) and which-event
+   rolls — exactly the spawn-composition model. When one fires it broadcasts
+   'scare' {type, data} so every player gets the SAME scare together (shared
+   scares read better). data carries only what each client needs to reproduce
+   the moment locally (e.g. a world point for the watcher / slam pan), so each
+   player experiences it from their own viewpoint. PROTOCOL ADDITION: an old
+   build logs it as unhandled and just misses the scare — both players on the
+   new build (already required by prior additions). */
+
+function netBroadcastScare(type, data) {
+  if (netState.role === 'host' && netState.peers.length > 0) sendToAll('scare', { type, data });
+}
+
+onMessage('scare', (d) => {
+  if (netIsClient() && d && gameState === 'playing') applyScare(d.type, d.data); // main.js
 });
 
 /* ── minimap blip sources (host/solo: real lists; client: mirrors) ── */

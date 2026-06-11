@@ -405,6 +405,31 @@ function playPickup() {
   });
 }
 
+// Lore objective: collecting an artifact — a bright ascending chime (a resolving
+// "found it" sound), clearly distinct from the ammo pickup blip.
+function playArtifactPickup() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    const notes = [[523.25, 0], [783.99, 0.09], [1046.5, 0.18]]; // C5 → G5 → C6
+    for (const [freq, at] of notes) {
+      const o = audioCtx.createOscillator(); o.type = 'triangle';
+      o.frequency.setValueAtTime(freq, t + at);
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t + at);
+      g.gain.exponentialRampToValueAtTime(0.3, t + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.01, t + at + 0.35);
+      const o2 = audioCtx.createOscillator(); o2.type = 'sine';
+      o2.frequency.setValueAtTime(freq * 2, t + at);
+      const g2 = audioCtx.createGain();
+      g2.gain.setValueAtTime(0.0001, t + at);
+      g2.gain.exponentialRampToValueAtTime(0.08, t + at + 0.02);
+      g2.gain.exponentialRampToValueAtTime(0.01, t + at + 0.3);
+      o.connect(g); g.connect(sfxGain); o.start(t + at); o.stop(t + at + 0.38);
+      o2.connect(g2); g2.connect(sfxGain); o2.start(t + at); o2.stop(t + at + 0.32);
+    }
+  });
+}
+
 function playDamage() {
   playSound(() => {
     const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.15, audioCtx.sampleRate);
@@ -802,4 +827,106 @@ function updateFloorMusic() {
   if (!audioCtx) return;
   if (getTheme(currentFloor).id === 5) startLevelFunMusic();
   else stopLevelFunMusic();
+}
+
+/* ═══════════════════════════════════════════
+   SCARE EVENTS — procedural one-shots for the scripted-scare system
+   (main.js). All Web Audio, no assets. playSlam is stereo-panned (the only
+   panned SFX) so the bang has a direction.
+   ═══════════════════════════════════════════ */
+
+// LIGHTS OUT — a distant, building low rumble (~1.3s): a slow 45→30Hz sub plus
+// lowpassed noise, quiet, with a soft attack so it creeps in as the lights die.
+function playRumble() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const len = sr * 1.3, buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const tt = i / sr;
+      const env = Math.min(1, tt * 4) * Math.exp(-tt * 1.3); // soft attack, long-ish tail
+      d[i] = Math.sin(tt * 2 * Math.PI * (45 - tt * 11)) * env * 0.6;
+      d[i] += (Math.random() * 2 - 1) * env * 0.25;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180; lp.Q.value = 0.6;
+    const g = audioCtx.createGain(); g.gain.value = 0.5;
+    src.connect(lp); lp.connect(g); g.connect(sfxGain); src.start(t);
+  });
+}
+
+// DISTANT ROAR — the boss roar, far away: lower gain, heavily lowpassed, and run
+// through a feedback DELAY so it smears into a cavernous, reverb-ish tail.
+function playDistantRoar() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const len = sr * 1.4, buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const tt = i / sr;
+      d[i] = Math.sin(tt * 55 * (1 + Math.sin(tt * 3.5) * 0.5)) * Math.exp(-tt * 1.1) * 0.6;
+      d[i] += (Math.random() * 2 - 1) * Math.exp(-tt * 1.6) * 0.3;
+      d[i] += Math.sin(tt * 27) * Math.exp(-tt * 0.85) * 0.3;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 0.5;
+    // delay line with feedback = a cheap "distance / reverb" smear
+    const delay = audioCtx.createDelay(1.0); delay.delayTime.value = 0.23;
+    const fb = audioCtx.createGain(); fb.gain.value = 0.45;
+    const wet = audioCtx.createGain(); wet.gain.value = 0.5;
+    const dry = audioCtx.createGain(); dry.gain.value = 0.28; // far-off → quiet
+    src.connect(lp);
+    lp.connect(dry); dry.connect(sfxGain);
+    lp.connect(delay); delay.connect(fb); fb.connect(delay); // feedback loop
+    delay.connect(wet); wet.connect(sfxGain);
+    src.start(t);
+  });
+}
+
+// THE WATCHER despawn — a soft breathy whisper: short bandpassed noise with a
+// gentle swell, quiet and close-feeling. The "it was never there" sound.
+function playWhisper() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const len = sr * 0.6, buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      const tt = i / sr;
+      const env = Math.sin(Math.PI * Math.min(1, tt / 0.6)); // swell in and out
+      d[i] = (Math.random() * 2 - 1) * env * 0.5;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 3.5;
+    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 800;
+    const g = audioCtx.createGain(); g.gain.value = 0.3;
+    src.connect(bp); bp.connect(hp); hp.connect(g); g.connect(sfxGain); src.start(t);
+  });
+}
+
+// SLAM — a sharp door-bang, stereo-PANNED toward the source direction (pan ∈
+// [-1,1], main.js computes it from the player's facing). Loud noise crack +
+// low wooden thud through a StereoPanner.
+function playSlam(pan) {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    const panner = audioCtx.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan || 0));
+    panner.connect(sfxGain);
+    // CRACK — the impact transient
+    const cl = sr * 0.05, cb = audioCtx.createBuffer(1, cl, sr), cd = cb.getChannelData(0);
+    for (let i = 0; i < cl; i++) cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.008));
+    const crack = audioCtx.createBufferSource(); crack.buffer = cb;
+    const cbp = audioCtx.createBiquadFilter(); cbp.type = 'bandpass'; cbp.frequency.value = 1100; cbp.Q.value = 0.6;
+    const cg = audioCtx.createGain(); cg.gain.setValueAtTime(2.2, t); cg.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    crack.connect(cbp); cbp.connect(cg); cg.connect(panner); crack.start(t);
+    // THUD — the heavy wooden body
+    const o = audioCtx.createOscillator(); o.type = 'triangle';
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(50, t + 0.09);
+    const og = audioCtx.createGain(); og.gain.setValueAtTime(1.1, t); og.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+    o.connect(og); og.connect(panner); o.start(t); o.stop(t + 0.13);
+    // low noise body for weight
+    const bl = sr * 0.1, bb = audioCtx.createBuffer(1, bl, sr), bd = bb.getChannelData(0);
+    for (let i = 0; i < bl; i++) bd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.03));
+    const body = audioCtx.createBufferSource(); body.buffer = bb;
+    const blp = audioCtx.createBiquadFilter(); blp.type = 'lowpass'; blp.frequency.value = 400;
+    const bg = audioCtx.createGain(); bg.gain.setValueAtTime(1.0, t); bg.gain.exponentialRampToValueAtTime(0.01, t + 0.11);
+    body.connect(blp); blp.connect(bg); bg.connect(panner); body.start(t);
+  });
 }
