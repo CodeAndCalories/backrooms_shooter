@@ -24,6 +24,36 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Black market + Level Fun batch landed (June 11, UNPLAYED):**
+  - ESC centralized into ONE handler: market → pause → pause-the-game priority;
+    pause menu and market are exclusive via openShop/closeShop/closeShopSilent
+    (main.js). resumeGame refuses while the market is up; game-over/quit/restart
+    force-close it. Headless-verified: tools/test_esc_shop.js (extracts the real
+    handlers, 8/8 transitions + never-both-overlays invariant).
+  - Market UI: upgrades grouped into 6 labeled tier columns, FUNDS banner,
+    explicit owned/locked(shows prereq)/can't-afford(red)/buyable states, hover
+    glow on buyable only, Back [ESC] button. CSS + existing DOM only.
+  - Level Fun music reworked (procedural, ambientGain): warped LFO drone,
+    broken music-box lullaby (always slightly flat, 6% tritone / 10% semitone
+    WRONG notes), distant party-horn/laughter stabs every 12-35s (Math.random
+    timers — per-machine ambience, allowed). Same updateFloorMusic start/stop.
+  - Level Fun props: party pass placement now via a floorSeed-derived prng
+    (NOT the world rng — consumes 0 world draws, verified; exit/ammo placement
+    unchanged from the ecology build). More balloons + tables + gift stacks +
+    cups/hats clutter + streamers/crooked pictures. All MeshStandardMaterial
+    no-map (already-pinned family), no DoubleSide, NO new lights, ~60 extra
+    meshes on the party floor.
+  - **Balloon pop trap:** balloons are shootable (seeded ids, ammo-pickup
+    contract — tools/test_balloons.js verifies determinism/validity). Host owns
+    the pop (local shot or relayed client 'shoot'): pop snap + delayed growl
+    (boss-roar synth pitched down), 3-5 partygoers spawn at open cells within
+    3 cells (capped by MOB_HARD_CAP=30, spawns fewer), aggro'd onto the popper
+    for 9s or until they land a hit (enemies.js aggroPeer/aggroTimer).
+    **PROTOCOL ADDITION: 'balloon_pop' {id}** — old builds ignore it (balloon
+    stays visible there); both players on new build, already required.
+  - Needs a real browser/co-op session: audio mix, shop look, Chrome ESC
+    pointer-lock cooldown feel, live pop sync + aggro feel, PROG counter
+    stability on the dev HUD.
 - **Mob ecology pass landed (June 11, UNPLAYED):** per-theme spawn tables in
   LEVEL_THEMES[].mobs (types/weights/danger + speedMult/hpMult/countMult +
   waveBase/waveCap). spawnWave/spawnDangerMob/spawnEnemy read them; killTarget now

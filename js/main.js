@@ -22,6 +22,10 @@ const LINGER_MAX_DANGER = 5; // max danger level
 const LINGER_SPAWN_BASE = 8; // seconds between danger spawns at level 1
 const LINGER_SPAWN_MIN = 1.5; // minimum seconds between spawns at max danger
 
+// Balloon trap (Level Fun) constants
+const MOB_HARD_CAP = 30;      // total live mobs — a pop spawns fewer rather than exceed this
+const BALLOON_TRAP_AGGRO = 9; // seconds trap partygoers stay locked on the popper (or until they land a hit)
+
 /* ═══════════════════════════════════════════
    SEEDED PRNG (level generation only)
    ═══════════════════════════════════════════ */
@@ -1796,6 +1800,100 @@ function createAmmoPickup(wx, wz, id) {
   ammoPickups.push({ id, mesh, x: wx, z: wz, baseY, phase: ammoPickups.length * 1.7 });
 }
 
+/* ═══════════════════════════════════════════
+   BALLOONS (Level Fun) — shootable party props / the balloon-pop trap
+   Placed by the SEEDED rng() in addDecorations' party branch, with sequential
+   ids in seeded creation order — same contract as ammo pickups, so every
+   co-op machine has the identical balloon at the identical id. Popping is
+   HOST-authoritative (see popBalloon): the host raycasts (local shot or a
+   client's relayed 'shoot'), removes + spawns + broadcasts 'balloon_pop';
+   clients mirror the removal + sounds, and the spawned partygoers arrive via
+   the regular enemy snapshots.
+   Visual resources are session-shared and NEVER disposed (the ammoPickupMat
+   pattern): teardown scene.remove()s balloon meshes BEFORE the dispose
+   traverse, so the shared geometry/materials are never seen by it. Materials
+   are plain MeshStandardMaterial (no map) — an already-pinned program family,
+   and there are NO balloon lights.
+   ═══════════════════════════════════════════ */
+let balloons = [];        // { id, mesh, x, y0, z, r, alive, phase } — current floor only
+let balloonNextId = 0;    // reset per floor in buildMazeScene (seeded creation order)
+let balloonGeo = null, balloonStringGeo = null, balloonMats = null, balloonStringMat = null;
+
+// Gentle float: bob + slow sway. Pure position updates, no allocations.
+function updateBalloons(dt) {
+  if (balloons.length === 0) return;
+  const t = clock.getElapsedTime();
+  for (const b of balloons) {
+    if (!b.alive) continue;
+    b.mesh.position.y = b.y0 + Math.sin(t * 0.8 + b.phase) * 0.12;
+    b.mesh.rotation.y = Math.sin(t * 0.3 + b.phase) * 0.3;
+  }
+}
+
+// Nearest LIVE balloon the ray pierces → { balloon, point, dist } or null.
+// Sphere test against the CURRENT (bobbed) position, radius padded slightly.
+function raycastBalloons(ray, origin) {
+  let best = null, bestD = Infinity;
+  const v = new THREE.Vector3();
+  for (const b of balloons) {
+    if (!b.alive) continue;
+    const hit = ray.ray.intersectSphere(new THREE.Sphere(b.mesh.position, b.r), v);
+    if (hit) {
+      const d = origin.distanceTo(hit);
+      if (d < bestD) { bestD = d; best = { balloon: b, point: hit.clone(), dist: d }; }
+    }
+  }
+  return best;
+}
+
+// HOST: pop a balloon. popperConn = null when the host's own shot popped it,
+// else the client conn whose relayed shot did (the trap aggros onto them).
+function popBalloon(b, popperConn) {
+  b.alive = false;
+  scene.remove(b.mesh); // shared geo/mats — never disposed (see block comment)
+  playBalloonPop();
+  setTimeout(() => { if (gameState === 'playing') playPartyGrowl(); }, 350);
+  netBroadcastBalloonPop(b.id);
+
+  // The party answers: 3-5 partygoers (host-side roll — same convention as
+  // spawn positions; clients mirror via snapshots) at open cells around the
+  // balloon, all aggro'd onto the popper. Capped so a pop never pushes the
+  // live-mob count past MOB_HARD_CAP — spawn fewer instead.
+  let alive = 0;
+  for (const e of enemies) if (e.alive) alive++;
+  const want = 3 + Math.floor(Math.random() * 3);
+  const n = Math.min(want, Math.max(0, MOB_HARD_CAP - alive));
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  const bcx = Math.floor(b.x / CELL), bcy = Math.floor(b.z / CELL);
+  // Candidate cells: open floor (mazeGrid===1 — never a wall; generator
+  // connectivity guarantees every floor cell is reachable) within 3 cells.
+  const cells = [];
+  for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+    if (dx === 0 && dy === 0) continue;
+    const cx = bcx + dx, cy = bcy + dy;
+    if (cx > 0 && cy > 0 && cx < gw - 1 && cy < gh - 1 && mazeGrid[cy][cx] === 1) cells.push({ cx, cy });
+  }
+  for (let i = 0; i < n && cells.length > 0; i++) {
+    const c = cells.splice(Math.floor(Math.random() * cells.length), 1)[0];
+    const e = spawnEnemy('partygoer', {
+      x: c.cx * CELL + CELL / 2 + (Math.random() - 0.5),
+      z: c.cy * CELL + CELL / 2 + (Math.random() - 0.5)
+    });
+    if (e) { e.aggroPeer = popperConn ? popperConn.peer : null; e.aggroTimer = BALLOON_TRAP_AGGRO; }
+  }
+}
+
+// CLIENT: the host popped balloon `id` — mirror the removal + audio. The
+// spawned partygoers arrive via the regular enemy snapshot, no work here.
+function netOnBalloonPop(id) {
+  const b = balloons.find(bb => bb.id === id);
+  if (!b || !b.alive) return;
+  b.alive = false;
+  scene.remove(b.mesh);
+  playBalloonPop();
+  setTimeout(() => { if (gameState === 'playing') playPartyGrowl(); }, 350);
+}
+
 // MP: a pickup consumed elsewhere (another player walked over it) vanishes
 // here too — no ammo granted, it just disappears.
 function removeAmmoPickupById(id) {
@@ -1895,6 +1993,8 @@ function buildMazeScene() {
   for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
   bulletTrails = [];
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
+  for (const b of balloons) scene.remove(b.mesh);    // same pattern: shared balloon geo/mats stay out of the dispose traverse
+  balloons = [];
   scene.remove(camera); // gun + flashlight persist across floors (createGun disposes the old gun itself)
 
   // Everything still in the scene is floor-owned world geometry (walls, floor,
@@ -1981,7 +2081,9 @@ function buildMazeScene() {
     scene.add(iMesh);
   }
 
-  // Decorations
+  // Decorations. Balloon ids restart per floor here (the party branch creates
+  // them in seeded order) — identical sequence on every machine, like pickups.
+  balloonNextId = 0;
   if (theme.decorations !== 'none') {
     addDecorations(theme, gw, gh);
   }
@@ -2244,38 +2346,62 @@ function addDecorations(theme, gw, gh) {
       }
     }
   } else if (theme.decorations === 'party') {
-    // CREEPY BIRTHDAY PARTY (Level Fun only). Floating balloons (harmless, no collision)
-    // + party tables, each set with a single candle-lit cake. Tables are solid and
-    // pushed into mazeWalls so player/mobs collide. Reuses the same placement idiom as
-    // the other decoration branches, scoped via Level Fun's decorations:'party'.
-    const balloonColors = [0xff4466, 0x44aaff, 0xffdd00, 0x44ff88, 0xff88ff];
+    // CREEPY BIRTHDAY PARTY (Level Fun only). EVERYTHING here places via prng,
+    // a SEPARATE seeded stream derived from floorSeed: balloons are shootable
+    // world objects whose ids must match on every co-op machine (see the
+    // balloon trap), so placement must be deterministic — but it must NOT
+    // consume the main world rng(), or the exit/ammo draws that follow in
+    // buildMazeScene would shift (and the sim suite's stream mirror with
+    // them). Same floorSeed on every machine → same prng → same balloons.
+    // All materials are plain MeshStandardMaterial (no map) — already-pinned
+    // program family — and nothing here adds a light.
+    const prng = mulberry32((floorSeed ^ 0xBA1100) >>> 0);
+    const partyColors = [0xff4466, 0x44aaff, 0xffdd00, 0x44ff88, 0xff88ff, 0xff8844];
 
-    // Balloons — drift overhead.
-    for (let y = 2; y < gh - 1; y += 4) for (let x = 2; x < gw - 1; x += 4) {
-      if (mazeGrid[y][x] === 1 && Math.random() < 0.5) {
-        const color = balloonColors[Math.floor(Math.random() * balloonColors.length)];
-        const balloon = new THREE.Mesh(
-          new THREE.SphereGeometry(0.2 + Math.random() * 0.15, 8, 8),
-          new THREE.MeshStandardMaterial({ color: color, emissive: color, emissiveIntensity: 0.2 })
-        );
-        balloon.position.set(x * CELL + CELL / 2 + (Math.random() - 0.5) * 2, 2 + Math.random(), y * CELL + CELL / 2 + (Math.random() - 0.5) * 2);
-        scene.add(balloon);
-        const strGeo = new THREE.CylinderGeometry(0.005, 0.005, balloon.position.y - 0.5, 4);
-        const str = new THREE.Mesh(strGeo, new THREE.MeshStandardMaterial({ color: 0x888888 }));
-        str.position.set(balloon.position.x, balloon.position.y / 2, balloon.position.z);
-        scene.add(str);
+    // Session-shared balloon resources (created once, NEVER disposed — the
+    // teardown removes balloon meshes before the dispose traverse).
+    if (!balloonGeo) {
+      balloonGeo = new THREE.SphereGeometry(1, 8, 8);
+      balloonStringGeo = new THREE.CylinderGeometry(0.005, 0.005, 1, 4);
+      balloonStringMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9 });
+      balloonMats = partyColors.map(c =>
+        new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.2, roughness: 0.6 }));
+    }
+
+    // Balloons — MORE of them (stride 3), varied color/size/height, bobbing in
+    // updateBalloons. Shared geometry + 6 shared materials → cheap despite the
+    // count. Registered in `balloons` with seeded sequential ids → shootable.
+    for (let y = 2; y < gh - 1; y += 3) for (let x = 2; x < gw - 1; x += 3) {
+      if (mazeGrid[y][x] === 1 && prng() < 0.45) {
+        const r = 0.2 + prng() * 0.15;
+        const bx = x * CELL + CELL / 2 + (prng() - 0.5) * 2;
+        const bz = y * CELL + CELL / 2 + (prng() - 0.5) * 2;
+        const by = 2.0 + prng() * 0.9;
+        const g = new THREE.Group();
+        const ball = new THREE.Mesh(balloonGeo, balloonMats[Math.floor(prng() * balloonMats.length)]);
+        ball.scale.setScalar(r);
+        g.add(ball);
+        const strLen = Math.max(0.4, by - r - 0.5); // string ends ~0.5m above the floor
+        const str = new THREE.Mesh(balloonStringGeo, balloonStringMat);
+        str.scale.y = strLen;
+        str.position.y = -(r + strLen / 2);
+        g.add(str);
+        g.position.set(bx, by, bz);
+        scene.add(g);
+        balloons.push({ id: ++balloonNextId, mesh: g, x: bx, y0: by, z: bz, r: r + 0.06, alive: true, phase: prng() * Math.PI * 2 });
       }
     }
 
     // Party tables — pale-clothed round top on a single leg, topped with a glowing cake
-    // and a lit candle. Solid obstacles (added to mazeWalls).
+    // and a lit candle. Solid obstacles (added to mazeWalls — now the SAME cells on
+    // every machine, an upgrade over the old Math.random placement).
     const tableMat = new THREE.MeshStandardMaterial({ color: 0xede0c8, roughness: 0.85 }); // grimy tablecloth
     const legMat   = new THREE.MeshStandardMaterial({ color: 0x6b5a44, roughness: 0.9 });
     const cakeMat  = new THREE.MeshStandardMaterial({ color: 0xff9ec4, emissive: 0xff5599, emissiveIntensity: 0.25, roughness: 0.6 });
     const flameMat = new THREE.MeshStandardMaterial({ color: 0xfff0c0, emissive: 0xffcc66, emissiveIntensity: 0.7 });
     const TABLE_TOP_Y = 1.0, TABLE_R = 0.55;
-    for (let y = 3; y < gh - 2; y += 5) for (let x = 3; x < gw - 2; x += 5) {
-      if (isOpenArea(x, y, gw, gh) && Math.random() < 0.5) {
+    for (let y = 3; y < gh - 2; y += 4) for (let x = 3; x < gw - 2; x += 4) {
+      if (isOpenArea(x, y, gw, gh) && prng() < 0.45) {
         const cx = x * CELL + CELL / 2, cz = y * CELL + CELL / 2;
         const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, TABLE_TOP_Y, 8), legMat);
         leg.position.set(cx, TABLE_TOP_Y / 2, cz);
@@ -2290,6 +2416,106 @@ function addDecorations(theme, gw, gh) {
         candle.position.set(cx, TABLE_TOP_Y + 0.28, cz);
         scene.add(candle);
         mazeWalls.push({ minX: cx - TABLE_R, maxX: cx + TABLE_R, minZ: cz - TABLE_R, maxZ: cz + TABLE_R });
+      }
+    }
+
+    // Gift boxes — 1-2 stacked bright boxes with a contrasting "ribbon" strip.
+    // Solid (small collider, like crates).
+    const giftBoxGeo = new THREE.BoxGeometry(1, 1, 1); // unit cube, scaled per box
+    const giftMats = partyColors.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }));
+    for (let y = 2; y < gh - 2; y += 4) for (let x = 4; x < gw - 2; x += 4) {
+      if (mazeGrid[y][x] === 1 && prng() < 0.35) {
+        const gx = x * CELL + CELL / 2 + (prng() - 0.5) * 1.2;
+        const gz = y * CELL + CELL / 2 + (prng() - 0.5) * 1.2;
+        const stack = 1 + Math.floor(prng() * 2);
+        let topY = 0;
+        let baseS = 0;
+        for (let s = 0; s < stack; s++) {
+          const sz = (0.45 - s * 0.14) * (0.85 + prng() * 0.3);
+          if (s === 0) baseS = sz;
+          const ci = Math.floor(prng() * giftMats.length);
+          const box = new THREE.Mesh(giftBoxGeo, giftMats[ci]);
+          box.scale.set(sz, sz, sz);
+          box.position.set(gx, topY + sz / 2, gz);
+          box.rotation.y = prng() * Math.PI;
+          scene.add(box);
+          // ribbon: thin strip across the lid in a different party color
+          const ribbon = new THREE.Mesh(giftBoxGeo, giftMats[(ci + 2) % giftMats.length]);
+          ribbon.scale.set(sz * 1.04, sz * 0.08, sz * 0.16);
+          ribbon.position.set(gx, topY + sz, gz);
+          ribbon.rotation.y = box.rotation.y;
+          scene.add(ribbon);
+          topY += sz;
+        }
+        mazeWalls.push({ minX: gx - baseS / 2, maxX: gx + baseS / 2, minZ: gz - baseS / 2, maxZ: gz + baseS / 2 });
+      }
+    }
+
+    // Party clutter — abandoned cups and dropped cone hats. Tiny, no collision.
+    const cupGeo = new THREE.CylinderGeometry(0.035, 0.045, 0.1, 6);
+    const hatGeo = new THREE.ConeGeometry(0.09, 0.2, 6);
+    const clutterMats = partyColors.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9 }));
+    for (let y = 2; y < gh - 1; y += 3) for (let x = 3; x < gw - 1; x += 3) {
+      if (mazeGrid[y][x] === 1 && prng() < 0.3) {
+        const n = 1 + Math.floor(prng() * 2);
+        for (let i = 0; i < n; i++) {
+          const isHat = prng() < 0.4;
+          const m = new THREE.Mesh(isHat ? hatGeo : cupGeo, clutterMats[Math.floor(prng() * clutterMats.length)]);
+          const px = x * CELL + CELL / 2 + (prng() - 0.5) * 2.4;
+          const pz = y * CELL + CELL / 2 + (prng() - 0.5) * 2.4;
+          if (isHat && prng() < 0.6) {
+            // knocked-over hat lying on its side
+            m.rotation.z = Math.PI / 2;
+            m.rotation.y = prng() * Math.PI * 2;
+            m.position.set(px, 0.09, pz);
+          } else {
+            m.rotation.y = prng() * Math.PI * 2;
+            m.position.set(px, isHat ? 0.1 : 0.05, pz);
+          }
+          scene.add(m);
+        }
+      }
+    }
+
+    // Odd wall decorations — sagging ceiling streamers along the walls and the
+    // occasional crooked "picture" flat against a wall face. Thin single-sided
+    // boxes only (no DoubleSide planes — `doubleSided` is a program-cache key
+    // and standard-no-map is only pinned single-sided).
+    const streamerGeo = new THREE.BoxGeometry(0.05, 1, 0.05);
+    for (let y = 2; y < gh - 1; y += 3) for (let x = 2; x < gw - 1; x += 3) {
+      if (mazeGrid[y][x] !== 1) continue;
+      // find a wall neighbor to hug (deterministic scan order)
+      let wallDir = null;
+      if (mazeGrid[y - 1] && mazeGrid[y - 1][x] === 0) wallDir = { dx: 0, dz: -1 };
+      else if (mazeGrid[y + 1] && mazeGrid[y + 1][x] === 0) wallDir = { dx: 0, dz: 1 };
+      else if (mazeGrid[y][x - 1] === 0) wallDir = { dx: -1, dz: 0 };
+      else if (mazeGrid[y][x + 1] === 0) wallDir = { dx: 1, dz: 0 };
+      if (!wallDir) continue;
+      const wx = x * CELL + CELL / 2 + wallDir.dx * (CELL / 2 - 0.15);
+      const wz = y * CELL + CELL / 2 + wallDir.dz * (CELL / 2 - 0.15);
+      const roll = prng();
+      if (roll < 0.3) {
+        // streamer: hangs from the ceiling at a tired angle
+        const len = 0.9 + prng() * 0.7;
+        const s = new THREE.Mesh(streamerGeo, clutterMats[Math.floor(prng() * clutterMats.length)]);
+        s.scale.y = len;
+        s.position.set(wx, WALL_H - len / 2, wz);
+        s.rotation.x = (prng() - 0.5) * 0.3;
+        s.rotation.z = (prng() - 0.5) * 0.3;
+        scene.add(s);
+      } else if (roll < 0.42) {
+        // crooked picture: dark frame + party-color inner, tilted off square.
+        // Group yaw faces it INTO the room; the child tilt is the crookedness.
+        const pic = new THREE.Group();
+        const frame = new THREE.Mesh(giftBoxGeo, legMat); // reuse the dark wood material
+        frame.scale.set(0.42, 0.55, 0.04);
+        const inner = new THREE.Mesh(giftBoxGeo, clutterMats[Math.floor(prng() * clutterMats.length)]);
+        inner.scale.set(0.32, 0.44, 0.05);
+        frame.rotation.z = inner.rotation.z = (prng() - 0.5) * 0.3; // crooked
+        pic.add(frame); pic.add(inner);
+        pic.position.set(wx, 1.5 + prng() * 0.5, wz);
+        pic.rotation.y = Math.atan2(-wallDir.dx, -wallDir.dz); // face the open cell
+        scene.add(pic);
       }
     }
   }
@@ -2649,8 +2875,16 @@ function playerShoot() {
     }
   }
 
+  // Nearest thing the ray crosses wins: enemy or (Level Fun) a balloon — a
+  // mob standing in front of a balloon still takes the bullet.
   const res = raycastEnemies(ray, camera.position);
-  if (res) {
+  const bres = balloons.length > 0 ? raycastBalloons(ray, camera.position) : null;
+  if (bres && (!res || bres.dist < camera.position.distanceTo(res.point))) {
+    trailEnd = bres.point.clone();
+    popBalloon(bres.balloon, null); // null = the host's own shot
+    hitmarkerTimer = 0.18;
+    hitmarkerKill = false;
+  } else if (res) {
     trailEnd = res.point.clone();
     const dmg = effectiveDamage * (0.9 + Math.random() * 0.3);
     const killed = applyEnemyHit(res.enemy, dmg);
@@ -2764,7 +2998,14 @@ function netResolveRemoteShot(d, fromConn) {
     damageBoss(dmg);
     return;
   }
+  // Same nearest-wins balloon check as playerShoot — a client's relayed shot
+  // pops balloons too, and the trap aggros onto THAT client (fromConn).
   const res = raycastEnemies(ray, origin);
+  const bres = balloons.length > 0 ? raycastBalloons(ray, origin) : null;
+  if (bres && (!res || bres.dist < origin.distanceTo(res.point))) {
+    popBalloon(bres.balloon, fromConn);
+    return;
+  }
   if (res) applyEnemyHit(res.enemy, dmg, fromConn);
 }
 
@@ -3372,6 +3613,7 @@ function startGame() {
   document.getElementById('startMenu').style.display = 'none';
   document.getElementById('gameOverMenu').style.display = 'none';
   document.getElementById('pauseMenu').style.display = 'none';
+  closeShopSilent();
   document.getElementById('hud').style.display = 'block';
   document.getElementById('bossHpContainer').style.opacity = '0';
 
@@ -3399,15 +3641,54 @@ function tryPointerLock() {
   if (p && typeof p.catch === 'function') p.catch(() => {});
 }
 
+/* ── Menu state machine ──
+   The pause menu and the black market are EXCLUSIVE: opening one hides the
+   other, and ESC is handled in exactly ONE place (the keydown listener) with
+   the priority black market → pause menu → pause the game. shopReturnTo
+   remembers where the market was opened from ('pause' is the only entry point
+   today; 'game' is supported so a future hotkey can open it mid-run). */
+let shopOpen = false;
+let shopReturnTo = 'pause';
+
+function openShop(from) {
+  if (shopOpen) return;
+  shopOpen = true;
+  shopReturnTo = from || 'pause';
+  document.getElementById('pauseMenu').style.display = 'none'; // exclusivity
+  document.getElementById('shopOverlay').style.display = 'flex';
+  updateShopUI();
+}
+
+function closeShop() {
+  if (!shopOpen) return;
+  shopOpen = false;
+  document.getElementById('shopOverlay').style.display = 'none';
+  if (gameState !== 'paused') return; // game state moved on (game over / quit) — leave it be
+  if (shopReturnTo === 'pause') {
+    document.getElementById('pauseMenu').style.display = 'flex';
+  } else {
+    resumeGame(); // opened from gameplay → straight back to play (guarded relock inside)
+  }
+}
+
+// Force-hide the market with NO return-state side effects. Safety net for
+// paths that leave the pause state underneath it (game over, quit, restart,
+// pointer-lock-loss pause) — guarantees the two overlays are never both up.
+function closeShopSilent() {
+  shopOpen = false;
+  document.getElementById('shopOverlay').style.display = 'none';
+}
+
 function pauseGame() {
   if (gameState !== 'playing') return;
+  closeShopSilent(); // exclusivity: a pause can never stack under the market
   gameState = 'paused';
   document.getElementById('pauseMenu').style.display = 'flex';
   document.exitPointerLock();
 }
 
 function resumeGame() {
-  if (gameState !== 'paused') return;
+  if (gameState !== 'paused' || shopOpen) return; // market must close first (ESC handles it)
   gameState = 'playing';
   document.getElementById('pauseMenu').style.display = 'none';
   tryPointerLock(); // may fail inside Chrome's post-Esc cooldown → click re-locks
@@ -3415,6 +3696,7 @@ function resumeGame() {
 
 function gameOver() {
   gameState = 'gameover';
+  closeShopSilent(); // co-op: the party can die while this player browses the market
   stopLevelFunMusic(); // don't let the Level Fun loop bleed into the game-over screen
   document.getElementById('hud').style.display = 'none';
   document.getElementById('gameOverMenu').style.display = 'flex';
@@ -3427,6 +3709,7 @@ function gameOver() {
 
 function quitToMenu() {
   gameState = 'menu';
+  closeShopSilent();
   stopLevelFunMusic(); // stop Level Fun loop when bailing to the menu
   document.getElementById('pauseMenu').style.display = 'none';
   document.getElementById('hud').style.display = 'none';
@@ -3501,8 +3784,12 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'Escape') {
     e.preventDefault();
-    if (gameState === 'playing') pauseGame();
+    // The ONE ESC handler. Priority: black market → pause menu → pause.
+    // (While pointer-locked the browser eats ESC for the unlock; that path
+    // pauses via the pointerlockchange listener instead.)
+    if (shopOpen) closeShop();
     else if (gameState === 'paused') resumeGame();
+    else if (gameState === 'playing') pauseGame();
   }
 });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
@@ -3666,66 +3953,89 @@ document.getElementById('sliderVolAmbient').addEventListener('input', e => {
 /* ═══════════════════════════════════════════
    SHOP SYSTEM
    ═══════════════════════════════════════════ */
+// Upgrade tracks: tier 1 above tier 2 in a labeled column each, so the
+// prerequisite chains read top-down instead of being an unordered pile.
+const SHOP_TRACKS = [
+  { title: 'FIREPOWER', keys: ['damage1', 'damage2'] },
+  { title: 'TRIGGER',   keys: ['firerate1', 'firerate2'] },
+  { title: 'MAGAZINE',  keys: ['mag1', 'mag2'] },
+  { title: 'STAMINA',   keys: ['stamina1', 'stamina2'] },
+  { title: 'SUPPLY',    keys: ['reserve1'] },
+  { title: 'ARMOR',     keys: ['health1'] }
+];
+
 function updateShopUI() {
-  document.getElementById('shopBalance').textContent = 'Balance: $' + playerMoney;
+  document.getElementById('shopBalance').textContent = '$' + playerMoney;
   const grid = document.getElementById('shopGrid');
   grid.innerHTML = '';
-  
-  for (const [key, up] of Object.entries(shopUpgrades)) {
-    const div = document.createElement('div');
-    div.className = 'shop-item' + (up.bought ? ' purchased' : '');
-    
-    let canAfford = playerMoney >= up.cost;
-    let reqMet = !up.requires || shopUpgrades[up.requires].bought;
-    
-    if (!reqMet) {
-      div.style.opacity = '0.15';
-      div.style.pointerEvents = 'none';
+
+  for (const track of SHOP_TRACKS) {
+    const col = document.createElement('div');
+    col.className = 'shop-track';
+    const head = document.createElement('div');
+    head.className = 'shop-track-title';
+    head.textContent = track.title;
+    col.appendChild(head);
+
+    for (const key of track.keys) {
+      const up = shopUpgrades[key];
+      const div = document.createElement('div');
+      const canAfford = playerMoney >= up.cost;
+      const reqMet = !up.requires || shopUpgrades[up.requires].bought;
+
+      // Four explicit visual states: purchased / locked (prereq missing) /
+      // can't afford / buyable — styled in css (.shop-item.*).
+      let cls = 'shop-item';
+      if (up.bought) cls += ' purchased';
+      else if (!reqMet) cls += ' locked';
+      else if (!canAfford) cls += ' cant-afford';
+      div.className = cls;
+
+      const footer = up.bought
+        ? '<div class="shop-item-owned">✓ OWNED</div>'
+        : !reqMet
+          ? `<div class="shop-item-req">REQUIRES ${shopUpgrades[up.requires].name.toUpperCase()}</div>`
+          : `<div class="shop-item-cost">$${up.cost}</div>`;
+
+      div.innerHTML = `
+        <div class="shop-item-name">${up.name}</div>
+        <div class="shop-item-desc">${up.desc}</div>
+        ${footer}
+      `;
+
+      if (!up.bought && reqMet) {
+        div.addEventListener('click', () => {
+          if (playerMoney >= up.cost) {
+            playerMoney -= up.cost;
+            up.bought = true;
+            up.apply();
+
+            // Heal/ammo fill up to new max on upgrades
+            if (key.includes('health')) player.health = shopStats.maxHealth;
+            if (key.includes('mag')) player.clipAmmo = shopStats.clipSize;
+            if (key.includes('reserve')) player.reserveAmmo = shopStats.reserveMax;
+
+            div.classList.add('shop-flash');
+            playReload();
+            updateShopUI();
+            updateHUD();
+          } else {
+            div.classList.remove('shop-insufficient');
+            void div.offsetWidth; // trigger reflow
+            div.classList.add('shop-insufficient');
+          }
+        });
+      }
+      col.appendChild(div);
     }
-
-    div.innerHTML = `
-      <div class="shop-item-name">${up.name}</div>
-      <div class="shop-item-desc">${up.desc}</div>
-      ${up.bought ? '<div class="shop-item-owned">OWNED</div>' : `<div class="shop-item-cost">$${up.cost}</div>`}
-    `;
-
-    if (!up.bought && reqMet) {
-      div.addEventListener('click', () => {
-        if (playerMoney >= up.cost) {
-          playerMoney -= up.cost;
-          up.bought = true;
-          up.apply();
-          
-          // Heal/ammo fill up to new max on upgrades
-          if (key.includes('health')) player.health = shopStats.maxHealth;
-          if (key.includes('mag')) player.clipAmmo = shopStats.clipSize;
-          if (key.includes('reserve')) player.reserveAmmo = shopStats.reserveMax;
-
-          div.classList.add('shop-flash');
-          playReload();
-          updateShopUI();
-          updateHUD();
-        } else {
-          div.classList.remove('shop-insufficient');
-          void div.offsetWidth; // trigger reflow
-          div.classList.add('shop-insufficient');
-        }
-      });
-    }
-    grid.appendChild(div);
+    grid.appendChild(col);
   }
 }
 
-document.getElementById('btnShop').addEventListener('click', () => {
-  document.getElementById('pauseMenu').style.display = 'none';
-  document.getElementById('shopOverlay').style.display = 'flex';
-  updateShopUI();
-});
-
-document.getElementById('btnShopClose').addEventListener('click', () => {
-  document.getElementById('shopOverlay').style.display = 'none';
-  document.getElementById('pauseMenu').style.display = 'flex';
-});
+// Open/close go through the menu state machine (see openShop/closeShop) so
+// ESC, the buttons, and every forced-close path agree on one source of truth.
+document.getElementById('btnShop').addEventListener('click', () => openShop('pause'));
+document.getElementById('btnShopClose').addEventListener('click', closeShop);
 
 /* ═══════════════════════════════════════════
    INIT & LOOP
@@ -3850,6 +4160,7 @@ function animate() {
     updateWaterFX(dt); // pools floors: water UV drift + caustics pulse (no-op elsewhere)
     updateBulletTrails(dt);
     updateAmmoPickups(dt);
+    updateBalloons(dt); // Level Fun: balloon bob/sway (no-op elsewhere — empty list)
     updateHUD();
   }
 

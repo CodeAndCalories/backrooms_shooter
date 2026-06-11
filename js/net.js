@@ -1126,6 +1126,23 @@ onMessage('pickup_spawn', (d) => {
   if (netIsClient() && d && gameState === 'playing') createAmmoPickup(d.x, d.z, d.id);
 });
 
+/* ── balloon pop sync (Level Fun trap) ──
+   host --balloon_pop {id}--> clients. Balloons are placed by the seeded rng
+   with sequential ids (addDecorations party branch), so the id names the SAME
+   balloon on every machine — exactly the ammo-pickup id contract. The pop
+   itself, the partygoer spawns and the aggro are host-owned (popBalloon,
+   main.js); clients only mirror the removal + audio here. PROTOCOL ADDITION:
+   an old build ignores the message (balloon stays visible there) — both
+   players must be on the new build, which this batch already requires. */
+
+function netBroadcastBalloonPop(id) {
+  if (netState.role === 'host' && netState.peers.length > 0) sendToAll('balloon_pop', { id });
+}
+
+onMessage('balloon_pop', (d) => {
+  if (netIsClient() && d && gameState === 'playing') netOnBalloonPop(d.id); // main.js
+});
+
 /* ── minimap blip sources (host/solo: real lists; client: mirrors) ── */
 
 function netMinimapBlips() {

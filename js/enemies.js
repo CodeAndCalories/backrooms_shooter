@@ -537,9 +537,15 @@ function spawnEnemy(type, forcePos) {
     alive: true,
     deathTimer: 0,
     stunTimer: 0,
-    hitFlashTimer: 0
+    hitFlashTimer: 0,
+    // Balloon-trap aggro (main.js popBalloon): while aggroTimer > 0 this mob
+    // targets the popper (aggroPeer; null = the host player) instead of the
+    // nearest player. 0/null = normal targeting.
+    aggroTimer: 0,
+    aggroPeer: null
   };
   enemies.push(enemy);
+  return enemy; // popBalloon stamps aggro on trap spawns; other callers ignore it
 }
 
 /* ═══════════════════════════════════════════
@@ -1026,7 +1032,19 @@ function updateEnemies(dt) {
 
     if (e.stunTimer > 0) { e.stunTimer -= dt; continue; }
 
-    const tgt = netNearestOf(players, e.pos.x, e.pos.z);
+    // Balloon-trap aggro: locked onto the popper while the timer runs (cleared
+    // early the moment this mob lands a hit — see the attack block). Falls back
+    // to nearest if the popper is gone (downed/disconnected — netAllPlayers
+    // drops them from the list).
+    let tgt = null;
+    if (e.aggroTimer > 0) {
+      e.aggroTimer -= dt;
+      for (const pl of players) {
+        if ((pl.conn ? pl.conn.peer : null) === e.aggroPeer) { tgt = pl; break; }
+      }
+      if (!tgt) e.aggroTimer = 0; // target gone — drop the grudge
+    }
+    if (!tgt) tgt = netNearestOf(players, e.pos.x, e.pos.z);
     const dx = tgt.x - e.pos.x;
     const dz = tgt.z - e.pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
@@ -1114,6 +1132,7 @@ function updateEnemies(dt) {
       if (e.attackTimer <= 0) {
         e.attackTimer = e.attackCooldown;
         netDealDamage(tgt, e.damage, e.pos); // hits whichever player it's chasing
+        e.aggroTimer = 0; // balloon-trap grudge is satisfied once it lands a hit
       }
     } else {
       e.attackTimer = Math.max(0, e.attackTimer - dt * 0.5);

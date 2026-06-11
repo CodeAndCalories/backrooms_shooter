@@ -332,6 +332,55 @@ function playBossRoar() {
   });
 }
 
+// Level Fun balloon trap: the pop — an instant high noise SNAP (latex burst)
+// plus a tiny square-wave "blip" of escaping air. Short and loud-ish.
+function playBalloonPop() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    const sr = audioCtx.sampleRate;
+    // 1. SNAP — white noise, ~6ms decay, highpassed so it cracks
+    const len = sr * 0.07;
+    const buf = audioCtx.createBuffer(1, len, sr);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.006));
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800; hp.Q.value = 0.7;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(1.4, t);
+    g.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    src.connect(hp); hp.connect(g); g.connect(sfxGain); src.start(t);
+    // 2. BLIP — fast 300→80Hz square pip (the rubber recoiling)
+    const o = audioCtx.createOscillator(); o.type = 'square';
+    o.frequency.setValueAtTime(300, t);
+    o.frequency.exponentialRampToValueAtTime(80, t + 0.05);
+    const og = audioCtx.createGain();
+    og.gain.setValueAtTime(0.22, t);
+    og.gain.exponentialRampToValueAtTime(0.01, t + 0.055);
+    o.connect(og); og.connect(sfxGain);
+    o.start(t); o.stop(t + 0.06);
+  });
+}
+
+// Level Fun balloon trap: the party answers. Same synth recipe as playBossRoar
+// pitched DOWN (60→38Hz base, slower modulation, longer tail) and lowpassed —
+// reads as a big angry thing growling rather than the boss's full roar.
+function playPartyGrowl() {
+  playSound(() => {
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 1.8, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      const t = i / audioCtx.sampleRate;
+      d[i] = Math.sin(t * 38 * (1 + Math.sin(t * 3) * 0.6)) * Math.exp(-t * 0.9) * 0.7;
+      d[i] += (Math.random() * 2 - 1) * Math.exp(-t * 1.2) * 0.35;
+      d[i] += Math.sin(t * 19) * Math.exp(-t * 0.7) * 0.35;
+    }
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
+    const g = audioCtx.createGain(); g.gain.value = 0.55;
+    src.connect(lp); lp.connect(g); g.connect(sfxGain); src.start();
+  });
+}
+
 function playProjectileThrow() {
   playSound(() => {
     const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.25, audioCtx.sampleRate);
@@ -501,64 +550,132 @@ function updateAmbient(dt) {
 }
 
 /* ═══════════════════════════════════════════
-   LEVEL FUN MUSIC (floor 5 only)
-   A slow, detuned, off-key music-box melody over a low detuned drone — a creepy
-   birthday-party loop. Everything routes through ambientGain so the Ambient volume
-   slider controls it. Started/stopped by updateFloorMusic() on every floor change.
+   LEVEL FUN MUSIC (theme id 5)
+   Toy-room-gone-wrong, three layers, all procedural through ambientGain:
+   1. WARPED DRONE — two detuned lows beating against each other, with slow
+      LFOs bending the filter and "tape-warbling" the pitch.
+   2. BROKEN MUSIC BOX — a slow minor lullaby, every note slightly flat; some
+      notes come out WRONG (semitone slip, rarely a tritone), like the
+      mechanism is damaged.
+   3. DISTANT PARTY — sparse, muffled party-horn bleats / laughter-like stabs
+      at long random intervals. Timer-based Math.random ON PURPOSE: this is
+      per-machine ambience, not world/spawn state — the seeded-rng constraint
+      doesn't apply, and co-op players hearing different far-off laughter is
+      a feature.
+   Started/stopped by updateFloorMusic() on every floor change.
    ═══════════════════════════════════════════ */
-let levelFunMusic = null; // { droneA, droneB, seqTimer } while playing, else null
+let levelFunMusic = null; // { nodes:[osc...], seqTimer, stabId } while playing, else null
 
 function startLevelFunMusic() {
   if (!audioCtx || levelFunMusic) return; // no context, or already playing
   const out = ambientGain;                // ← routes through the Ambient bus / slider
+  const nodes = [];                       // every long-lived oscillator, for teardown
 
-  // Low drone: two slightly-detuned oscillators through a lowpass. The detune makes them
-  // beat slowly against each other for an uneasy, wavering floor under the melody.
+  // ── 1. WARPED DRONE ──
   const droneA = audioCtx.createOscillator();
   const droneB = audioCtx.createOscillator();
   droneA.type = 'sine';     droneA.frequency.value = 55;          // ~A1
-  droneB.type = 'triangle'; droneB.frequency.value = 55 * 1.006;  // detuned → slow beat
+  droneB.type = 'triangle'; droneB.frequency.value = 55 * 1.007;  // detuned → slow beat
   const droneFilter = audioCtx.createBiquadFilter();
-  droneFilter.type = 'lowpass'; droneFilter.frequency.value = 200;
-  const droneGain = audioCtx.createGain(); droneGain.gain.value = 0.10;
+  droneFilter.type = 'lowpass'; droneFilter.frequency.value = 170;
+  const droneGain = audioCtx.createGain(); droneGain.gain.value = 0.09;
+  // ~14s filter sweep: the room slowly "breathes"
+  const lfoFilter = audioCtx.createOscillator(); lfoFilter.frequency.value = 0.07;
+  const lfoFilterAmt = audioCtx.createGain(); lfoFilterAmt.gain.value = 55;
+  lfoFilter.connect(lfoFilterAmt); lfoFilterAmt.connect(droneFilter.frequency);
+  // ~5s pitch warble on droneB: warped-record wobble
+  const lfoPitch = audioCtx.createOscillator(); lfoPitch.frequency.value = 0.21;
+  const lfoPitchAmt = audioCtx.createGain(); lfoPitchAmt.gain.value = 1.6; // Hz of wobble
+  lfoPitch.connect(lfoPitchAmt); lfoPitchAmt.connect(droneB.frequency);
   droneA.connect(droneFilter); droneB.connect(droneFilter);
   droneFilter.connect(droneGain); droneGain.connect(out);
-  droneA.start(); droneB.start();
+  droneA.start(); droneB.start(); lfoFilter.start(); lfoPitch.start();
+  nodes.push(droneA, droneB, lfoFilter, lfoPitch);
 
-  // Off-key music-box motif (Hz). 0 = a rest. Deliberately uneasy little tune.
-  const melody = [659.25, 622.25, 523.25, 466.16, 523.25, 622.25, 587.33, 0, 440.0, 523.25, 493.88, 0];
-  const noteEvery = 520; // ms between notes — slow, like a winding-down box
+  // ── 2. BROKEN MUSIC BOX ──
+  // A-minor lullaby phrase (Hz), 0 = rest. Slower than the old loop — a box
+  // winding down — with rests that leave room for the drone underneath.
+  const melody = [440.00, 523.25, 659.25, 523.25, 698.46, 659.25, 0, 523.25,
+                  622.25, 587.33, 440.00, 0, 415.30, 440.00, 0, 0];
+  const noteEvery = 680; // ms between steps
   let step = 0;
 
   const playNote = (freq) => {
     if (!freq) return;                       // rest
     const t = audioCtx.currentTime;
-    const detune = -12 - Math.random() * 28; // cents — always a touch FLAT, and wavering
-    const o1 = audioCtx.createOscillator(); o1.type = 'triangle'; // music-box-ish body
+    // WRONG-note roll: 6% a tritone (really wrong), 10% a semitone slip.
+    let f = freq;
+    const roll = Math.random();
+    if (roll < 0.06) f *= Math.pow(2, 6 / 12);
+    else if (roll < 0.16) f *= Math.pow(2, (Math.random() < 0.5 ? -1 : 1) / 12);
+    const detune = -8 - Math.random() * 24;  // cents — always a touch FLAT, and wavering
+    const o1 = audioCtx.createOscillator(); o1.type = 'triangle'; // music-box body
     const o2 = audioCtx.createOscillator(); o2.type = 'sine';     // octave-up shimmer
-    o1.frequency.value = freq;     o1.detune.value = detune;
-    o2.frequency.value = freq * 2; o2.detune.value = detune;
+    o1.frequency.value = f;     o1.detune.value = detune;
+    o2.frequency.value = f * 2; o2.detune.value = detune;
     const g = audioCtx.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.16, t + 0.005); // fast pluck attack
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9); // bell-like decay
-    const g2 = audioCtx.createGain(); g2.gain.value = 0.4; // shimmer quieter than fundamental
+    g.gain.exponentialRampToValueAtTime(0.15, t + 0.005); // fast pluck attack
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 1.3); // long bell decay
+    const g2 = audioCtx.createGain(); g2.gain.value = 0.35; // shimmer quieter
     o1.connect(g); o2.connect(g2); g2.connect(g); g.connect(out);
     o1.start(t); o2.start(t);
-    o1.stop(t + 1.0); o2.stop(t + 1.0);
+    o1.stop(t + 1.4); o2.stop(t + 1.4);
   };
 
   const seqTimer = setInterval(() => { playNote(melody[step % melody.length]); step++; }, noteEvery);
-  playNote(melody[0]); step = 1; // first note now, so there's no silent gap before the loop
+  playNote(melody[0]); step = 1; // first note now, so there's no silent gap
 
-  levelFunMusic = { droneA, droneB, seqTimer };
+  // ── 3. DISTANT PARTY ──
+  // A sad, bending party horn: lowpassed sawtooth sliding flat over ~0.8s.
+  const hornStab = () => {
+    const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(233, t);
+    o.frequency.linearRampToValueAtTime(176, t + 0.7); // deflating bend
+    const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 480; bp.Q.value = 1.2;
+    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; // heard through walls
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.05, t + 0.12);    // swell in
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.85);
+    o.connect(bp); bp.connect(lp); lp.connect(g); g.connect(out);
+    o.start(t); o.stop(t + 0.9);
+  };
+  // Laughter-like stab: 5 short descending muffled blips — "ha-ha-ha-ha-ha".
+  const laughStab = () => {
+    for (let i = 0; i < 5; i++) {
+      const t = audioCtx.currentTime + i * 0.10;
+      const o = audioCtx.createOscillator(); o.type = 'square';
+      o.frequency.setValueAtTime(540 - i * 45, t);
+      o.frequency.linearRampToValueAtTime(480 - i * 45, t + 0.07);
+      const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 800;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.028, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+      o.connect(lp); lp.connect(g); g.connect(out);
+      o.start(t); o.stop(t + 0.1);
+    }
+  };
+  const scheduleStab = () => {
+    if (!levelFunMusic) return; // stopped while a stab was pending
+    levelFunMusic.stabId = setTimeout(() => {
+      if (!levelFunMusic) return;
+      (Math.random() < 0.5 ? hornStab : laughStab)();
+      scheduleStab();
+    }, 12000 + Math.random() * 23000); // every 12-35s — sparse, never a rhythm
+  };
+
+  levelFunMusic = { nodes, seqTimer, stabId: null };
+  scheduleStab();
 }
 
 function stopLevelFunMusic() {
   if (!levelFunMusic) return;
   clearInterval(levelFunMusic.seqTimer);
-  try { levelFunMusic.droneA.stop(); } catch (e) {}
-  try { levelFunMusic.droneB.stop(); } catch (e) {}
+  if (levelFunMusic.stabId) clearTimeout(levelFunMusic.stabId);
+  for (const n of levelFunMusic.nodes) { try { n.stop(); } catch (e) {} }
   levelFunMusic = null;
 }
 
