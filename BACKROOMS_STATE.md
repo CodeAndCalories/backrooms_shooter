@@ -24,6 +24,79 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **Visual fix queue 2-4 landed (June 11, UNPLAYED) — texture-creation only, zero
+  runtime cost, PROG stable (no new materials/lights/shader families):**
+  - **Anisotropy:** `MAX_ANISO = min(8, getMaxAnisotropy())` set once in init,
+    applied in `texMarkSRGB` so every world canvas texture (wall/floor/ceiling/
+    water/caustics) is created with it. Sampler state, not a program-cache key —
+    no recompile, no mid-game mutation. Sharpens floors at grazing angles.
+  - **Floor texel density (per-cell):** floor texture `repeat` dropped 2,2→1,1;
+    per-cell tiling is now baked into the MESH UVs — the main slab scales its
+    0..1 plane UVs to 0..gw/0..gh, and the pools deck + basin quads use per-cell
+    UVs ([x,y] not [x/gw,y/gh]). One floor tile per CELL now, matching the
+    per-face wall tiles instead of one 256px tile stretched across the slab.
+  - **Ceiling 128→256px** (resolution bump; tiling unchanged at repeat 2,2).
+  - **Baked fake AO:** `bakeWallAO` darkens the top ~12% (ceiling contact) and
+    bottom ~12% (floor contact, a touch darker) of each wall tile via vertical
+    gradients; `bakeFloorVignette` adds a soft symmetric corner vignette to each
+    floor tile. Both drawn into the canvas at creation (cached per theme →
+    literally zero runtime cost), symmetric so textures still TILE seamlessly.
+    Grounds surfaces / adds depth with no lights.
+  - All sRGB-tagged (unchanged), cached per theme.id (shared, themeCached). node
+    --check clean; full suite green; no new `new THREE.*Material`/light/program.
+  - **Needs a browser session — what to look at:**
+    - **Lobby (0)** + **Habitable Zone (1):** floor sharpness at distance
+      (anisotropy) and the wall top/bottom AO grounding — the clearest "finished"
+      read; ceiling panel grid should look crisper.
+    - **The Poolrooms (3)** + **Dark Pools (16):** the per-cell deck/basin floor
+      tiling + AO on the basin lip walls; confirm the water/caustics still align
+      and nothing shimmers wrong (deck UVs changed).
+    - **The Hospital (10)** ('tile' floor) + **Level Fun (5)** ('party' floor):
+      ⚠ per-cell density makes their GRID patterns much finer (≈8 sub-tiles per
+      cell now). Realistic (small hospital tiles) but check it isn't too busy —
+      if so, the floorType grid spacing in createFloorTexture is the knob.
+    - Any floor: PROG counter on the dev HUD (?dev=1) must stay flat across floor
+      transitions (proves no shader recompile from the texture/UV changes).
+- **Playtest-fix batch landed (June 11, UNPLAYED):**
+  - **ESC from Black Market → straight to gameplay** (not back to the pause menu).
+    `closeShop` now always `resumeGame()`s — fast mid-fight escape, same in co-op.
+    shopReturnTo is vestigial. Updated tools/test_esc_shop.js (8/8; step 4 now
+    expects resume-to-play, the never-both-overlays invariant still holds).
+  - **Solo kill-gate:** `netExitGateOpen` kills branch now applies to SOLO too
+    (was co-op only) — clear the floor's killTarget before the exit opens (same
+    `waveSizeFor` threshold, player count 1). Boss + item floors keep their own
+    gates. Goal HUD now shows in solo for kills floors. test_artifacts updated.
+  - **Goal HUD big + centered:** the objective counter is now the most readable
+    thing on screen — ~2em bold "ELIMINATIONS 8/20" / "RELICS x/N", wider glowing
+    progress bar, prominent green "EXIT OPEN" pulse when cleared (css only).
+  - **Exit = glowing DOOR:** replaced the floor disc + beacon with a doorway set
+    into the nearest wall cell — dark frame (posts/lintel/threshold) + a brilliant
+    WHITE emissive panel filling the opening, and the EXISTING exit-light slot
+    recolored white pouring light into the room. `buildExitDoor(ex,ey,radius)`
+    (main.js) is shared by the normal exit AND the post-boss exit (createBossExit).
+    Finds an adjacent wall (pools → dry-deck wall; falls back to freestanding for
+    open/field archetypes). **No new lights** (reuses the slot, intensity/color/
+    position only); materials are MeshStandardMaterial no-map FrontSide — the
+    ammoPickupMat-pinned family, **no new shader program**. updateLights pulses
+    the panel (no spin).
+  - **Enemy AI — roam vs hunt + wall avoidance (host-authoritative):**
+    - **Wall-sticking fixed:** `steerAround` whisker steering — if the heading
+      runs into a wall just ahead, it rotates to the nearest open heading so mobs
+      ROUND corners instead of piling on the wall (the axis-slide collision still
+      backs it up). Cheap: 1 grid lookup when clear, ≤7 when blocked.
+    - **Behavior variety:** each non-danger spawn rolls ROAM (~42%) or HUNT.
+      Roamers wander at 0.5× speed until they NOTICE the player — proximity
+      (≤3 cells) or line-of-sight within 8 cells (throttled `raycastWall` LOS) —
+      then hunt for 5s after losing them. Danger variants + trap spawns always
+      hunt. A floor now has wandering AND charging mobs, not an all-rush.
+    - Host-only sim, mirrored to clients via the existing snapshot — NO protocol
+      change. Math.random fine (combat sim isn't seeded; clients mirror positions).
+  - Headless: tools/test_ai.js (isOpenCell, steerAround clear-vs-rounds-wall,
+    behavior constants/mix). Full suite green (ai, esc_shop 8/8, artifacts,
+    weapons, scares, balloons, boss_scaling, lobby, sim 4200/4200).
+  - **Needs a browser/co-op session:** ESC-escape feel, solo kill-gate pacing,
+    goal-HUD legibility, the exit door across all archetypes (incl. pools dry-deck
+    + boss arena), and the roam/hunt mix + corner-rounding actually looking smart.
 - **Lore objectives / item-gate system landed (June 11, UNPLAYED):**
   - **Gate condition is now per-theme configurable** (`theme.gate`): 'kills'
     (default, co-op only — unchanged), 'item' (collect N artifacts), 'boss'
@@ -215,15 +288,13 @@ All four are zero/near-zero runtime cost by design. Do IN ORDER with the gate.
    ⚠ **PLAYTEST GATE:** this shifts all 17 palettes at once. Walk Lobby, Poolrooms,
    Dark Pools after. If too hot/saturated, nudge toneMappingExposure (0.85 → ~0.78)
    before touching individual palette values.
-2. **Anisotropy** — currently 1 everywhere; floors smear at grazing angles. Set from
-   `renderer.capabilities.getMaxAnisotropy()` (cap 8) on wall/floor/ceiling/water
-   textures. Trivial, no visual-direction change.
-3. **Floor texel density** — one 256px tile stretched repeat(2,2) across the entire
-   level slab vs per-face wall tiles. Fix: repeat per cell; floor canvas must tile
-   seamlessly. Ceiling is only 128px — bump to 256 while in there.
-4. **Baked fake AO** — darken top/bottom ~10% of wall tiles + corner vignette on floor
-   tiles, drawn into the canvas. Zero runtime cost, biggest "finished" feel.
-   → Playtest after 2-4 as a batch.
+2. ~~**Anisotropy**~~ DONE June 11 (unplayed) — MAX_ANISO via texMarkSRGB.
+3. ~~**Floor texel density**~~ DONE June 11 (unplayed) — per-cell mesh UVs (slab +
+   pools deck), floorTex repeat 1,1, ceiling bumped to 256. See CURRENT STATE.
+4. ~~**Baked fake AO**~~ DONE June 11 (unplayed) — wall top/bottom bands + floor
+   corner vignette baked at creation. See CURRENT STATE.
+→ **All four visual-queue items now done (sRGB was already in).** Playtest 2-4 as
+  a batch — see the "what to look at" list in CURRENT STATE.
 
 Parked: bloom/EffectComposer (new render pipeline, fights program keepalive; fake
 additive glow sprites on emissives gets 80% later).
@@ -254,7 +325,8 @@ objective variety, or circling back to the parked VISUAL FIX QUEUE (sRGB pass et
 ## KNOWN AUDIT FACTS (reference)
 - Light slots (32 point + 1 spot + 1 ambient): ambient 1, ceiling ≤25 (+ budget
   pads to exactly 25 — was 26, dropped 1 for the flare), boss glow 1, boss
-  projectiles 3, exit beacon 1, muzzle flash 1, FLARE 1 (= 32 point); flashlight
+  projectiles 3, exit-door light 1 (was the beacon — same slot), muzzle flash 1,
+  FLARE 1 (= 32 point); flashlight
   is the 1 spot
 - Textures: walls/floors 256px, ceiling 128px, mob sprites 256px Nearest-filtered
 - Full per-theme palette table lives in LEVEL_THEMES (main.js:40-407)

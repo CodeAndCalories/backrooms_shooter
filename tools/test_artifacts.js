@@ -163,9 +163,10 @@ if (gateOpen(itemTheme, 'solo', { total: 3, collected: 1 })) fail('item gate ope
 if (!gateOpen(itemTheme, 'solo', { total: 3, collected: 3 })) fail('item gate not open at 3/3 (solo)'); else ok('solo item gate OPEN at 3/3');
 if (gateOpen(itemTheme, 'host', { total: 3, collected: 2 })) fail('item gate open with 2/3 (co-op)'); else ok('co-op item gate CLOSED at 2/3');
 if (!gateOpen(itemTheme, 'host', { total: 3, collected: 3 })) fail('item gate not open at 3/3 (co-op)'); else ok('co-op item gate OPEN at 3/3');
-// kills gate: co-op only
+// kills gate: now applies to SOLO as well as co-op
 const killTheme = { gate: 'kills', isBoss: false };
-if (!gateOpen(killTheme, 'solo', { killTarget: 5, floorKills: 0 })) fail('solo kills gate should always be open'); else ok('solo kills gate always OPEN');
+if (gateOpen(killTheme, 'solo', { killTarget: 5, floorKills: 0 })) fail('solo kills gate open at 0/5'); else ok('solo kills gate CLOSED at 0/5');
+if (!gateOpen(killTheme, 'solo', { killTarget: 5, floorKills: 5 })) fail('solo kills gate not open at 5/5'); else ok('solo kills gate OPEN at 5/5');
 if (gateOpen(killTheme, 'host', { killTarget: 5, floorKills: 2 })) fail('co-op kills gate open at 2/5'); else ok('co-op kills gate CLOSED at 2/5');
 if (!gateOpen(killTheme, 'host', { killTarget: 5, floorKills: 5 })) fail('co-op kills gate not open at 5/5'); else ok('co-op kills gate OPEN at 5/5');
 // boss: always open (death spawns the exit)

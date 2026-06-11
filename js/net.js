@@ -1109,8 +1109,9 @@ function netExitGateOpen() {
   // ITEM gate: collect every artifact (applies in SOLO and co-op — the lore
   // objective is the gate). The count is shared/host-validated (see main.js).
   if ((theme.gate || 'kills') === 'item') return artifactsTotal > 0 ? artifactsCollected >= artifactsTotal : true;
-  // KILLS gate: co-op only (solo can leave freely).
-  if (netState.role === 'solo') return true;
+  // KILLS gate: now applies to SOLO as well as co-op — clear the floor's kill
+  // target before the exit opens (same waveSizeFor threshold; player count 1
+  // just yields a smaller number). floorKills counts the solo player's kills.
   return floorKills >= killTarget;
 }
 

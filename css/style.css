@@ -69,12 +69,12 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .coop-start-btn.all-ready{color:#0a0a06;background:#d4c36a;border-color:#d4c36a;font-weight:bold;}
 
 /* MP party goal — top center: ELIMINATIONS n/m → EXIT OPEN (pulsing) */
-.goal-hud{position:absolute;top:14px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none;}
-.goal-hud-text{color:#e8dca8;font-size:1.15em;letter-spacing:5px;text-transform:uppercase;text-shadow:0 0 14px rgba(212,195,106,0.5);}
-.goal-hud-bar{width:240px;height:4px;margin:6px auto 0;background:rgba(255,255,255,0.12);border:1px solid #d4c36a33;}
-.goal-hud-fill{height:100%;width:0%;background:linear-gradient(90deg,#d4c36a,#ffe892);transition:width 0.25s;}
-.goal-hud.goal-open .goal-hud-text{color:#5fff9c;text-shadow:0 0 18px rgba(60,255,140,0.7);animation:goalPulse 1.2s ease-in-out infinite;}
-.goal-hud.goal-open .goal-hud-fill{background:#5fff9c;}
+.goal-hud{position:absolute;top:18px;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none;padding:6px 22px 10px;background:rgba(0,0,0,0.32);border-radius:6px;}
+.goal-hud-text{color:#ffe892;font-size:2.05em;font-weight:800;letter-spacing:4px;text-transform:uppercase;text-shadow:0 0 18px rgba(212,195,106,0.65),0 2px 4px rgba(0,0,0,0.8);line-height:1.05;}
+.goal-hud-bar{width:360px;max-width:60vw;height:8px;margin:9px auto 0;background:rgba(255,255,255,0.14);border:1px solid #d4c36a44;border-radius:4px;overflow:hidden;}
+.goal-hud-fill{height:100%;width:0%;background:linear-gradient(90deg,#d4c36a,#ffe892);transition:width 0.25s;box-shadow:0 0 10px rgba(255,232,146,0.6);}
+.goal-hud.goal-open .goal-hud-text{color:#6fffa6;font-size:2.4em;text-shadow:0 0 24px rgba(60,255,140,0.85),0 2px 4px rgba(0,0,0,0.8);animation:goalPulse 1.2s ease-in-out infinite;}
+.goal-hud.goal-open .goal-hud-fill{background:#6fffa6;box-shadow:0 0 12px rgba(60,255,140,0.8);}
 @keyframes goalPulse{0%,100%{opacity:1;}50%{opacity:0.45;}}
 
 /* CO-OP down/revive banner (js/net.js toggles + fills the text) */

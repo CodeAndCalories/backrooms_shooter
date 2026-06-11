@@ -542,7 +542,18 @@ function spawnEnemy(type, forcePos) {
     // targets the popper (aggroPeer; null = the host player) instead of the
     // nearest player. 0/null = normal targeting.
     aggroTimer: 0,
-    aggroPeer: null
+    aggroPeer: null,
+    // BEHAVIOR (host-authoritative; clients mirror positions). 'hunt' mobs pursue
+    // directly; 'roam' mobs wander/patrol until they notice the player (proximity
+    // or line-of-sight), then hunt for a while. Danger variants always hunt — the
+    // mix gives a floor wandering AND charging mobs, not an all-rush. forcePos
+    // (balloon-trap / explicit) spawns hunt; their aggro overrides anyway.
+    behavior: (type.indexOf('danger_') === 0 || forcePos) ? 'hunt' : (Math.random() < 0.42 ? 'roam' : 'hunt'),
+    state: 'hunt',                       // resolved every frame in updateEnemies
+    roamDir: new THREE.Vector3((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2),
+    roamTimer: 0,                        // 0 → pick a fresh wander heading next frame
+    huntMemory: 0,                       // >0 = still hunting after a recent detection
+    losTimer: Math.random() * 0.3        // throttles line-of-sight checks (staggered)
   };
   enemies.push(enemy);
   return enemy; // popBalloon stamps aggro on trap spawns; other callers ignore it
@@ -884,26 +895,10 @@ function damageBoss(amount) {
 function createBossExit() {
   const gh = mazeGrid.length, gw = mazeGrid[0].length;
   const ex = Math.floor(gw / 2), ey = gh - 2;
-  exitZone = { x: ex * CELL + CELL / 2, z: ey * CELL + CELL / 2, radius: CELL * 1.5 };
-
-  const exitColor = 0x44ff88;
-  const exitGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.06, 20);
-  const exitMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.8, transparent: true, opacity: 0.6 });
-  exitMesh = new THREE.Mesh(exitGeo, exitMat);
-  exitMesh.position.set(exitZone.x, 0.06, exitZone.z);
-  scene.add(exitMesh);
-
-  // Brighten the persistent exit-light slot buildMazeScene parked at intensity 0
-  // on this boss floor — reusing it keeps the scene's point-light count fixed.
-  exitLight.intensity = 1.2;
-  exitLight.distance = CELL * 6;
-  exitLight.position.set(exitZone.x, 2, exitZone.z);
-
-  const beaconGeo = new THREE.CylinderGeometry(0.08, 0.08, WALL_H, 8);
-  const beaconMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.6, transparent: true, opacity: 0.4 });
-  const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-  beacon.position.set(exitZone.x, WALL_H / 2, exitZone.z);
-  scene.add(beacon);
+  // Same glowing doorway as the normal exit — set against the rear arena wall
+  // (ey = gh-2 borders the gh-1 wall). Reuses the parked exit-light slot, so the
+  // scene's point-light count stays fixed.
+  buildExitDoor(ex, ey, CELL * 1.5); // main.js — sets exitZone/exitMesh/exitLight
 
   // MP: tell clients the boss exit exists so they build it too (same zone +
   // visuals via this same function) — then ANY player touching it advances the
@@ -1009,6 +1004,47 @@ function updateAntiLinger(dt) {
 /* ═══════════════════════════════════════════
    ENEMY AI / UPDATE
    ═══════════════════════════════════════════ */
+/* ── ENEMY STEERING / BEHAVIOR helpers (host-authoritative; cheap, no pathfinder) ── */
+const HUNT_NEAR = CELL * 3.0;    // a roamer this close NOTICES the player (hears them)
+const HUNT_VISION = CELL * 8.0;  // ...or sees them down a clear corridor (LOS)
+const HUNT_MEMORY = 5.0;         // keeps hunting this long after losing sight
+const ROAM_SPEED_MULT = 0.5;     // roamers wander at half speed
+
+// Is this WORLD position inside an open (walkable) grid cell? floor(1)/pool(2).
+function isOpenCell(wx, wz) {
+  const cx = Math.floor(wx / CELL), cy = Math.floor(wz / CELL);
+  const row = mazeGrid[cy];
+  return !!(row && (row[cx] === 1 || row[cx] === 2));
+}
+
+// "Whisker" steering: if the desired heading runs into a wall just ahead, rotate
+// it to the nearest open heading so the mob ROUNDS the corner toward its goal
+// instead of pressing into the wall. Returns a reused scratch dir (no alloc).
+const _steer = { x: 0, z: 0 };
+const _whiskers = [0.7, -0.7, 1.4, -1.4, 2.2, -2.2];
+function steerAround(px, pz, mx, mz) {
+  const LOOK = CELL * 0.85;
+  if (isOpenCell(px + mx * LOOK, pz + mz * LOOK)) { _steer.x = mx; _steer.z = mz; return _steer; }
+  for (const a of _whiskers) {
+    const c = Math.cos(a), s = Math.sin(a);
+    const nx = mx * c - mz * s, nz = mx * s + mz * c;
+    if (isOpenCell(px + nx * LOOK, pz + nz * LOOK)) { _steer.x = nx; _steer.z = nz; return _steer; }
+  }
+  _steer.x = mx; _steer.z = mz; return _steer; // boxed in — the slide collision handles it
+}
+
+// Clear line of sight from a mob to a target (no wall between)? Uses main.js's
+// grid DDA wall raycast. Throttled by the caller, so the cost is negligible.
+const _losDir = new THREE.Vector3();
+function mobHasLineOfSight(pos, tgt, dist) {
+  if (typeof raycastWall !== 'function') return false;
+  _losDir.set(tgt.x - pos.x, 0, tgt.z - pos.z);
+  if (_losDir.lengthSq() < 1e-4) return true;
+  _losDir.normalize();
+  const wall = raycastWall(pos, _losDir, dist);
+  return !wall || wall.dist >= dist - 0.2; // nothing solid before the target
+}
+
 function updateEnemies(dt) {
   // MP: every enemy chases/attacks its NEAREST player — host + each connected
   // client (positions from the pos stream). Solo: a 1-entry list (the local
@@ -1072,25 +1108,63 @@ function updateEnemies(dt) {
     const dz = tgt.z - e.pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
 
-    let moveX = 0, moveZ = 0;
-    if (dist > 0.3) { moveX = dx / dist; moveZ = dz / dist; }
-
-    if (e.erratic) {
-      e.erraticTimer -= dt;
-      if (e.erraticTimer <= 0) {
-        e.erraticTimer = 0.4 + Math.random() * 1.2;
-        e.erraticDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize();
+    // ── BEHAVIOR: resolve HUNT vs ROAM for this frame ──
+    let hunting;
+    if (e.aggroTimer > 0 || e.behavior === 'hunt') {
+      hunting = true; // balloon-trap grudge, or a pure hunter → always pursue
+    } else {
+      // Roamer: notice the player by proximity (always) or by line-of-sight
+      // within vision range (throttled). Detection refreshes a hunt "memory" so
+      // it keeps chasing briefly after losing you, then drifts back to roaming.
+      let detected = dist < HUNT_NEAR;
+      e.losTimer -= dt;
+      if (!detected && dist < HUNT_VISION && e.losTimer <= 0) {
+        e.losTimer = 0.3;
+        detected = mobHasLineOfSight(e.pos, tgt, dist);
       }
-      moveX = moveX * 0.55 + e.erraticDir.x * 0.45;
-      moveZ = moveZ * 0.55 + e.erraticDir.z * 0.45;
-      const m = Math.sqrt(moveX * moveX + moveZ * moveZ);
-      if (m > 0) { moveX /= m; moveZ /= m; }
+      if (detected) e.huntMemory = HUNT_MEMORY;
+      else if (e.huntMemory > 0) e.huntMemory -= dt;
+      hunting = e.huntMemory > 0;
     }
+    e.state = hunting ? 'hunt' : 'roam';
+
+    let moveX = 0, moveZ = 0, moveScale = 1;
+    if (hunting) {
+      if (dist > 0.3) { moveX = dx / dist; moveZ = dz / dist; }
+      if (e.erratic) {
+        e.erraticTimer -= dt;
+        if (e.erraticTimer <= 0) {
+          e.erraticTimer = 0.4 + Math.random() * 1.2;
+          e.erraticDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize();
+        }
+        moveX = moveX * 0.55 + e.erraticDir.x * 0.45;
+        moveZ = moveZ * 0.55 + e.erraticDir.z * 0.45;
+        const m = Math.sqrt(moveX * moveX + moveZ * moveZ);
+        if (m > 0) { moveX /= m; moveZ /= m; }
+      }
+    } else {
+      // ROAM: hold a wander heading; repick when it expires OR dead-ends a wall.
+      e.roamTimer -= dt;
+      const aheadOpen = isOpenCell(e.pos.x + e.roamDir.x * CELL * 0.85, e.pos.z + e.roamDir.z * CELL * 0.85);
+      if (e.roamTimer <= 0 || !aheadOpen) {
+        e.roamTimer = 2 + Math.random() * 3;
+        e.roamDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2);
+        const rl = Math.hypot(e.roamDir.x, e.roamDir.z) || 1;
+        e.roamDir.x /= rl; e.roamDir.z /= rl;
+      }
+      moveX = e.roamDir.x; moveZ = e.roamDir.z;
+      moveScale = ROAM_SPEED_MULT;
+    }
+
+    // Wall-aware steering: round corners toward the heading instead of jamming
+    // into the wall (fixes mobs piling up on walls).
+    const steer = steerAround(e.pos.x, e.pos.z, moveX, moveZ);
+    moveX = steer.x; moveZ = steer.z;
 
     // Pools: mobs WADE through basins — slowed, and sunk below deck level
     // (visual offset applied to the mesh below; raycastEnemies matches it).
     const wadeY = mobGroundOffset(e.pos.x, e.pos.z);
-    const spd = e.speed * (wadeY < 0 ? 0.6 : 1) * dt;
+    const spd = e.speed * moveScale * (wadeY < 0 ? 0.6 : 1) * dt;
     const eRad = 0.3;
     let newX = e.pos.x + moveX * spd;
     let newZ = e.pos.z + moveZ * spd;
@@ -1136,7 +1210,10 @@ function updateEnemies(dt) {
       // corrects models that default to facing away. Sprites auto-face the camera, so
       // they're skipped (isModel is only set on real loaded models).
       if (e.mesh.userData.isModel) {
-        e.mesh.rotation.y = Math.atan2(dx, dz) + (e.mesh.userData.faceOffset || 0);
+        // Hunters face the player; roamers face the way they're wandering.
+        const faceX = (e.state === 'hunt') ? dx : moveX;
+        const faceZ = (e.state === 'hunt') ? dz : moveZ;
+        e.mesh.rotation.y = Math.atan2(faceX, faceZ) + (e.mesh.userData.faceOffset || 0);
       }
     }
 

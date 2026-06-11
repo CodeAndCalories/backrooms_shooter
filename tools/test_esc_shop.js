@@ -4,7 +4,7 @@
 // stub DOM, and walks every transition the spec demands:
 //   - playing + ESC → paused (menu up)
 //   - paused + ESC → playing (resume path)
-//   - market open + ESC → market closed, back to where it was opened from
+//   - market open + ESC → market closed, STRAIGHT back to gameplay (fast escape)
 //   - pause menu and black market NEVER visible simultaneously (checked after
 //     EVERY step)
 //   - resumeGame refuses while the market is up (no resuming under the shop)
@@ -86,13 +86,9 @@ api.pressEsc();
 api.openShop('pause');
 expect('market opened from pause → pause hidden, market up', { gameState: 'paused', pause: 'none', shop: 'flex', shopOpen: true });
 
-// ESC with market open → back to PAUSE MENU (not resume!)
+// ESC with market open → STRAIGHT back to gameplay (fast escape, NOT the pause menu)
 api.pressEsc();
-expect('market + ESC → market closed, pause menu restored', { gameState: 'paused', pause: 'flex', shop: 'none', shopOpen: false });
-
-// ESC again → resume
-api.pressEsc();
-expect('paused + ESC → playing', { gameState: 'playing', pause: 'none', shop: 'none' });
+expect('market + ESC → market closed, resumed to play', { gameState: 'playing', pause: 'none', shop: 'none', shopOpen: false });
 
 // resumeGame refuses while market is up
 api.pressEsc();              // pause
@@ -100,14 +96,18 @@ api.openShop('pause');       // market up
 api.resumeGame();            // direct call (e.g. stray btnResume) must refuse
 expect('resumeGame refused while market open', { gameState: 'paused', shop: 'flex', shopOpen: true });
 
+// ESC from there → also straight to play (never re-shows the pause menu)
+api.pressEsc();
+expect('market + ESC again → resumed to play', { gameState: 'playing', pause: 'none', shop: 'none', shopOpen: false });
+
 // force-close (game over / quit path) → nothing stuck
+api.pressEsc();              // pause so there is an overlay to force-close under
+api.openShop('pause');
 api.closeShopSilent();
 expect('closeShopSilent → market gone, no pause menu resurrected', { shop: 'none', shopOpen: false, pause: 'none' });
 api.setState('playing');
 
 // market opened from GAMEPLAY (future hotkey path) closes back to play
-api.pressEsc();              // pause first (openShop('game') is the future direct path)
-api.pressEsc();              // resume
 api.setState('paused');      // simulate the pause that a mid-game open would pass through
 api.openShop('game');
 api.pressEsc();

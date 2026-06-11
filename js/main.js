@@ -757,10 +757,45 @@ function hexToRgb(hex) {
 // a mid-game recompile hitch. The program-keepalive pin texture carries the
 // same tag so the pinned program variants are the ones the world actually uses.
 let srgbCanvasTexCount = 0;
+// Max anisotropic-filtering samples for world textures — set once in init() from
+// the GPU's capability, capped at 8. Sampler state (NOT a program-cache key), set
+// at texture CREATION, so it sharpens grazing-angle surfaces (floors at distance)
+// with no shader recompile and no mid-game mutation. Default 1 until init runs;
+// every texMarkSRGB caller (wall/floor/ceiling/water/caustics) runs after init.
+let MAX_ANISO = 1;
 function texMarkSRGB(tex) {
   tex.encoding = THREE.sRGBEncoding;
+  tex.anisotropy = MAX_ANISO;
   srgbCanvasTexCount++;
   return tex;
+}
+
+/* ── BAKED FAKE AMBIENT OCCLUSION (drawn into the canvas at creation — zero
+   runtime cost, no lights). Grounds surfaces: walls get a darkened band where
+   they meet the ceiling and (darker) the floor; floor tiles get a soft corner
+   vignette so each per-cell tile reads as a discrete grounded panel. Both are
+   symmetric across the canvas edges, so the textures still TILE seamlessly. ── */
+function bakeWallAO(ctx, S) {
+  const band = S * 0.12;                     // top/bottom ~12%
+  // Canvas top (y=0) maps to the wall TOP (flipY) — ceiling contact.
+  let g = ctx.createLinearGradient(0, 0, 0, band);
+  g.addColorStop(0, 'rgba(0,0,0,0.36)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, S, band);
+  // Canvas bottom (y=S) maps to the wall BOTTOM — floor contact (a bit darker).
+  g = ctx.createLinearGradient(0, S - band, 0, S);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.46)');
+  ctx.fillStyle = g; ctx.fillRect(0, S - band, S, band);
+}
+function bakeFloorVignette(ctx, S) {
+  const h = S / 2;
+  // Transparent center → dark toward the edges/corners. Radius/center symmetric
+  // about the canvas, so opposite edges match → seamless per-cell tiling.
+  const g = ctx.createRadialGradient(h, h, S * 0.42, h, h, S * 0.74);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.30)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, S, S);
 }
 
 function createWallTexture(theme) {
@@ -842,6 +877,8 @@ function createWallTexture(theme) {
   }
   ctx.putImageData(id, 0, 0);
 
+  bakeWallAO(ctx, 256); // grounded top/bottom shading (on top of the noise)
+
   const tex = new THREE.CanvasTexture(c);
   texMarkSRGB(tex);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -905,33 +942,38 @@ function createFloorTexture(theme) {
   }
   ctx.putImageData(id, 0, 0);
 
+  bakeFloorVignette(ctx, 256); // soft corner vignette → each per-cell tile reads grounded
+
   const tex = new THREE.CanvasTexture(c);
   texMarkSRGB(tex);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(2, 2);
+  // repeat stays 1,1: per-cell tiling is baked into the MESH UVs now (one tile
+  // per CELL on the slab + pools deck), so texel density matches the wall faces.
   return tex;
 }
 
 function createCeilingTexture(theme) {
-  const c = document.createElement('canvas'); c.width = 128; c.height = 128;
+  // Bumped 128 → 256 to match the wall/floor texel resolution (the ceiling tile
+  // was the lowest-res surface). Tiling is unchanged (repeat 2,2 across the slab).
+  const c = document.createElement('canvas'); c.width = 256; c.height = 256;
   const ctx = c.getContext('2d');
   ctx.fillStyle = theme.ceilColor;
-  ctx.fillRect(0, 0, 128, 128);
+  ctx.fillRect(0, 0, 256, 256);
 
   if (theme.id <= 1 || theme.id === 7 || theme.id === 10 || theme.id === 12) {
-    ctx.strokeStyle = 'rgba(150,140,120,0.3)'; ctx.lineWidth = 1;
-    ctx.strokeRect(2, 2, 124, 124);
-    for (let i = 0; i < 60; i++) {
+    ctx.strokeStyle = 'rgba(150,140,120,0.3)'; ctx.lineWidth = 2;
+    ctx.strokeRect(4, 4, 248, 248);
+    for (let i = 0; i < 240; i++) {
       ctx.fillStyle = `rgba(140,130,110,${0.15 + Math.random() * 0.2})`;
-      ctx.beginPath(); ctx.arc(Math.random() * 128, Math.random() * 128, 0.5 + Math.random(), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 1.5, 0, Math.PI * 2); ctx.fill();
     }
   } else if (theme.id === 3) {
-    for (let i = 0; i < 5; i++) {
-      const gx = Math.random() * 128, gy = Math.random() * 128;
-      const grad = ctx.createRadialGradient(gx, gy, 0, gx, gy, 30);
+    for (let i = 0; i < 8; i++) {
+      const gx = Math.random() * 256, gy = Math.random() * 256;
+      const grad = ctx.createRadialGradient(gx, gy, 0, gx, gy, 60);
       grad.addColorStop(0, 'rgba(100,200,255,0.08)');
       grad.addColorStop(1, 'rgba(100,200,255,0)');
-      ctx.fillStyle = grad; ctx.fillRect(0, 0, 128, 128);
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
     }
   }
 
@@ -1598,6 +1640,66 @@ function pickExitCell(theme) {
     if (found) break;
   }
   return { ex, ey };
+}
+
+/* ═══════════════════════════════════════════
+   EXIT DOOR — the way out, as a glowing doorway set into a wall.
+   Replaces the old floor disc + beacon: a dark door frame against the nearest
+   wall cell with a brilliant white emissive panel filling the opening, and the
+   EXISTING exit-light slot (no new lights) pouring white light into the room.
+   Reused by both the normal exit and the post-boss exit (createBossExit). Sets
+   exitZone / exitMesh (the glow panel — updateLights pulses it) / exitLight.
+   Materials are MeshStandardMaterial WITHOUT a map, FrontSide — the program
+   family already pinned by ammoPickupMat, so no new shader family.
+   ═══════════════════════════════════════════ */
+function buildExitDoor(ex, ey, radius) {
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  exitZone = { x: ex * CELL + CELL / 2, z: ey * CELL + CELL / 2, radius: radius || CELL * 1.2 };
+
+  // Find an adjacent WALL cell to mount the door against (pool cells count as
+  // open, so pools get the door on a real dry-deck wall). Fall back to a
+  // freestanding lit doorway (open archetypes — field/open) when none borders.
+  const neigh = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  let wd = null;
+  for (const [dx, dy] of neigh) {
+    const nx = ex + dx, ny = ey + dy;
+    const cell = (ny >= 0 && ny < gh && nx >= 0 && nx < gw) ? mazeGrid[ny][nx] : 0;
+    if (cell !== 1 && cell !== 2) { wd = { dx, dy }; break; }
+  }
+  if (!wd) wd = { dx: 0, dy: -1 }; // freestanding fallback
+
+  const cx = exitZone.x, cz = exitZone.z;
+  const doorX = cx + wd.dx * (CELL / 2 - 0.05);
+  const doorZ = cz + wd.dy * (CELL / 2 - 0.05);
+  const facing = Math.atan2(-wd.dx, -wd.dy); // door's +z (local) points INTO the cell
+
+  const door = new THREE.Group();
+  door.position.set(doorX, 0, doorZ);
+  door.rotation.y = facing;
+
+  const DW = 1.6, DH = 2.7, FT = 0.18; // doorway width / height, frame thickness
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x0c0c0e, emissive: 0x2a3a4a, emissiveIntensity: 0.35, roughness: 0.5, metalness: 0.65 });
+  const post = (w, h, x, y) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, FT), frameMat); m.position.set(x, y, 0); door.add(m); };
+  post(FT, DH, -DW / 2, DH / 2);          // left post
+  post(FT, DH, DW / 2, DH / 2);           // right post
+  post(DW + FT, FT, 0, DH + FT / 2);      // lintel
+  post(DW + FT, FT, 0, FT / 2);           // threshold
+
+  // The opening — a brilliant white emissive panel. Bright base; updateLights
+  // gives it a slow pulse so it reads as living light.
+  const glowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 1.3, roughness: 1, metalness: 0, transparent: true, opacity: 0.95 });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(DW - 0.06, DH - 0.12), glowMat);
+  glow.position.set(0, DH / 2, 0.04);
+  door.add(glow);
+  scene.add(door);
+  exitMesh = glow; // updateLights pulses its emissiveIntensity (the "way out" shimmer)
+
+  // The exit light pours OUT of the opening into the room — the existing slot,
+  // recolored white + brightened (intensity/position only, count unchanged).
+  exitLight.color.setHex(0xffffff);
+  exitLight.intensity = 1.5;
+  exitLight.distance = CELL * 5;
+  exitLight.position.set(cx - wd.dx * 0.6, 1.5, cz - wd.dy * 0.6); // just inside the cell
 }
 
 /* ═══════════════════════════════════════════
@@ -2335,6 +2437,12 @@ function buildMazeScene() {
   } else {
     const floorGeo = new THREE.PlaneGeometry(gw * CELL, gh * CELL);
     floorGeo.rotateX(-Math.PI / 2);
+    // Per-cell tiling: scale the 0..1 plane UVs to 0..gw / 0..gh so the floor
+    // texture (repeat 1,1) tiles once per CELL — texel density now matches the
+    // per-face wall tiles instead of one 256px tile stretched across the slab.
+    const fuv = floorGeo.attributes.uv;
+    for (let i = 0; i < fuv.count; i++) fuv.setXY(i, fuv.getX(i) * gw, fuv.getY(i) * gh);
+    fuv.needsUpdate = true;
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     floorMesh.position.set(gw * CELL / 2, 0, gh * CELL / 2);
     scene.add(floorMesh);
@@ -2518,22 +2626,7 @@ function buildMazeScene() {
   // be identical on every machine.
   if (!theme.isBoss) {
     const { ex, ey } = pickExitCell(theme);
-    exitZone = { x: ex * CELL + CELL / 2, z: ey * CELL + CELL / 2, radius: CELL * 1.2 };
-
-    const exitGeo = new THREE.CylinderGeometry(1.0, 1.0, 0.06, 20);
-    const exitMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.6, transparent: true, opacity: 0.5 });
-    exitMesh = new THREE.Mesh(exitGeo, exitMat);
-    exitMesh.position.set(exitZone.x, 0.06, exitZone.z);
-    scene.add(exitMesh);
-
-    exitLight.intensity = 0.8;
-    exitLight.position.set(exitZone.x, 2, exitZone.z);
-
-    const beaconGeo = new THREE.CylinderGeometry(0.05, 0.05, WALL_H, 8);
-    const beaconMat = new THREE.MeshStandardMaterial({ color: exitColor, emissive: exitColor, emissiveIntensity: 0.5, transparent: true, opacity: 0.3 });
-    const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-    beacon.position.set(exitZone.x, WALL_H / 2, exitZone.z);
-    scene.add(beacon);
+    buildExitDoor(ex, ey, CELL * 1.2); // glowing doorway set into the nearest wall
   } else {
     exitZone = null;
     exitMesh = null;
@@ -2944,14 +3037,14 @@ function buildPoolsGeometry(theme, gw, gh, floorMat, wallMat) {
   const water = poolsQuadBuilder();   // one surface quad per basin
   const caus = poolsQuadBuilder();    // caustics overlay: basin floors + lips
 
-  // Deck: one quad per non-basin cell at y=0. UVs span 0..1 across the whole
-  // grid (the shared theme texture's repeat does the tiling), matching the
-  // exact look of the single floor slab other archetypes use.
+  // Deck: one quad per non-basin cell at y=0. UVs are PER-CELL (0..1 per cell →
+  // one floor tile per CELL with the texture's repeat at 1,1), matching the slab
+  // floor's new per-cell density and the per-face wall tiles.
   for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
     if (mazeGrid[y][x] === 2) continue;
     const x0 = x * CELL, x1 = x0 + CELL, z0 = y * CELL, z1 = z0 + CELL;
     floors.add([x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0],
-      [x / gw, y / gh], [x / gw, (y + 1) / gh], [(x + 1) / gw, (y + 1) / gh], [(x + 1) / gw, y / gh]);
+      [x, y], [x, y + 1], [x + 1, y + 1], [x + 1, y]);
   }
 
   const CAUS_UV = 0.5; // caustics/water texture tiles per grid cell
@@ -2960,9 +3053,9 @@ function buildPoolsGeometry(theme, gw, gh, floorMat, wallMat) {
     const z0 = r.y0 * CELL, z1 = (r.y1 + 1) * CELL;
     const cw = r.x1 - r.x0 + 1, ch = r.y1 - r.y0 + 1;
 
-    // basin floor (same theme floor texture, just lower)
+    // basin floor (same theme floor texture, just lower) — per-cell UVs too.
     floors.add([x0, -D, z0], [x0, -D, z1], [x1, -D, z1], [x1, -D, z0],
-      [r.x0 / gw, r.y0 / gh], [r.x0 / gw, (r.y1 + 1) / gh], [(r.x1 + 1) / gw, (r.y1 + 1) / gh], [(r.x1 + 1) / gw, r.y0 / gh]);
+      [r.x0, r.y0], [r.x0, r.y1 + 1], [r.x1 + 1, r.y1 + 1], [r.x1 + 1, r.y0]);
 
     // 4 lip walls, from basin floor up to deck level (wallMat is DoubleSide,
     // so winding is irrelevant). One wall-texture tile per cell horizontally,
@@ -4019,7 +4112,7 @@ function updateHUD() {
   hudSetText('hudWave', theme.isBoss ? 'BOSS' : 'Wave ' + currentWave);
   // OBJECTIVE GOAL — top center, reflects the floor's active gate condition.
   //  • 'item'  : ARTIFACTS n/N (solo AND co-op — the objective always applies).
-  //  • 'kills' : ELIMINATIONS n/m (co-op only — solo has no kill gate).
+  //  • 'kills' : ELIMINATIONS n/m (solo AND co-op now — the kill gate applies to both).
   //  • boss / no gate: hidden (the boss HP bar carries the boss goal).
   const gate = theme.gate || 'kills';
   if (!theme.isBoss && gate === 'item' && artifactsTotal > 0) {
@@ -4029,7 +4122,7 @@ function updateHUD() {
     hudSetText('goalHudText', open ? 'EXIT OPEN — FIND THE EXIT' : `${label} ${artifactsCollected}/${artifactsTotal}`);
     hudSetStyle('goalHudFill', 'width', Math.min(100, artifactsCollected / artifactsTotal * 100).toFixed(0) + '%');
     if (open !== _goalHudOpen) { _goalHudOpen = open; hudEl('goalHud').classList.toggle('goal-open', open); }
-  } else if (netState.role !== 'solo' && !theme.isBoss && gate === 'kills' && killTarget > 0) {
+  } else if (!theme.isBoss && gate === 'kills' && killTarget > 0) {
     const open = floorKills >= killTarget;
     hudSetStyle('goalHud', 'display', 'block');
     hudSetText('goalHudText', open ? 'EXIT OPEN — FIND THE EXIT' : `ELIMINATIONS ${floorKills}/${killTarget}`);
@@ -4120,8 +4213,9 @@ function updateLights(dt) {
   }
 
   if (exitMesh) {
-    exitMesh.rotation.y += dt * 0.6;
-    exitMesh.material.emissiveIntensity = 0.4 + Math.sin(clock.getElapsedTime() * 2.5) * 0.25;
+    // Exit doorway: a slow bright pulse on the white opening (no spin — it's a
+    // door now, not a disc). Intensity-only; the light slot is unchanged.
+    exitMesh.material.emissiveIntensity = 1.25 + Math.sin(clock.getElapsedTime() * 2.2) * 0.35;
   }
 }
 
@@ -4472,11 +4566,12 @@ function closeShop() {
   shopOpen = false;
   document.getElementById('shopOverlay').style.display = 'none';
   if (gameState !== 'paused') return; // game state moved on (game over / quit) — leave it be
-  if (shopReturnTo === 'pause') {
-    document.getElementById('pauseMenu').style.display = 'flex';
-  } else {
-    resumeGame(); // opened from gameplay → straight back to play (guarded relock inside)
-  }
+  // FAST ESCAPE: ESC / Back from the market drops STRAIGHT into gameplay (never
+  // back to the pause menu), so you can bail mid-fight — matters in co-op where
+  // the world keeps moving. shopReturnTo is intentionally ignored: speed beats
+  // retracing the open path.
+  document.getElementById('pauseMenu').style.display = 'none'; // keep the pause menu hidden
+  resumeGame(); // guarded relock inside
 }
 
 // Force-hide the market with NO return-state side effects. Safety net for
@@ -4879,6 +4974,9 @@ function init() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.85;
   renderer.outputEncoding = THREE.sRGBEncoding;
+  // Anisotropic filtering budget for world textures (capped at 8) — read once,
+  // applied at every texture's creation via texMarkSRGB.
+  MAX_ANISO = Math.min(8, renderer.capabilities.getMaxAnisotropy() || 1);
   renderer.domElement.id = 'gameCanvas';
   document.body.prepend(renderer.domElement);
 
