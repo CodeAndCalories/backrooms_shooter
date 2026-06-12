@@ -97,10 +97,12 @@ console.log('3. wall avoidance');
 
 /* ── 4. behavior constants sane ── */
 console.log('4. roam/hunt constants');
+// Thresholds are stored in CELL units (load-order safety: enemies.js runs
+// before main.js defines CELL) and converted to world units in updateEnemies.
 const sandbox2 = new Function(`
   const CELL = 4;
-  const HUNT_NEAR = ${constVal('HUNT_NEAR')};
-  const HUNT_VISION = ${constVal('HUNT_VISION')};
+  const HUNT_NEAR = CELL * (${constVal('HUNT_NEAR_CELLS')});
+  const HUNT_VISION = CELL * (${constVal('HUNT_VISION_CELLS')});
   const HUNT_MEMORY = ${constVal('HUNT_MEMORY')};
   const ROAM_SPEED_MULT = ${constVal('ROAM_SPEED_MULT')};
   return { HUNT_NEAR, HUNT_VISION, HUNT_MEMORY, ROAM_SPEED_MULT };

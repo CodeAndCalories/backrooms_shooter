@@ -1004,9 +1004,14 @@ function updateAntiLinger(dt) {
 /* ═══════════════════════════════════════════
    ENEMY AI / UPDATE
    ═══════════════════════════════════════════ */
-/* ── ENEMY STEERING / BEHAVIOR helpers (host-authoritative; cheap, no pathfinder) ── */
-const HUNT_NEAR = CELL * 3.0;    // a roamer this close NOTICES the player (hears them)
-const HUNT_VISION = CELL * 8.0;  // ...or sees them down a clear corridor (LOS)
+/* ── ENEMY STEERING / BEHAVIOR helpers (host-authoritative; cheap, no pathfinder) ──
+   LOAD ORDER: this file runs BEFORE main.js, so top-level code here must NOT
+   read main.js globals (CELL!) — that throws at load and leaves every const
+   below it uninitialized (TDZ), which froze the host/solo sim every frame
+   (the June-12 co-op "host lag" regression). Distances are kept in CELL
+   units and converted inside the functions, where CELL exists. */
+const HUNT_NEAR_CELLS = 3.0;     // a roamer this close NOTICES the player (hears them)
+const HUNT_VISION_CELLS = 8.0;   // ...or sees them down a clear corridor (LOS)
 const HUNT_MEMORY = 5.0;         // keeps hunting this long after losing sight
 const ROAM_SPEED_MULT = 0.5;     // roamers wander at half speed
 
@@ -1050,6 +1055,8 @@ function updateEnemies(dt) {
   // client (positions from the pos stream). Solo: a 1-entry list (the local
   // player), so targeting math is identical to before.
   const players = netAllPlayers();
+  const HUNT_NEAR = CELL * HUNT_NEAR_CELLS;     // world units (CELL is a main.js
+  const HUNT_VISION = CELL * HUNT_VISION_CELLS; // global — see load-order note above)
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
 

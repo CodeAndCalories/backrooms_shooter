@@ -4,7 +4,7 @@
 BACKROOMS_STATE.md") to resume with full context. UPDATE THIS at the end of every
 session: what changed, what's validated vs unplayed, what's next.
 
-**Last updated:** June 11, 2026
+**Last updated:** June 12, 2026
 
 ---
 
@@ -24,6 +24,35 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **CO-OP HOST-FREEZE REGRESSION FIXED (June 12, validated in a live headless
+  2-browser session):** the reported "host fully lags / can't move, clients
+  fine" bug. **Root cause:** the roam/hunt AI batch (42ca481) added top-level
+  `const HUNT_NEAR = CELL * 3.0` (+ HUNT_VISION) to enemies.js — but enemies.js
+  loads BEFORE main.js, which defines `CELL`. The script body threw
+  `ReferenceError: CELL is not defined` at load, leaving every const below it
+  (HUNT_*, ROAM_SPEED_MULT, `_steer`, `_whiskers`, `_losDir`) permanently
+  uninitialized (TDZ). All hoisted FUNCTIONS still existed, so the game booted —
+  but `updateEnemies` then threw "Cannot access 'HUNT_NEAR' before
+  initialization" EVERY FRAME on the machine running the sim, aborting
+  `animate()` before `renderer.render` → frozen screen. Clients never run
+  `updateEnemies` → unaffected. **NOTE: this also freezes SOLO on this build**
+  (1000+ exceptions/30s reproduced solo AND host) — a "solo was fine" report is
+  the stale-cache/old-deploy pattern (PROJECT_GUIDE §4). **Fix (zero behavior
+  change):** constants stored in CELL units (`HUNT_NEAR_CELLS` 3.0 /
+  `HUNT_VISION_CELLS` 8.0) and converted to world units inside updateEnemies.
+  **Evidence/validation:** new `tools/diag/repro_coop.js` (puppeteer-core
+  harness: solo + host + client headless Chromes over the real PeerJS broker,
+  per-frame function profile, message counters, exception capture). Before:
+  host 0-1 completed frames/10s, 1100+ uncaught exceptions. After: host ==
+  client frame rate, 0 exceptions, snapshot flowing, PROG stable (13→13). The
+  profile also cleared the rest of the audit: netBuildSnapshot 0.007ms/frame,
+  updateEnemies 0.05ms/frame, no per-frame sends, no per-client snapshot
+  rebuild. **New guard: `tools/test_loadorder.js`** executes the REAL top-level
+  code of audio/net/enemies in index.html order with browser stubs and NO
+  main.js globals (this class of bug was invisible to the extraction tests —
+  test_ai.js defines its own `CELL` in the sandbox). Full suite green.
+  **DEPLOY: push to origin/main — the live Vercel build (c8f5aad) HAS this bug;
+  no protocol change, but everyone should hard-refresh onto the fixed build.**
 - **Sanity mechanic + consumables + Level Fun music rework (June 11, UNPLAYED):**
   - **SANITY (0-100, per-player, PERSISTS across floors; resets only on a new
     run):** drains ONLY on taking damage — `min(dmg×0.60, 16)` per hit ("More

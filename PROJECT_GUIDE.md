@@ -24,7 +24,10 @@ models + 3 boss sprite PNGs. Deployed on Vercel from `origin/main`. Repo:
 **Load order (index.html, matters — globals):** `audio.js` → `net.js` → `enemies.js`
 → `main.js`. Function declarations hoist, so cross-file calls resolve at runtime even
 when the callee is defined in a later-loaded file. `init()` runs at the very bottom of
-main.js.
+main.js. **BUT top-level *statements* must never READ a later file's globals** (e.g. a
+top-level `const X = CELL * 3` in enemies.js — `CELL` lives in main.js): that throws at
+load and silently kills every top-level initialization below it in that file. See §4
+and `tools/test_loadorder.js`, which guards exactly this.
 
 ---
 
@@ -70,6 +73,7 @@ suite (all must stay green):
 | `tools/test_artifacts.js` | Item-gate theme config, artifact placement determinism + 0 world draws, `netExitGateOpen` across all gate types (incl. solo kill-gate), collect idempotency. |
 | `tools/test_ai.js` | `isOpenCell`, `steerAround` (clear pass-through vs rounds-a-wall), roam/hunt threshold constants, danger-always-hunts. |
 | `tools/test_sanity.js` | Consumable placement determinism + 0 world draws + constraints, sanity drain math + Poolrooms safe-zone guard, tuning constants, no-new-lights. |
+| `tools/test_loadorder.js` | Executes the REAL top-level code of audio/net/enemies in index.html load order (browser stubs, deliberately NO main.js globals): no load-time throw, no TDZ casualties, plus a static no-top-level-main.js-global-reads scan. Catches the bug class the extraction sandboxes mask. |
 
 Non-test tooling: `optimize_models.js` (GLB Draco/quantize — how the boss mob models
 were shrunk), `quantize_pngs.js` (boss sprite PNG palette reduction), `inspect_glb.js`,
@@ -300,6 +304,20 @@ shared world state.
   and where. Mark everything **UNPLAYED** in the state doc until the user confirms.
 - **Protocol changes need both players on the new build.** Any new/changed message silently
   no-ops on an old build. Always call this out in the state doc.
+- **Top-level cross-file reads are a load-order landmine (the June-12 host freeze).**
+  enemies.js gained a top-level `const HUNT_NEAR = CELL * 3.0`; `CELL` is defined in
+  main.js, which loads LAST → ReferenceError at load → every const below it in the file
+  stuck in the TDZ → `updateEnemies` threw every frame on the sim-owning machine (host
+  AND solo) and froze it before `renderer.render`, while clients (mirror-only) ran fine.
+  Three lessons: (1) pre-main files keep tuning constants self-contained (CELL-unit
+  literals, convert inside functions); (2) extraction tests can't see this — they stub
+  the missing global in their sandbox; `tools/test_loadorder.js` runs the real top-level
+  code without main.js globals and must stay green; (3) a "only mode X breaks" report
+  maps to WHO RUNS THE CODE, not where the code lives — host+solo share the sim path, so
+  "solo is fine" + "host frozen" on the same build usually means the solo check happened
+  on a stale cached/older build. `tools/diag/repro_coop.js` (puppeteer-core, 3 headless
+  Chromes: solo/host/client over the real PeerJS broker, per-frame profiling + exception
+  capture) is the live-repro harness — reuse it for any future co-op-only regression.
 - **`buildMazeScene` teardown is a trap for new scene objects.** It disposes every scene
   child's geometry+materials, EXCEPT textures tagged `userData.themeCached`. Any pooled/
   shared object you add (sparks, decals, watchers, pickups, consumables, the flare/exit
