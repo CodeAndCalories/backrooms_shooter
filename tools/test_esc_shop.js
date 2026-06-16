@@ -38,22 +38,35 @@ const escAt = src.indexOf("if (e.code === 'Escape')");
 if (escAt < 0) throw new Error('ESC handler not found');
 const escBlock = src.slice(escAt, sliceBalanced(src.indexOf('{', escAt)) + 1);
 
-const fns = ['function openShop', 'function closeShop', 'function closeShopSilent',
-             'function pauseGame', 'function resumeGame'].map(extractFn);
+const fns = ['function showMenuOverlay', 'function openShop', 'function closeShop',
+             'function closeShopSilent', 'function pauseGame', 'function resumeGame'].map(extractFn);
+// The centralized overlay list (single source of truth) — extracted verbatim.
+const menuOverlaysDecl = (src.match(/const MENU_OVERLAYS = \[[^\]]*\];/) || [])[0];
+if (!menuOverlaysDecl) throw new Error('MENU_OVERLAYS not found');
 
 const api = new Function(`
   let gameState = 'playing';
-  const els = { pauseMenu: { style: { display: 'none' } }, shopOverlay: { style: { display: 'none' } } };
+  // every full-screen menu overlay + the shop, so showMenuOverlay toggles them all
+  const els = {
+    startMenu: { style: { display: 'none' } },
+    pauseMenu: { style: { display: 'none' } },
+    gameOverMenu: { style: { display: 'none' } },
+    victoryMenu: { style: { display: 'none' } },
+    shopOverlay: { style: { display: 'none' } }
+  };
   const document = { getElementById: (id) => els[id], exitPointerLock() {} };
   const tryPointerLock = () => {};
   const updateShopUI = () => {};
   let shopOpen = false, shopReturnTo = 'pause';
+  ${menuOverlaysDecl}
   ${fns.join('\n')}
   function pressEsc() { const e = { code: 'Escape', preventDefault() {} }; ${escBlock} }
   return {
     pressEsc, openShop, closeShopSilent,
     resumeGame: () => resumeGame(),
-    state: () => ({ gameState, shopOpen, pause: els.pauseMenu.style.display, shop: els.shopOverlay.style.display }),
+    state: () => ({ gameState, shopOpen, pause: els.pauseMenu.style.display, shop: els.shopOverlay.style.display,
+                    start: els.startMenu.style.display, over: els.gameOverMenu.style.display, victory: els.victoryMenu.style.display }),
+    menusVisible: () => ['startMenu', 'pauseMenu', 'gameOverMenu', 'victoryMenu'].filter(o => els[o].style.display === 'flex'),
     setState: (s) => { gameState = s; },
   };
 `)();
@@ -65,6 +78,9 @@ const expect = (desc, want) => {
   const s = api.state();
   // THE invariant: never both overlays
   if (s.pause === 'flex' && s.shop === 'flex') fail('pause menu AND black market visible simultaneously');
+  // STRONGER invariant: at most ONE full-screen menu overlay visible at a time
+  const vis = api.menusVisible();
+  if (vis.length > 1) fail('multiple menu overlays visible at once: ' + vis.join(', '));
   for (const k of Object.keys(want)) {
     if (s[k] !== want[k]) fail(`${desc}: expected ${k}=${want[k]}, got ${s[k]}`);
   }

@@ -30,6 +30,27 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **UI OVERLAY-LAYERING BUG FIXED (June 16) — pure UI state, no gameplay change:**
+  on the `?dev=1` start menu the "YOU ESCAPED" victory screen + both level-selects
+  rendered stacked on top of each other. **Root cause:** `#victoryMenu` (added in
+  the capstone batch) inherited `.menu-overlay{display:flex}` but — unlike
+  `#pauseMenu`/`#gameOverMenu` — had **no `display:none`** AND **no background**, so
+  it floated TRANSPARENTLY over the start menu from first load (everything visible
+  through it). **Fix:** (1) CSS `#victoryMenu{display:none; background:rgba(8,6,0,.95)}`
+  (hidden by default + opaque); (2) a single source of truth `showMenuOverlay(id)`
+  that hides ALL four menu overlays (start/pause/gameover/victory) + force-closes the
+  shop, showing exactly one — every transition now routes through it
+  (startGame→none, pauseGame→pause, resumeGame→none, gameOver→gameover,
+  showVictory→victory, quitToMenu→start), plus a defensive `showMenuOverlay('startMenu')`
+  at load; (3) **dev/player level-select now mutually exclusive** — `?dev=1` shows the
+  dev panel and hides the player panel (and vice-versa). **Visibility rules** (one
+  menu overlay per gameState): `menu`→startMenu, `paused`→pauseMenu (or the shop over
+  it, exclusive), `gameover`→gameOverMenu, `won`→victoryMenu, `playing`→none; the two
+  level-selects live inside #startMenu so they only show with it. Headless:
+  **`tools/test_overlays.js`** (new — drives the real showMenuOverlay over a fake DOM:
+  exactly one overlay at a time + shop always closed; CSS defaults; every transition
+  routes through it; dev/player exclusivity) and **`test_esc_shop` strengthened** with
+  an "at most one menu overlay visible" invariant. Full suite green (18 tools).
 - **NEW FLOOR 20 — "The Last Door" (FINAL BOSS capstone, index 19, June 16,
   UNPLAYED):** the milestone ending. Pure config + a tougher fight + a finale
   screen — **no new systems** (reuses the boss archetype, `bossHpFor` scaling, and

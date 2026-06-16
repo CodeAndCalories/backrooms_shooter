@@ -5306,10 +5306,7 @@ function startGame() {
   netOnHostStart(currentFloor, floorSeed);
   buildMazeScene();
 
-  document.getElementById('startMenu').style.display = 'none';
-  document.getElementById('gameOverMenu').style.display = 'none';
-  document.getElementById('pauseMenu').style.display = 'none';
-  closeShopSilent();
+  showMenuOverlay(null); // entering gameplay → hide every menu overlay + close the shop
   document.getElementById('hud').style.display = 'block';
   document.getElementById('bossHpContainer').style.opacity = '0';
 
@@ -5348,6 +5345,28 @@ function tryPointerLock() {
 let shopOpen = false;
 let shopReturnTo = 'pause';
 
+/* ── OVERLAY VISIBILITY — single source of truth ──
+   The four full-screen MENU overlays are mutually exclusive: exactly ONE shows
+   (or NONE, during gameplay). Every state transition routes through here so
+   nothing can leak visible across screens (the stacked-overlay bug). The shop is
+   a separate gameplay overlay (openShop/closeShop) and is ALWAYS force-closed
+   here so it can't end up layered on a menu. The two level-select panels live
+   INSIDE #startMenu, so they show only with it (and dev-vs-player exclusivity is
+   set once at load — see buildDevLevelSelect / the dev-mode block).
+     gameState 'menu'      → startMenu
+     gameState 'paused'    → pauseMenu (or the shop, opened separately over it)
+     gameState 'gameover'  → gameOverMenu
+     gameState 'won'       → victoryMenu
+     gameState 'playing'   → none (showMenuOverlay(null)) */
+const MENU_OVERLAYS = ['startMenu', 'pauseMenu', 'gameOverMenu', 'victoryMenu'];
+function showMenuOverlay(id) {
+  for (const o of MENU_OVERLAYS) {
+    const el = document.getElementById(o);
+    if (el) el.style.display = (o === id) ? 'flex' : 'none';
+  }
+  closeShopSilent(); // never leave the market layered under/over a menu
+}
+
 function openShop(from) {
   if (shopOpen) return;
   shopOpen = true;
@@ -5380,25 +5399,23 @@ function closeShopSilent() {
 
 function pauseGame() {
   if (gameState !== 'playing') return;
-  closeShopSilent(); // exclusivity: a pause can never stack under the market
   gameState = 'paused';
-  document.getElementById('pauseMenu').style.display = 'flex';
+  showMenuOverlay('pauseMenu'); // also force-closes the shop (exclusivity)
   document.exitPointerLock();
 }
 
 function resumeGame() {
   if (gameState !== 'paused' || shopOpen) return; // market must close first (ESC handles it)
   gameState = 'playing';
-  document.getElementById('pauseMenu').style.display = 'none';
+  showMenuOverlay(null); // hide every menu overlay (returns to gameplay)
   tryPointerLock(); // may fail inside Chrome's post-Esc cooldown → click re-locks
 }
 
 function gameOver() {
   gameState = 'gameover';
-  closeShopSilent(); // co-op: the party can die while this player browses the market
   stopLevelFunMusic(); // don't let the Level Fun loop bleed into the game-over screen
   document.getElementById('hud').style.display = 'none';
-  document.getElementById('gameOverMenu').style.display = 'flex';
+  showMenuOverlay('gameOverMenu'); // hides start/pause/victory + closes the shop
   document.getElementById('bossHpContainer').style.opacity = '0';
   const theme = getTheme(player.floorReached);
   document.getElementById('goStats').innerHTML =
@@ -5420,7 +5437,6 @@ function winRun() {
 function showVictory() {
   if (gameState === 'won') return; // idempotent (boss death + a relayed 'run_won' could race)
   gameState = 'won';
-  closeShopSilent();
   // Silence the floor audio for a clean ending.
   if (typeof stopLevelFunMusic === 'function') stopLevelFunMusic();
   if (typeof stopHotelChaseAmbience === 'function') stopHotelChaseAmbience();
@@ -5437,19 +5453,16 @@ function showVictory() {
     `You made it out after Level ${currentFloor + 1} — ${theme.name}` +
     `<br>Enemies Eliminated: ${player.kills}` +
     `<br>Floors Cleared: ${currentFloor + 1} / ${LEVEL_THEMES.length}`;
-  const vm = document.getElementById('victoryMenu');
-  if (vm) vm.style.display = 'flex';
+  showMenuOverlay('victoryMenu'); // hides start/pause/gameover + closes the shop
   document.exitPointerLock();
 }
 
 function quitToMenu() {
   gameState = 'menu';
-  closeShopSilent();
   stopLevelFunMusic(); // stop Level Fun loop when bailing to the menu
-  document.getElementById('pauseMenu').style.display = 'none';
   document.getElementById('hud').style.display = 'none';
   buildPlayerLevelSelect(); // PART 2: refresh unlocks earned this run
-  document.getElementById('startMenu').style.display = 'flex';
+  showMenuOverlay('startMenu'); // the ONLY visible overlay now (hides pause/gameover/victory)
   document.getElementById('bossHpContainer').style.opacity = '0';
   document.exitPointerLock();
 }
@@ -5614,17 +5627,23 @@ document.getElementById('btnRestart').addEventListener('click', startGame);
 {
   const va = document.getElementById('btnVictoryAgain');
   const vmn = document.getElementById('btnVictoryMenu');
-  if (va) va.addEventListener('click', () => { document.getElementById('victoryMenu').style.display = 'none'; startGame(); });
-  if (vmn) vmn.addEventListener('click', () => { document.getElementById('victoryMenu').style.display = 'none'; quitToMenu(); });
+  // startGame → showMenuOverlay(null) and quitToMenu → showMenuOverlay('startMenu')
+  // both hide the victory screen, so no manual display toggle is needed here.
+  if (va) va.addEventListener('click', startGame);
+  if (vmn) vmn.addEventListener('click', quitToMenu);
 }
 
 /* ════ PART 1 — DEV TOOL: unrestricted level-select (jump to ANY floor). Only built
    when ?dev=1; otherwise the whole #devLevelSelect block is hidden so friends never
    see it. Clicking sets selectedStartFloor, which startGame() uses as the start floor.
+   DEV vs PLAYER select are MUTUALLY EXCLUSIVE on the start menu: ?dev=1 shows the
+   dev panel (unrestricted) and hides the player panel; otherwise the reverse.
    ════ */
 (function buildDevLevelSelect() {
   const panel = document.getElementById('devLevelSelect');
+  const playerPanel = document.getElementById('playerLevelSelect');
   if (!DEV_MODE) { if (panel) panel.style.display = 'none'; return; }
+  if (playerPanel) playerPanel.style.display = 'none'; // dev panel supersedes the player panel in ?dev=1
   const wrap = document.getElementById('devLevelButtons');
   const label = document.getElementById('devSelectedFloor');
   if (!wrap) return;
@@ -5681,6 +5700,9 @@ function buildPlayerLevelSelect() {
   });
 }
 buildPlayerLevelSelect(); // initial build at load
+// Fresh load → the start menu is the ONLY visible overlay (defensive: also enforced
+// by CSS display:none on pause/gameover/victory; this guarantees it regardless).
+showMenuOverlay('startMenu');
 
 // PART 1: hide the FPS readout entirely unless ?dev=1 (the update is already gated).
 if (!DEV_MODE) {
