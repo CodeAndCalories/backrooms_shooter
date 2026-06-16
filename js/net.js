@@ -307,6 +307,9 @@ function netNameOf(id) {
   return (e && e.name) ? e.name : 'P' + (netSlotOf(id) + 1);
 }
 function netColorOf(id) { return NET_PLAYER_COLORS[netSlotOf(id) % NET_PLAYER_COLORS.length]; }
+// The LOCAL player's color slot (solo → 0 = P1 yellow). Used by the Lights Out
+// scanner so each player paints dots in their own slot color.
+function netMySlot() { return netSlotOf(netState.myId); }
 
 /* ── host-side roster management (named functions → headless-testable) ── */
 
@@ -780,6 +783,48 @@ function netAnnounceShot(origin, dir, rays, weaponId) {
 onMessage('shot_fx', (d) => {
   if (!netIsClient() || gameState !== 'playing' || !d || d.id === netState.myId) return;
   netShowRemoteShot(d.id, d.o, d.d, d.w, d.p);
+});
+
+/* ── SCANNER pulse sharing (Lights Out, floor 18) ──
+   Purely COSMETIC: each machine reproduces a teammate's RADIAL pulse from its
+   origin + the firer's color slot (doScanPulse, main.js), painting that player's
+   dots in their slot color. Monster reveal needs NO host authority — every
+   machine reveals from its OWN local mob list. The firer paints locally
+   immediately; this just shares the wall/floor dots so teammates' scans show up
+   distinctly. PROTOCOL ADDITION: 'scan' (client→host) + 'scan_fx' (host→clients);
+   old builds ignore them (they just don't see teammates' scans). */
+function netAnnounceScan(origin, slot) {
+  if (netState.role === 'host') {
+    if (netState.peers.length) sendToAll('scan_fx', { id: netState.myId, x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z), s: slot });
+  } else if (netState.role === 'client') {
+    sendToHost('scan', { x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z) });
+  }
+}
+
+onMessage('scan', (d, fromConn) => {
+  if (netState.role !== 'host' || gameState !== 'playing' || !d) return;
+  const slot = netSlotOf(fromConn.peer);
+  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), slot); // host sees the client's scan
+  for (const conn of netState.peers) { // relay to the OTHER clients (the firer already painted locally)
+    if (conn !== fromConn && conn.open) conn.send({ t: 'scan_fx', d: { id: fromConn.peer, x: d.x, y: d.y, z: d.z, s: slot } });
+  }
+});
+
+onMessage('scan_fx', (d) => {
+  if (!netIsClient() || gameState !== 'playing' || !d || d.id === netState.myId) return;
+  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), d.s);
+});
+
+/* ── run victory (20th-floor capstone) ──
+   The HOST owns the boss, so it decides the run is won (the finale boss died) and
+   tells the party so everyone sees the ending together. PROTOCOL ADDITION:
+   'run_won' (host→all). Old builds ignore it (they'd just keep playing / loop). */
+function netBroadcastRunWon() {
+  if (netState.role === 'host' && netState.peers.length) sendToAll('run_won', {});
+}
+
+onMessage('run_won', () => {
+  if (netIsClient() && typeof showVictory === 'function') showVictory(); // main.js — local victory screen
 });
 
 // Render a teammate's shot: the same fading trail the shooter saw (full range,

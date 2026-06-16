@@ -93,6 +93,9 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 
 .game-over-title{font-size:3em;color:#ff3333;text-shadow:0 0 40px rgba(255,0,0,0.6);letter-spacing:6px;margin-bottom:10px;}
 .game-over-stats{color:#aa6666;font-size:0.95em;margin-bottom:40px;line-height:2.2;}
+/* 20th-floor capstone victory screen */
+.victory-title{font-size:3.4em;color:#ffe089;text-shadow:0 0 44px rgba(255,200,80,0.65);letter-spacing:8px;margin-bottom:8px;}
+.victory-subtitle{color:#cdbb88;font-size:1em;letter-spacing:2px;margin-bottom:24px;max-width:520px;text-align:center;}
 
 .floor-announce{position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:500;text-align:center;opacity:0;}
 .floor-announce .fa-level{font-size:3.2em;color:#d4c36a;text-shadow:0 0 40px rgba(212,195,106,0.6);letter-spacing:10px;text-transform:uppercase;opacity:0;}

@@ -59,17 +59,20 @@ const countApi = (role, peers) => new Function(`
 `)();
 
 const BOSS_THEMES = api.LEVEL_THEMES.filter(t => t.isBoss);
-if (BOSS_THEMES.length !== 3) fail(`expected 3 boss themes, found ${BOSS_THEMES.length}`);
+// 4 bosses as of floor 20: Warden, Amalgam, Hive Mind, + The Devourer (capstone).
+// Grows when a boss floor is added — bump this with it.
+if (BOSS_THEMES.length !== 4) fail(`expected 4 boss themes, found ${BOSS_THEMES.length}`);
 
 /* ── 1. solo EXACTLY unchanged (vs the pre-patch formula) across loops ── */
+const NL = api.LEVEL_THEMES.length;
 for (const theme of BOSS_THEMES) {
-  for (const floor of [theme.id, theme.id + 17, theme.id + 34]) {
-    const old = theme.bossHp * (1 + Math.floor(floor / api.LEVEL_THEMES.length) * 0.3);
+  for (const floor of [theme.id, theme.id + NL, theme.id + NL * 2]) { // same theme, +1/+2 loops
+    const old = theme.bossHp * (1 + Math.floor(floor / NL) * 0.3);
     const got = api.bossHpFor(theme, floor, 1).totalHp;
     if (got !== old) fail(`solo ${theme.bossName} floor ${floor}: ${got} !== old formula ${old}`);
   }
 }
-console.log('solo boss HP exactly matches the pre-patch formula (3 bosses x 3 loops) ✓');
+console.log(`solo boss HP exactly matches the pre-patch formula (${BOSS_THEMES.length} bosses x 3 loops) ✓`);
 
 /* ── 2. the scale table ── */
 const TABLE = { 1: 1.00, 2: 1.75, 3: 2.50, 4: 3.25, 5: 4.00 };

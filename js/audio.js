@@ -336,6 +336,51 @@ function playWeaponSwitch() {
 // MP: a teammate's shot, distance-attenuated, with a tone hint per weapon class
 // (boomy shotgun / snappy smg / hollow flare / generic pistol). Replaces the old
 // single playRemoteGunshot for the weapon system.
+// VICTORY STING (20th-floor capstone) — a slow rising major triad swell: relief
+// with an uneasy edge (it's still the Backrooms). Through sfxGain.
+function playVictorySting() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    const freqs = [261.63, 329.63, 392.00, 523.25]; // C major + octave
+    freqs.forEach((f, i) => {
+      const o = audioCtx.createOscillator(); o.type = i === 3 ? 'triangle' : 'sine';
+      o.frequency.value = f;
+      const g = audioCtx.createGain();
+      const at = i * 0.18; // arpeggiated swell-in
+      g.gain.setValueAtTime(0.0001, t + at);
+      g.gain.exponentialRampToValueAtTime(0.12, t + at + 0.25);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 2.8);
+      // a faint detuned shadow voice keeps it from feeling fully safe
+      const o2 = audioCtx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f; o2.detune.value = -12;
+      const g2 = audioCtx.createGain(); g2.gain.value = 0.4; o2.connect(g2); g2.connect(g);
+      o.connect(g); g.connect(sfxGain);
+      o.start(t + at); o.stop(t + 3.0); o2.start(t + at); o2.stop(t + 3.0);
+    });
+  });
+}
+
+// SCANNER PING (Lights Out) — a short rising electronic sonar blip + a soft noise
+// "sweep" tail, so a pulse feels like sound leaving you. Through sfxGain.
+function playScannerPing() {
+  playSound(() => {
+    const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+    // rising blip
+    const o = audioCtx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(420, t); o.frequency.exponentialRampToValueAtTime(1300, t + 0.12);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 1.2;
+    o.connect(bp); bp.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + 0.24);
+    // airy outward sweep tail (the "ping" radiating)
+    const len = Math.floor(sr * 0.3), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.10));
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.setValueAtTime(600, t); hp.frequency.exponentialRampToValueAtTime(3000, t + 0.28);
+    const ng = audioCtx.createGain(); ng.gain.setValueAtTime(0.05, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    src.connect(hp); hp.connect(ng); ng.connect(sfxGain); src.start(t);
+  });
+}
+
 function playRemoteShot(sound, dist) {
   playSound(() => {
     const t = audioCtx.currentTime, sr = audioCtx.sampleRate;

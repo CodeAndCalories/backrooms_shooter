@@ -490,7 +490,7 @@ const LEVEL_THEMES = [
     enemyTint: 0.5,
     darknessLevel: 0.5,
     // OBJECTIVE: REACH the far exit (no kills, no items — surviving the run wins).
-    gate: 'reach',
+    gate: 'reach', goalText: 'RUN — REACH THE EXIT',
     // THE LEVEL IS THE ENEMY: no stamina drain (sprint forever), 1 unkillable chaser.
     noStamina: true,
     chaserCount: 1,
@@ -502,6 +502,64 @@ const LEVEL_THEMES = [
     // shoot to clear the way, but stopping to fight lets the chaser close in.
     mobs: { types: ['crawler', 'spider'], weights: [3, 1], danger: ['crawler'],
             speedMult: 0.55, hpMult: 0.6, countMult: 0.45, waveBase: 2, waveCap: 4 }
+  },
+  {
+    id: 18,
+    archetype: 'rooms', // the classic backrooms maze — most disorienting to navigate BLIND
+    name: "Lights Out",
+    subtitle: "The dark is total. Your scanner is the only way to see — and it sees you back.",
+    // Palette is near-irrelevant (with ambient ~0 + lights off, Standard surfaces
+    // render BLACK — only emissive scan dots + the exit beacon are visible) but kept
+    // plausibly dark. fog/bg pure black so there's no horizon glow.
+    wallColor: '#0c0c10', wallColor2: '#080809',
+    floorColor: '#0a0a0c', floorColor2: '#060607',
+    ceilColor: '#0a0a0e',
+    fogColor: 0x000000, fogNear: 1, fogFar: 16,
+    lightColor: 0x223044, lightIntensity: 0.0,   // ceiling lights exist for the budget but stay DARK
+    ambientColor: 0x05060a, ambientIntensity: 0.0,
+    bgColor: 0x000000,
+    mazeSize: 12,
+    floorType: 'concrete',
+    decorations: 'none',
+    enemyTint: 0.6,
+    darknessLevel: 1.0,
+    // SCANNER FLOOR: total darkness, no flashlight, LMB pulses the scanner (see
+    // buildMazeScene darkness override + fireScannerLocal + the dot system).
+    scanner: true,
+    // OBJECTIVE: find the exit in the dark (no kills — sparse, lethal mobs you evade).
+    gate: 'reach', goalText: 'FIND THE EXIT',
+    // Sparse but lethal. Stalker (distant growl) + phantom (whisper) — you HEAR them
+    // before a scan reveals them (the mob vocalizations carry this floor).
+    mobs: { types: ['stalker', 'phantom'], weights: [2, 1], danger: ['danger_stalker'],
+            speedMult: 0.85, hpMult: 1.2, countMult: 0.45, waveBase: 2, waveCap: 4 }
+  },
+  {
+    id: 19,
+    archetype: 'arena', // boss floors always use generateBossArena — label is informational
+    name: "The Last Door",
+    subtitle: "Everything these halls swallowed has become one. It stands between you and the way out.",
+    // Capstone palette: a deep crimson-black void — the "end of the run" room.
+    wallColor: '#2a0a12', wallColor2: '#1a0610',
+    floorColor: '#140409', floorColor2: '#0c0206',
+    ceilColor: '#240810',
+    fogColor: 0x080103, fogNear: 2, fogFar: 50,
+    lightColor: 0xff3322, lightIntensity: 0.5,
+    ambientColor: 0x2a0610, ambientIntensity: 0.045,
+    bgColor: 0x040001,
+    mazeSize: 9,            // BIGGER arena than the other bosses (Warden 6 / Amalgam 7 / Hive 8)
+    floorType: 'concrete',
+    decorations: 'none',
+    enemyTint: 0.85,
+    darknessLevel: 0.65,
+    isBoss: true,
+    isFinale: true,         // 20th-floor CAPSTONE: boss death ends the RUN (victory screen, no exit)
+    bossName: "THE DEVOURER",
+    bossTex: 'boss_amalgam', // reuse the Amalgam sprite ("it has consumed everything") — scaled up
+    bossHp: 3600,           // toughest by far (Warden 800 / Amalgam 1400 / Hive 2200) — per-player scaling still applies
+    bossScale: 5.0,         // biggest (10m; the arena is built tall to fit — generateBossArena/roomH)
+    bossSpeed: 3.4,
+    bossDamage: 32,
+    bossSpawnCount: 6
   }
 ];
 
@@ -2261,6 +2319,7 @@ function createProgramKeepalive() {
 }
 
 function toggleFlashlight() {
+  if (getTheme(currentFloor).scanner) return; // Lights Out: no flashlight (F does nothing)
   flashlightOn = !flashlightOn;
   if (flashlight) flashlight.visible = flashlightOn;
   playFlashlightClick();
@@ -2788,6 +2847,7 @@ function buildMazeScene() {
   for (const t of bulletTrails) { t.mesh.geometry.dispose(); t.mesh.material.dispose(); scene.remove(t.mesh); }
   bulletTrails = [];
   clearImpactFx(); // pull pooled sparks/decals/flare out before the dispose pass (shared geo/mats)
+  clearScanDots(); // pull instanced scanner-dot meshes out too (shared geo/mats) + reset slots
   clearScares();   // pull active watcher sprites out too (shared mob textures) + reset effects
   clearConsumables(); // pull almond/bandage pickups out (shared geo/mats) before the dispose pass
   for (const p of ammoPickups) scene.remove(p.mesh); // geometry/material are module-level SHARED — never disposed
@@ -2896,8 +2956,15 @@ function buildMazeScene() {
 
   // Lights — reduce for dark levels
   const darkMult = 1 - (theme.darknessLevel || 0) * 0.7;
-  ambientLight = new THREE.AmbientLight(theme.ambientColor, theme.ambientIntensity * darkMult);
+  // SCANNER FLOOR (Lights Out): force TOTAL darkness. Ambient → 0, ceiling lights
+  // stay at the theme's 0 intensity, fixtures non-emissive (below), flashlight
+  // disabled. The 32-light COUNT is untouched (the point lights still exist at
+  // intensity 0 — only intensities change, so the program cache never moves). The
+  // exit-door light (buildExitDoor, 1.5) is the ONE thing that pierces the dark.
+  const scanner = !!theme.scanner;
+  ambientLight = new THREE.AmbientLight(theme.ambientColor, scanner ? 0 : theme.ambientIntensity * darkMult);
   scene.add(ambientLight);
+  if (scanner) flashlightOn = false; // no flashlight on this floor (createFlashlight reads this)
 
   scene.add(camera);
   createGun();
@@ -2915,8 +2982,11 @@ function buildMazeScene() {
   // separate Mesh per light — geometry + material are identical, so a single
   // InstancedMesh replaces what used to be 16-38 extra draw calls.
   const fixGeo = new THREE.BoxGeometry(0.8, 0.05, 0.22);
+  // Fixtures stay INSTANCED-Standard-no-map (the dot system reuses this exact
+  // program family — see the scanner dots). On the scanner floor they're created
+  // but non-emissive (invisible in the dark) so the program is still present.
   const fixMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff, emissive: theme.lightColor, emissiveIntensity: 0.4 * darkMult
+    color: 0xffffff, emissive: theme.lightColor, emissiveIntensity: scanner ? 0 : 0.4 * darkMult
   });
   const fixtureMatrices = [];
 
@@ -3862,6 +3932,164 @@ function clearImpactFx() {
 }
 
 /* ═══════════════════════════════════════════
+   SCANNER DOTS (Lights Out, floor 18) — the novel mechanic. A pulse paints
+   short-lived GLOWING dots where its rays hit geometry (the firer's slot color)
+   and on monsters (RED). Between pulses you're blind; you navigate by memory.
+
+   CONSTRAINT-CRITICAL: dots are EMISSIVE-ONLY and add ZERO lights. Each color is
+   ONE InstancedMesh of MeshStandardMaterial WITHOUT a map — the SAME program
+   family the ceiling-light fixtures (and Hotel-Chase furniture) instance on every
+   floor, so no new shader program and no PROG movement. Fade is per-INSTANCE
+   SCALE (shrink to nothing) — the shared material never changes, so all of one
+   color's dots ride a single draw call. Shared geometry is never disposed; the
+   meshes are pulled from the scene before the buildMazeScene teardown traverse
+   (same contract as sparks/decals/ammo).
+   ═══════════════════════════════════════════ */
+const SCAN_DOT_CAP = 256;        // per color (ring-recycled)
+const SCAN_DOT_SIZE = 0.085;     // dot world radius at full scale
+const SCAN_DOT_LIFE = 3.6;       // seconds a dot lingers before it winks out
+const SCAN_RANGE = CELL * 6;     // how far a pulse reaches
+const SCAN_WALL_RAYS = 64;       // radial rays that trace walls
+const SCAN_COOLDOWN = 1.5;       // seconds between pulses (can't spam-light the room)
+const SCAN_MONSTER_COLOR = 0xff1414; // monsters are always RED, distinct from any slot color
+let scanCooldown = 0;
+let scanDotGeo = null;
+const scanDotMeshes = {};        // colorKey -> { mesh, mat, slots:[{active,life,maxLife,x,y,z}], ring }
+const _scanM4 = new THREE.Matrix4();
+const _scanZero = new THREE.Matrix4().makeScale(0, 0, 0);
+
+function getScanDotEntry(colorKey, hex) {
+  let entry = scanDotMeshes[colorKey];
+  if (entry) { if (!entry.mesh.parent) scene.add(entry.mesh); return entry; }
+  if (!scanDotGeo) scanDotGeo = new THREE.SphereGeometry(1, 6, 5); // unit sphere; per-instance matrix scales it
+  // Emissive Standard NO-MAP → ammoPickupMat-pinned family; the INSTANCED variant
+  // is what the light fixtures use every floor. color black so ONLY the emissive
+  // shows (it glows in pitch black; it does NOT light anything — no PointLight).
+  const mat = new THREE.MeshStandardMaterial({ color: 0x000000, emissive: hex, emissiveIntensity: 2.6, roughness: 1, metalness: 0 });
+  const mesh = new THREE.InstancedMesh(scanDotGeo, mat, SCAN_DOT_CAP);
+  mesh.frustumCulled = false;
+  for (let i = 0; i < SCAN_DOT_CAP; i++) mesh.setMatrixAt(i, _scanZero);
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  entry = { mesh, mat, ring: 0, slots: Array.from({ length: SCAN_DOT_CAP }, () => ({ active: false, life: 0, maxLife: 1, x: 0, y: 0, z: 0 })) };
+  scanDotMeshes[colorKey] = entry;
+  return entry;
+}
+function spawnScanDot(colorKey, hex, x, y, z) {
+  const entry = getScanDotEntry(colorKey, hex);
+  const i = entry.ring; entry.ring = (entry.ring + 1) % SCAN_DOT_CAP;
+  const s = entry.slots[i];
+  s.active = true; s.life = s.maxLife = SCAN_DOT_LIFE * (0.82 + Math.random() * 0.36);
+  s.x = x; s.y = y; s.z = z;
+}
+function updateScanDots(dt) {
+  for (const key in scanDotMeshes) {
+    const entry = scanDotMeshes[key];
+    let dirty = false;
+    const slots = entry.slots;
+    for (let i = 0; i < SCAN_DOT_CAP; i++) {
+      const s = slots[i];
+      if (!s.active) continue;
+      s.life -= dt;
+      if (s.life <= 0) { s.active = false; entry.mesh.setMatrixAt(i, _scanZero); dirty = true; continue; }
+      const k = s.life / s.maxLife;                 // 1 → 0
+      const sc = SCAN_DOT_SIZE * (0.35 + 0.65 * k); // shrink as it fades out
+      _scanM4.makeScale(sc, sc, sc); _scanM4.setPosition(s.x, s.y, s.z);
+      entry.mesh.setMatrixAt(i, _scanM4);
+      dirty = true;
+    }
+    if (dirty) entry.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+// Teardown: pull the instanced dot meshes out of the scene BEFORE the dispose
+// traverse (shared geo/mats persist for the session) and reset every slot.
+function clearScanDots() {
+  for (const key in scanDotMeshes) {
+    const entry = scanDotMeshes[key];
+    if (entry.mesh.parent) scene.remove(entry.mesh);
+    for (const s of entry.slots) s.active = false;
+    entry.ring = 0;
+    for (let i = 0; i < SCAN_DOT_CAP; i++) entry.mesh.setMatrixAt(i, _scanZero);
+    entry.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+// Local mob positions for the monster-reveal pass (host: real enemies; client:
+// snapshot mirrors). Each machine reveals from ITS OWN list → no host authority
+// needed for the reveal.
+function scanMobPositions() {
+  const out = [];
+  if (typeof netIsClient === 'function' && netIsClient()) {
+    if (typeof netMobs !== 'undefined') for (const m of netMobs.values()) if (!m.dying) out.push(m.mesh.position);
+  } else {
+    for (const e of enemies) if (e.alive) out.push(e.pos);
+  }
+  return out;
+}
+
+// THE PULSE. origin = world eye point; slot = firer's color slot (co-op). Paints
+// wall dots (radial rays), floor dots (radial samples), and RED monster dots
+// (LOS-gated) — all from THIS machine's geometry + mob knowledge, so it's
+// reproducible for a teammate's pulse too. Pure cosmetics (no damage/gameplay).
+function doScanPulse(origin, slot) {
+  if (!mazeGrid || !mazeGrid.length) return;
+  const hex = NET_PLAYER_COLORS[slot % NET_PLAYER_COLORS.length];
+  const key = 'p' + (slot % NET_PLAYER_COLORS.length);
+  const oy = origin.y;
+
+  // WALLS — a radial ring of rays at eye height (slightly downward so dots ride
+  // the wall a touch below eye level), traced by the grid-DDA wall raycast.
+  for (let i = 0; i < SCAN_WALL_RAYS; i++) {
+    const a = (i / SCAN_WALL_RAYS) * Math.PI * 2;
+    _scanDir.set(Math.sin(a), -0.04, Math.cos(a));
+    const hit = raycastWall(origin, _scanDir, SCAN_RANGE);
+    if (hit) {
+      const dy = Math.max(0.15, Math.min(WALL_H - 0.15, hit.point.y));
+      spawnScanDot(key, hex, hit.point.x, dy, hit.point.z);
+    }
+  }
+  // FLOOR — radial samples on open ground (LOS-gated so you don't paint through walls).
+  const rings = [CELL * 1.1, CELL * 2.4, CELL * 3.9, CELL * 5.2];
+  for (let ri = 0; ri < rings.length; ri++) {
+    const r = rings[ri], steps = 12 + ri * 4;
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * Math.PI * 2 + ri * 0.6;
+      const fx = origin.x + Math.sin(a) * r, fz = origin.z + Math.cos(a) * r;
+      if (!isOpenCell(fx, fz)) continue;
+      _scanDir.set(fx - origin.x, 0, fz - origin.z);
+      const d = _scanDir.length(); if (d < 0.01) continue;
+      _scanDir.multiplyScalar(1 / d);
+      const w = raycastWall(origin, _scanDir, d);
+      if (w && w.dist < d - 0.25) continue; // a wall is between → don't paint it
+      spawnScanDot(key, hex, fx, 0.06, fz);
+    }
+  }
+  // MONSTERS — RED dots, LOS-gated (a mob behind a wall stays hidden; you hear it).
+  for (const p of scanMobPositions()) {
+    const dx = p.x - origin.x, dz = p.z - origin.z;
+    const d = Math.hypot(dx, dz);
+    if (d > SCAN_RANGE || d < 0.01) continue;
+    _scanDir.set(dx, 0, dz).multiplyScalar(1 / d);
+    const w = raycastWall(origin, _scanDir, d);
+    if (w && w.dist < d - 0.4) continue;
+    spawnScanDot('red', SCAN_MONSTER_COLOR, p.x, 1.15, p.z);
+    spawnScanDot('red', SCAN_MONSTER_COLOR, p.x, 0.45, p.z); // a second dot reads as a "body"
+  }
+}
+const _scanDir = new THREE.Vector3();
+
+// LOCAL fire: cooldown-gated. Paints my pulse in my slot color + pings + tells
+// teammates so my dots show up in their world (in my color). Co-op cosmetic.
+function fireScannerLocal() {
+  if (scanCooldown > 0) return;
+  scanCooldown = SCAN_COOLDOWN;
+  const slot = (typeof netMySlot === 'function') ? netMySlot() : 0;
+  doScanPulse(camera.position, slot);
+  if (typeof playScannerPing === 'function') playScannerPing();
+  if (typeof netAnnounceScan === 'function') netAnnounceScan(camera.position, slot);
+}
+
+/* ═══════════════════════════════════════════
    WEAPON SWITCHING
    ═══════════════════════════════════════════ */
 // Stow the active weapon's ammo, equip idx, restore its ammo, rebuild the
@@ -4228,7 +4456,12 @@ function updatePlayer(dt) {
   camera.updateProjectionMatrix();
 
   if (player.fireTimer > 0) player.fireTimer -= dt;
-  if (mouseDown && !player.isReloading && player.fireTimer <= 0 && player.clipAmmo > 0) playerShoot();
+  if (scanCooldown > 0) scanCooldown -= dt; // Lights Out scanner recharge
+  // SCANNER FLOOR (Lights Out): LMB pulses the scanner (fired on the mousedown
+  // EVENT, not held), and the GUN auto-fires on held RIGHT mouse (ADS is useless
+  // in the dark, so RMB is repurposed to shoot). Elsewhere: LMB auto-fires as usual.
+  const autoFireHeld = getTheme(currentFloor).scanner ? rightMouseDown : mouseDown;
+  if (autoFireHeld && !player.isReloading && player.fireTimer <= 0 && player.clipAmmo > 0) playerShoot();
 
   if (player.isReloading) {
     player.reloadTimer -= dt;
@@ -4640,9 +4873,10 @@ function updateHUD() {
   //  • boss / no gate: hidden (the boss HP bar carries the boss goal).
   const gate = theme.gate || 'kills';
   if (!theme.isBoss && gate === 'reach') {
-    // CHASE: the exit is always open — the goal is to survive the run TO it.
+    // REACH gate: the exit is always open — the goal is to get TO it. Per-theme
+    // flavor text (chase = "RUN — REACH THE EXIT"; Lights Out = "FIND THE EXIT").
     hudSetStyle('goalHud', 'display', 'block');
-    hudSetText('goalHudText', 'RUN — REACH THE EXIT');
+    hudSetText('goalHudText', theme.goalText || 'REACH THE EXIT');
     hudSetStyle('goalHudFill', 'width', '100%');
     if (!_goalHudOpen) { _goalHudOpen = true; hudEl('goalHud').classList.toggle('goal-open', true); }
   } else if (!theme.isBoss && gate === 'item' && artifactsTotal > 0) {
@@ -5172,6 +5406,42 @@ function gameOver() {
   document.exitPointerLock();
 }
 
+/* ═══════════════════════════════════════════
+   RUN VICTORY (20th-floor capstone). Triggered when the FINALE boss dies
+   (enemies.js → winRun). winRun is the host/solo entry: it shows the screen AND
+   broadcasts 'run_won' so the whole party gets the ending together; showVictory
+   is the local screen (also called on clients from the 'run_won' handler).
+   ═══════════════════════════════════════════ */
+function winRun() {
+  showVictory();
+  if (typeof netBroadcastRunWon === 'function') netBroadcastRunWon(); // host → clients (no-op solo/client)
+}
+
+function showVictory() {
+  if (gameState === 'won') return; // idempotent (boss death + a relayed 'run_won' could race)
+  gameState = 'won';
+  closeShopSilent();
+  // Silence the floor audio for a clean ending.
+  if (typeof stopLevelFunMusic === 'function') stopLevelFunMusic();
+  if (typeof stopHotelChaseAmbience === 'function') stopHotelChaseAmbience();
+  if (typeof stopFileMusic === 'function') stopFileMusic();
+  if (typeof stopAmbient === 'function') stopAmbient();
+  if (typeof playVictorySting === 'function') playVictorySting();
+  markFloorBeaten(currentFloor); // the capstone counts as cleared (local progression)
+
+  document.getElementById('hud').style.display = 'none';
+  document.getElementById('bossHpContainer').style.opacity = '0';
+  const theme = getTheme(currentFloor);
+  const vs = document.getElementById('vicStats');
+  if (vs) vs.innerHTML =
+    `You made it out after Level ${currentFloor + 1} — ${theme.name}` +
+    `<br>Enemies Eliminated: ${player.kills}` +
+    `<br>Floors Cleared: ${currentFloor + 1} / ${LEVEL_THEMES.length}`;
+  const vm = document.getElementById('victoryMenu');
+  if (vm) vm.style.display = 'flex';
+  document.exitPointerLock();
+}
+
 function quitToMenu() {
   gameState = 'menu';
   closeShopSilent();
@@ -5284,22 +5554,30 @@ document.addEventListener('mousemove', e => {
 });
 
 document.addEventListener('mousedown', e => {
+  const scannerFloor = gameState === 'playing' && getTheme(currentFloor).scanner;
   if (e.button === 0) {
     mouseDown = true;
     if (gameState === 'playing') {
       if (document.pointerLockElement === document.body) {
-        playerShoot();
+        // SCANNER FLOOR: LMB pulses the scanner instead of firing the gun.
+        if (scannerFloor) fireScannerLocal();
+        else playerShoot();
       } else {
         // FALLBACK: playing but not locked — happens when resumeGame's relock
         // was rejected by Chrome's post-Esc cooldown. Clicking the game area
-        // re-acquires the lock (this click does NOT fire a shot).
+        // re-acquires the lock (this click does NOT fire a shot / scan).
         tryPointerLock();
       }
     }
   }
   if (e.button === 2) {
     rightMouseDown = true;
-    if (gameState === 'playing') player.isADS = true;
+    if (gameState === 'playing') {
+      // SCANNER FLOOR: RMB shoots (ADS is useless in the dark); single shot now,
+      // auto-fire while held handled in updatePlayer. Elsewhere RMB = ADS.
+      if (scannerFloor) { if (document.pointerLockElement === document.body) playerShoot(); }
+      else player.isADS = true;
+    }
   }
 });
 document.addEventListener('mouseup', e => {
@@ -5332,6 +5610,13 @@ document.getElementById('btnControls').addEventListener('click', () => {
 document.getElementById('btnResume').addEventListener('click', resumeGame);
 document.getElementById('btnQuit').addEventListener('click', quitToMenu);
 document.getElementById('btnRestart').addEventListener('click', startGame);
+// Victory screen (20th-floor capstone): Play Again restarts a run; Main Menu bails.
+{
+  const va = document.getElementById('btnVictoryAgain');
+  const vmn = document.getElementById('btnVictoryMenu');
+  if (va) va.addEventListener('click', () => { document.getElementById('victoryMenu').style.display = 'none'; startGame(); });
+  if (vmn) vmn.addEventListener('click', () => { document.getElementById('victoryMenu').style.display = 'none'; quitToMenu(); });
+}
 
 /* ════ PART 1 — DEV TOOL: unrestricted level-select (jump to ANY floor). Only built
    when ?dev=1; otherwise the whole #devLevelSelect block is hidden so friends never
@@ -5698,6 +5983,7 @@ function animate() {
     updateWaterFX(dt); // pools floors: water UV drift + caustics pulse (no-op elsewhere)
     updateBulletTrails(dt);
     updateImpactSparks(dt); // pooled spark particles fly out + fade (no lights)
+    updateScanDots(dt);     // Lights Out: fade scanner dots (per-instance scale; no lights)
     updateFlares(dt);       // flare light/bead countdown (no-op when idle)
     updateAmmoPickups(dt);
     updateArtifacts(dt); // lore objective: bob/spin + walk-over collect (no-op off item floors)

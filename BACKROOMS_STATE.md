@@ -11,8 +11,9 @@ session: what changed, what's validated vs unplayed, what's next.
 ## THE GAME
 Three.js r128 (CDN) WebGL first-person shooter. P2P co-op, host-authoritative.
 Repo: `github.com/CodeAndCalories/backrooms_shooter`, deployed on Vercel.
-18 themed floors (Lobby → Hotel Chase), bosses every 5 levels, anti-linger spawner,
-fog-of-war minimap, pool/water system with fake caustics.
+20 themed floors (Lobby → The Last Door), a boss every 5th (Warden/Amalgam/Hive/
+Devourer) ending in a 20th-floor capstone with a victory screen, anti-linger
+spawner, fog-of-war minimap, pool/water system with fake caustics.
 
 ## HARD CONSTRAINTS (go in EVERY Claude Code prompt)
 - Seeded RNG only for anything world/spawn related (co-op sync)
@@ -29,6 +30,92 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **NEW FLOOR 20 — "The Last Door" (FINAL BOSS capstone, index 19, June 16,
+  UNPLAYED):** the milestone ending. Pure config + a tougher fight + a finale
+  screen — **no new systems** (reuses the boss archetype, `bossHpFor` scaling, and
+  the boss sprites).
+  - **The boss:** reuses the **Amalgam sprite** (`boss_amalgam` — "it has consumed
+    everything," and not the immediately-prior boss) as a new identity, **THE
+    DEVOURER**. Toughest by far: **bossHp 3600** (Warden 800 / Amalgam 1400 / Hive
+    2200), **bossScale 5.0** (~10m — the arena builds tall via `roomH`), speed 3.4,
+    damage 32, 6 adds, in a **bigger arena** (mazeSize 9 vs Hive's 8). Per-player HP
+    scaling applies (solo 3600 → duo 6300 → 4p 11700). First-visit has NO loop bonus
+    (floor 19 / 20 themes = 0); the loop bonus still kicks in on later loops.
+  - **The finale (`isFinale: true`):** killing the boss **ENDS THE RUN** — no exit to
+    walk to. After the death animation, `winRun()` (host/solo) shows a **"YOU
+    ESCAPED" victory screen** (run stats: floor reached, kills, floors cleared) with
+    **Play Again** + **Main Menu** buttons, sets `gameState='won'` (freezes gameplay
+    — ESC/shoot/scan all no-op), marks the capstone beaten, and silences floor audio.
+    A procedural **victory sting** plays (`playVictorySting` — a rising C-major swell
+    with an uneasy detuned shadow). Every OTHER boss still spawns the exit door.
+  - **CO-OP:** host owns the boss, so it decides the win and broadcasts it. **⚠
+    PROTOCOL ADDITION (FLAGGED):** `'run_won'` (host→all) → clients show the same
+    victory screen. The whole party gets the ending together. Host-authoritative,
+    cosmetic-state only.
+  - **Level-select:** both the dev (`?dev=1`) and player level-selects iterate
+    `LEVEL_THEMES`, so floors 19 (Lights Out) + 20 (The Last Door) appear
+    **automatically** — confirmed by test. The reach-gate HUD text is now per-theme.
+  - **Headless: `tools/test_finale.js`** (new) — theme config (toughest boss, finale
+    flag, reused sprite, bigger arena), the REAL `bossHpFor` on floor 19 (solo
+    unchanged, per-player + loop scaling), the boss-death→winRun branch, the victory
+    screen + buttons + `gameState='won'`, the `'run_won'` co-op broadcast, and
+    level-select auto-pickup. **`test_boss_scaling` updated 3→4 bosses** (loop offsets
+    now derive from `LEVEL_THEMES.length`). Full suite green (17 tools); node --check
+    clean; sim_levels sweeps the floor-19 arena.
+  - **Needs a browser/co-op session — playtest gate:** Does the Devourer feel like a
+    real capstone (HP/phase pacing not a slog, the bigger arena + 10m boss read as
+    climactic)? Does "YOU ESCAPED" land as an ending (sting, Play Again works, Main
+    Menu returns cleanly)? **Co-op:** the duo/4p HP scaling fight length, and both
+    players getting the victory screen via `'run_won'`. Tuning knobs: `bossHp 3600`,
+    `bossScale 5.0`, `bossDamage 32`, `bossSpawnCount 6`, `mazeSize 9`.
+- **NEW FLOOR 19 — "Lights Out" (scanner level, index 18, June 16, UNPLAYED):** a
+  pitch-black SCANNER floor — the most novel mechanic so far. Appended after Hotel
+  Chase. Archetype **'rooms'** (the classic maze — most disorienting blind).
+  - **TOTAL DARKNESS (`theme.scanner = true`):** ambient forced 0, ceiling lights
+    at intensity 0, fixtures non-emissive, **flashlight DISABLED** (F no-ops on this
+    floor). With no light, Standard surfaces render BLACK — only emissive scan dots +
+    the exit beacon are visible. **The 32-light COUNT is untouched** (lights still
+    exist at intensity 0 → the program cache never moves); only intensities change.
+    The exit-door light (1.5) is the one thing that pierces the dark.
+  - **THE SCANNER (the dot system):** **LMB fires a radial pulse** (cooldown 1.5s).
+    It casts a ring of grid-DDA rays → paints short-lived **glowing dots** where they
+    hit walls (the firer's slot color), radial floor samples (LOS-gated), and **RED
+    dots on monsters** (LOS-gated — a mob behind a wall stays hidden; you HEAR it via
+    the new vocalizations). Dots fade over ~3.6s; you navigate by memory between
+    pulses. **CONSTRAINT-CRITICAL & verified: dots add ZERO lights** — each color is
+    ONE `InstancedMesh` of `MeshStandardMaterial` **no-map emissive** (the SAME family
+    the ceiling-light fixtures + Hotel-Chase furniture instance every floor → no new
+    shader program), fade is per-INSTANCE SCALE (shared material never mutates → one
+    draw call per color, capped 256/color, ring-recycled). Pulled from the scene
+    before the teardown traverse (shared geo/mats, like sparks/decals).
+  - **INPUT scheme (scanner floor only):** **LMB = scan**, **RMB = shoot** (ADS is
+    useless in the dark → repurposed; gun auto-fires on held RMB). Shooting still
+    works — the muzzle flash briefly lights the room (risk/reward: firing reveals
+    you). Off this floor, controls are unchanged (LMB shoots, RMB ADS).
+  - **ENEMIES:** sparse but lethal (stalker + phantom, countMult 0.45) — only visible
+    when scanned (red) or extremely close. They hunt via normal AI; their idle/aggro
+    vocalizations carry the floor.
+  - **EXIT:** `gate: 'reach'` (find the exit = win; `goalText: 'FIND THE EXIT'`). The
+    reach-gate HUD text is now per-theme (`theme.goalText`). The glowing door + its
+    light is the beacon once you're near; fog-of-war + darkness make it hard to find.
+  - **CO-OP:** each player scans in THEIR slot color (P1 yellow, P2 green, …); monster
+    dots are RED. Monster reveal is PER-MACHINE (each reveals from its own mob list —
+    no host authority). **⚠ PROTOCOL ADDITION (FLAGGED):** `'scan'` (client→host) +
+    `'scan_fx'` (host→clients) — purely COSMETIC, shares a pulse's origin+slot so
+    teammates' wall/floor dots show up in their colors; old builds ignore it. No
+    gameplay state crosses the wire.
+  - **Audio:** `playScannerPing` (rising sonar blip + airy sweep tail) on each pulse.
+  - **Headless: `tools/test_scanner.js`** (new) — proves NO PointLight/SpotLight in
+    the dot system + InstancedMesh/no-map/emissive material + per-instance-scale fade;
+    drives the REAL `doScanPulse` over a grid (wall+floor dots, monster reveal with
+    LOS gating, slot-color routing, determinism); theme/darkness/input/co-op wiring.
+    Full suite green (16 tools); node --check clean; sim_levels sweeps floor 18.
+  - **Needs a browser/co-op session — playtest gate:** Is the darkness total + the
+    scan reveal readable (dot size/brightness/fade ~3.6s, range ~6 cells)? Does LMB-
+    scan / RMB-shoot feel right, and the muzzle-flash risk/reward land? Are mobs scary
+    when you only hear them then catch a red flicker? **PROG counter flat** entering/
+    leaving the floor (proves the dots added no shader program)? Exit beacon findable?
+    Co-op: teammates' scans in distinct colors, shared via 'scan_fx'.
 - **DEV PLAYTEST CHEATS (June 16) — `?dev=1` ONLY, zero effect on the normal/co-op
   build, no protocol impact:**
   - **Clearer jump-to-floor:** the dev level-select (start menu, `?dev=1`) was tiny

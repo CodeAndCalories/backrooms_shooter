@@ -16,7 +16,8 @@ companion to `BACKROOMS_STATE.md`:
 A liminal-horror first-person shooter set in the Backrooms. **Three.js r128 (CDN),
 raw WebGL, no build step** — plain `.js` files loaded as classic scripts (NOT ES
 modules) that all share one global scope. P2P **co-op via PeerJS 1.5.4**, WebRTC data
-channels, **host-authoritative**. 18 themed floors, a boss every 5th. Procedural
+channels, **host-authoritative**. 20 themed floors, a boss every 5th (the 20th is a
+capstone final boss → victory screen). Procedural
 everything (canvas textures + Web Audio); the only file assets are 4 boss GLB mob
 models + 3 boss sprite PNGs. Deployed on Vercel from `origin/main`. Repo:
 `github.com/CodeAndCalories/backrooms_shooter`.
@@ -74,6 +75,8 @@ suite (all must stay green):
 | `tools/test_ai.js` | `isOpenCell`, `steerAround` (clear pass-through vs rounds-a-wall), roam/hunt threshold constants, danger-always-hunts. |
 | `tools/test_sanity.js` | Consumable placement determinism + 0 world draws + constraints, sanity drain math + Poolrooms safe-zone guard, tuning constants, no-new-lights. |
 | `tools/test_loadorder.js` | Executes the REAL top-level code of audio/net/enemies in index.html load order (browser stubs, deliberately NO main.js globals): no load-time throw, no TDZ casualties, plus a static no-top-level-main.js-global-reads scan. Catches the bug class the extraction sandboxes mask. |
+| `tools/test_finale.js` | Floor 20 "The Last Door" capstone: theme config (toughest boss, `isFinale`, reused `boss_amalgam` sprite, bigger arena), the real `bossHpFor` on floor 19 (solo unchanged + per-player + loop scaling), boss-death→`winRun` branch, the victory screen + `gameState='won'` + buttons, the `run_won` co-op broadcast, and level-select auto-pickup of floors 19+20. |
+| `tools/test_scanner.js` | Lights Out (floor 18): the constraint-critical "dots add NO point lights" check (no PointLight/SpotLight in the dot source) + InstancedMesh/no-map/emissive material + per-instance-scale fade; drives the REAL `doScanPulse` over a grid (wall+floor dots, LOS-gated monster reveal, slot-color routing, determinism); theme/darkness/flashlight/input/co-op-relay wiring. |
 | `tools/test_devcheats.js` | `?dev=1` playtest cheats: god toggle + `damagePlayer` no-op, infinite-ammo clip top-up, repeatable give-cash, kill-all (spares the unkillable chaser, host/solo only), the `DEV_MODE` gating, and the `#hudCheats` + named level-select wiring. |
 | `tools/test_audio.js` | Audio pass: mob-vocal concurrency cap (4 idle + 2 event reserve, frees on voice end) via the real `vocalSlot`; every `playMobVocal` type×kind synth branch runs without throwing + routes through `sfxGain` (real `_vNoise`/`_vTone` over a fake Web Audio graph); per-theme ambient beds exist + are rebuilt per floor; the vocal trigger + `mob_vocal` broadcast/handler wiring; balloon-pop + growl improvements. |
 | `tools/test_music.js` | Real-music-file loader: extracts `startFileMusic`/`stopFileMusic` and drives every branch over a fake Audio/Web-Audio graph — present file wired+played+looped through `ambientGain`; missing/error/stall → procedural `onFail`; `.ogg→.mp3` candidate fallthrough; floor-change aborts a stale load; `stopFileMusic` tears down. Plus `updateFloorMusic` wiring + `assets/audio/` exists. |
@@ -162,7 +165,11 @@ Everything else. Roughly in source order: constants (incl. all tuning knobs), `L
 texture creators + `themeTextureCache` + `texMarkSRGB`, level generators (per archetype),
 `pickExitCell` + `buildExitDoor`, gun viewmodels + `createGun`/`updateGun`, flashlight +
 `createProgramKeepalive`, ammo pickups, balloons, **artifacts**, **consumables**, the
-**impact-FX pools** (sparks/decals/flare), `buildMazeScene` (the per-floor teardown +
+**impact-FX pools** (sparks/decals/flare), the **scanner-dot system** (Lights Out floor 18
+— `doScanPulse`/`spawnScanDot`/`updateScanDots`: emissive-only InstancedMesh dots, ZERO
+lights, per-instance-scale fade, reuses the instanced-Standard-no-map family; plus
+`fireScannerLocal`, the LMB-scan/RMB-shoot routing, and the darkness override in
+buildMazeScene), `buildMazeScene` (the per-floor teardown +
 rebuild — read its teardown comment carefully before adding any scene object), shooting
 (`playerShoot`/`resolveCombatPellet`/`raycastWall`), `damagePlayer` + **sanity** +
 `updateSanity`, **scare events**, minimap (fog-of-war), HUD, the menu/ESC state machine,
@@ -204,7 +211,11 @@ apply damage), `reward` (host → killer: money + kill credit).
 floor advance; host re-validates `netExitGateOpen` then advances all).
 
 **Events:** `scare` (host → all: `{type, data}` — shared scripted scares; data carries
-only what each client needs to reproduce it from its own viewpoint). `mob_vocal` (host →
+only what each client needs to reproduce it from its own viewpoint). `scan` (client → host)
++ `scan_fx` (host → clients): Lights Out scanner pulse sharing — origin + firer color slot
+so teammates' dots paint in their colors; COSMETIC (monster reveal is per-machine, no host
+authority). `run_won` (host → all): the 20th-floor finale boss died → the whole party gets
+the victory screen (host-authoritative; `showVictory`). `mob_vocal` (host →
 all: `{t:type, k:kind, x, z}` — state-driven mob vocalizations [aggro/attack/chaser-roar]
 so co-op players share them; each receiver re-spatializes from its own camera. Idle mob
 ambience is NOT broadcast — every machine voices its own nearby mobs. Cosmetic, no

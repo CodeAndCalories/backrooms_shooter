@@ -898,8 +898,14 @@ function damageBoss(amount) {
         disposeMobVisual(b.mesh); // per-instance sprite material; shared boss texture untouched
         scene.remove(b.mesh);
         document.getElementById('bossHpContainer').style.opacity = '0';
-        // Create exit after boss dies
-        createBossExit();
+        // FINALE (floor 20 capstone): killing the boss ENDS THE RUN — no exit to
+        // walk to, straight to the victory screen (host broadcasts to the party).
+        // Every other boss spawns the exit door as before.
+        if (getTheme(currentFloor).isFinale) {
+          if (typeof winRun === 'function') winRun();
+        } else {
+          createBossExit();
+        }
       }
     };
     deathAnim();
