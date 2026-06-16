@@ -16,7 +16,7 @@ companion to `BACKROOMS_STATE.md`:
 A liminal-horror first-person shooter set in the Backrooms. **Three.js r128 (CDN),
 raw WebGL, no build step** — plain `.js` files loaded as classic scripts (NOT ES
 modules) that all share one global scope. P2P **co-op via PeerJS 1.5.4**, WebRTC data
-channels, **host-authoritative**. 17 themed floors, a boss every 5th. Procedural
+channels, **host-authoritative**. 18 themed floors, a boss every 5th. Procedural
 everything (canvas textures + Web Audio); the only file assets are 4 boss GLB mob
 models + 3 boss sprite PNGs. Deployed on Vercel from `origin/main`. Repo:
 `github.com/CodeAndCalories/backrooms_shooter`.
@@ -74,6 +74,7 @@ suite (all must stay green):
 | `tools/test_ai.js` | `isOpenCell`, `steerAround` (clear pass-through vs rounds-a-wall), roam/hunt threshold constants, danger-always-hunts. |
 | `tools/test_sanity.js` | Consumable placement determinism + 0 world draws + constraints, sanity drain math + Poolrooms safe-zone guard, tuning constants, no-new-lights. |
 | `tools/test_loadorder.js` | Executes the REAL top-level code of audio/net/enemies in index.html load order (browser stubs, deliberately NO main.js globals): no load-time throw, no TDZ casualties, plus a static no-top-level-main.js-global-reads scan. Catches the bug class the extraction sandboxes mask. |
+| `tools/test_chase.js` | Hotel Chase (floor 17, 'chase' archetype): `generateChase` spawn→exit path always exists + every deck cell reachable (furniture never seals it) + furniture present + no pools + determinism (600 seeds); `chaserNextWaypoint` BFS reaches the player from spawn over 200 seeds (never stuck) with valid single-step waypoints; theme/gate/noStamina/chaser-type/wire-index/unkillable-hit/stamina-override/`netExitGateOpen('reach')` invariants. Prints ASCII maps. |
 
 Non-test tooling: `optimize_models.js` (GLB Draco/quantize — how the boss mob models
 were shrunk), `quantize_pngs.js` (boss sprite PNG palette reduction), `inspect_glb.js`,
@@ -124,7 +125,10 @@ starts/stops it on floor entry.
 the swappable visual seam (GLB clones via SkeletonUtils, or the cheap wire-figure
 fallback). `spawnEnemy` (seeds the enemy object incl. **roam/hunt behavior**),
 `updateEnemies` (the AI loop: target nearest player, **roam vs hunt state**, `steerAround`
-wall avoidance, attack, death fade, pools wading). `bossHpFor` (PURE, co-op HP scaling),
+wall avoidance, attack, death fade, pools wading; the **chaser** gets its own BFS-waypoint
+branch). **THE CHASER (Hotel Chase): `spawnChaser`/`spawnFloorChasers` + `chaserNextWaypoint`**
+(grid-BFS pursuit, robust around sharp turns; fixed speed = 0.9× sprint derived at runtime;
+`unkillable` flag → `applyEnemyHit` flinches but never kills/stuns it). `bossHpFor` (PURE, co-op HP scaling),
 `spawnBoss`/`updateBoss`/`updateBossProjectiles`, `createBossExit`. Wave system
 (`spawnWave`, `waveSizeFor`) + anti-linger (`updateAntiLinger`, `spawnDangerMob`).
 Clients never run any of this — they render mirrors from snapshots.
@@ -166,7 +170,10 @@ build via the same `generateCurrentFloor` path).
 
 **Position / sim:** `pos` (15Hz position/orientation stream, both directions), `enemies`
 (host → all: enemy snapshot — id, type, x/z, hp, maxHp; clients rebuild mirrors + the
-kill-gate count `k`).
+kill-gate count `k`). The **chaser** rides this same snapshot (its wire type `'chaser'` is
+APPENDED to `NET_TYPE_LIST` — existing indices unchanged; it never dies so it never leaves
+the snapshot). The **'reach' gate** (chase floors) is decided in `netExitGateOpen` (always
+open), no message of its own. Both are protocol additions → both players on the new build.
 
 **Combat:** `shoot` (client → host: ray origin/dir + weapon id `w` + pellet rays `p` +
 damage mult `m`; host resolves authoritatively), `shot_fx` (cosmetic relay so teammates
@@ -344,6 +351,7 @@ re-run the relevant test, playtest.
 | Ammo | main.js `CLIP_SIZE`/`RESERVE_MAX`/`AMMO_DROP_CHANCE` 0.2; per-weapon stats in `WEAPONS` | Pistol baseline + each gun's damage/fireRate/clip/pellets/spread/falloff. |
 | Scare frequency | main.js `placeScareTriggers` (1-2/floor), `SCARE_SAFE_TIME` 30, `rollScareType` weights | How often/early scares fire + per-theme flavor. |
 | AI behavior | enemies.js `ROAM` roll (~0.42 in `spawnEnemy`), `HUNT_NEAR` 3cells, `HUNT_VISION` 8cells, `HUNT_MEMORY` 5s, `ROAM_SPEED_MULT` 0.5 | Roam-vs-hunt mix + detection ranges. |
+| Hotel Chase (chaser) | enemies.js `CHASER_SPRINT_FRAC` 0.9 (**the key knob** — chaser speed vs player sprint), `CHASER_GRACE` 3s (head start), `CHASER_REPATH` 0.3s (BFS interval), `MOB_TYPES.chaser.damage` 34; main.js `generateChase` `P_FURNITURE` 0.42 (obstacle density), `LANE_H`/`NL`/`LANE_LEN` (corridor shape); theme 17 `chaserCount`/`mobs` (obstacle-mob sparsity) | Chase pace, head start, obstacle density, corridor length. |
 | Mob ecology | `LEVEL_THEMES[].mobs` (types/weights/danger/speedMult/hpMult/countMult/waveBase/waveCap) | Per-floor roster, difficulty, pacing. |
 | Anti-linger | main.js `LINGER_SAFE_TIME` 45, `LINGER_SPAWN_BASE/MIN` | When/how fast danger mobs pressure a lingering player. |
 | Level Fun music | audio.js `startLevelFunMusic`: note gap 3.5-10s, drone gain 0.16, stab interval 30-70s | Dread pacing (sparse music-box, leading drone, rare distant stabs). |

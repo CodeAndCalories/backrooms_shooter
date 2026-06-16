@@ -198,7 +198,13 @@ const MOB_TYPES = {
   spider:         { speed: 3.5, health: 90,  damage: 11, color: 0x2a2a22, scale: 1.0,  height: 1.4,  attackRange: 1.6, attackCooldown: 1.0, name: 'Spider' },
   // Partygoer — the signature mob of Level Fun. Human-sized, unhurried, moderately tanky
   // melee (it shambles toward you and hits hard up close).
-  partygoer:      { speed: 2.8, health: 110, damage: 12, color: 0x884466, scale: 1.0,  height: 1.8,  attackRange: 1.7, attackCooldown: 1.2, name: 'Partygoer' }
+  partygoer:      { speed: 2.8, health: 110, damage: 12, color: 0x884466, scale: 1.0,  height: 1.8,  attackRange: 1.7, attackCooldown: 1.2, name: 'Partygoer' },
+  // THE CHASER — Hotel Chase (floor 17). UNKILLABLE relentless pursuer. base `speed`
+  // here is a placeholder: spawnChaser OVERRIDES it to a fixed fraction of the player's
+  // sprint (depth scaling does NOT apply — the whole level is built around its constant
+  // pace). Big scale/reach, heavy melee. hp is irrelevant (it can't be hurt) but kept
+  // nonzero so the snapshot/HUD math never divides by zero.
+  chaser:         { speed: 8.0, health: 9999, damage: 34, color: 0x551015, scale: 2.0,  height: 4.0,  attackRange: 2.4, attackCooldown: 1.1, name: 'The Chaser' }
 };
 
 /* ═══════════════════════════════════════════
@@ -242,7 +248,10 @@ const MODEL_DEFS = {
   spider:         { url: 'models/backrooms_aranea_membri_rigged_blender_3.01.glb', height: 1.4, faceOffset: Math.PI },
   // partygoer → human-sized. Grounded, auto-scaled to ~1.8m. faceOffset 0: this model
   // already faces +Z, so no 180° flip (Math.PI would turn its back to the player).
-  partygoer:      { url: 'models/partygoer_from_backrooms.glb', height: 1.8, faceOffset: 0 }
+  partygoer:      { url: 'models/partygoer_from_backrooms.glb', height: 1.8, faceOffset: 0 },
+  // chaser → the skinstealer again (SAME url → deduped in preload, no extra asset/load),
+  // built TALLER (3.0m) and red-tinted in instanceMobModel. faceOffset matches stalker.
+  chaser:         { url: 'models/escape_the_backrooms_skinstealer.glb', height: 3.0, faceOffset: 0 }
 };
 const modelCache = {}; // url -> { scene, rigged } on success, or null on failure
 
@@ -318,12 +327,18 @@ function instanceMobModel(type) {
   // any map-less material dark so it matches the intended near-black look. Other
   // models (skinstealer) and sprites are untouched.
   const isBacteria = (type === 'crawler' || type === 'danger_crawler');
+  // THE CHASER reuses the skinstealer model but multiplies its base color toward
+  // blood-red so it reads as a distinct menace under the floor's red lighting. A
+  // COLOR tint (not emissive) survives setMobFlash, which only drives emissive.
+  const isChaser = (type === 'chaser');
   inner.traverse(o => {
     if (o.isMesh && o.material) {
       o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
       if (isBacteria) {
-        const mats = Array.isArray(o.material) ? o.material : [o.material];
         mats.forEach(m => { if (!m.map && m.color) m.color.setHex(0x0a0a0a); });
+      } else if (isChaser) {
+        mats.forEach(m => { if (m.color) m.color.multiplyScalar(0.9).lerp(new THREE.Color(0x661014), 0.55); });
       }
     }
   });
@@ -381,6 +396,11 @@ function buildMobModel(type, scale) {
   // SLOT 5 — partygoer model (Level Fun). Wire-figure fallback (no partygoer sprite).
   if (type === 'partygoer') {
     return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE);
+  }
+  // SLOT 6 — THE CHASER (Hotel Chase). Skinstealer model, red-tinted + tall.
+  // Wire-figure fallback (a tall looming figure) if the GLB failed to load.
+  if (type === 'chaser') {
+    return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE * 1.4);
   }
   // Everything else unchanged: original sprite.
   return buildSpriteMob(type, scale);
@@ -1015,6 +1035,14 @@ const HUNT_VISION_CELLS = 8.0;   // ...or sees them down a clear corridor (LOS)
 const HUNT_MEMORY = 5.0;         // keeps hunting this long after losing sight
 const ROAM_SPEED_MULT = 0.5;     // roamers wander at half speed
 
+/* ── THE CHASER (Hotel Chase, floor 17) tuning — all SELF-CONTAINED literals
+   (no main.js globals at top level; world speed is derived inside spawnChaser
+   where MOVE_SPEED/SPRINT_MULT exist — see the load-order war story). */
+const CHASER_SPRINT_FRAC = 0.9;  // fixed speed = this × the player's full sprint speed
+const CHASER_REPATH = 0.3;       // seconds between BFS waypoint recomputes (per chaser)
+const CHASER_GRACE = 3.0;        // head-start: stands still & harmless this long after spawn
+const CHASER_WP_REACH_CELLS = 0.45; // distance (in CELLs) at which a waypoint is "reached"
+
 // Is this WORLD position inside an open (walkable) grid cell? floor(1)/pool(2).
 function isOpenCell(wx, wz) {
   const cx = Math.floor(wx / CELL), cy = Math.floor(wz / CELL);
@@ -1048,6 +1076,126 @@ function mobHasLineOfSight(pos, tgt, dist) {
   _losDir.normalize();
   const wall = raycastWall(pos, _losDir, dist);
   return !wall || wall.dist >= dist - 0.2; // nothing solid before the target
+}
+
+/* THE CHASER's brain: a grid BFS from the chaser's cell to the target player's
+   cell over WALKABLE deck (mazeGrid === 1 — furniture, value 3, is a wall to it),
+   returning the WORLD center of the next cell to step toward (or null to fall
+   back to a straight-line aim). Greedy "move at the player" gets stuck on the
+   level's sharp hairpins/dead-ends; BFS keeps the pursuer relentless and never
+   permanently boxed in. Cheap: throttled to CHASER_REPATH per chaser, the grid
+   is ~21×25. Host-only (only the host runs updateEnemies). Uses CELL/mazeGrid at
+   RUNTIME (defined by then), never at file top level. */
+function chaserNextWaypoint(pos, tgt) {
+  if (!mazeGrid || !mazeGrid.length) return null;
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+  const sx = Math.floor(pos.x / CELL), sy = Math.floor(pos.z / CELL);
+  const tx = Math.floor(tgt.x / CELL), ty = Math.floor(tgt.z / CELL);
+  if (sx < 0 || sy < 0 || sx >= gw || sy >= gh) return null;
+  if (sx === tx && sy === ty) return null; // same cell → just bee-line at them
+  const N = gw * gh;
+  const prev = new Int32Array(N).fill(-1);
+  const startI = sy * gw + sx;
+  prev[startI] = startI;
+  const q = [startI];
+  let head = 0, foundI = -1;
+  while (head < q.length) {
+    const ci = q[head++];
+    const cx = ci % gw, cy = (ci - cx) / gw;
+    if (cx === tx && cy === ty) { foundI = ci; break; }
+    const nb = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
+    for (let k = 0; k < 4; k++) {
+      const nx = nb[k][0], ny = nb[k][1];
+      if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+      const ni = ny * gw + nx;
+      if (prev[ni] !== -1) continue;          // visited
+      if (mazeGrid[ny][nx] !== 1) continue;   // wall / furniture / pool → impassable
+      prev[ni] = ci;
+      q.push(ni);
+    }
+  }
+  if (foundI < 0) return null; // unreachable (shouldn't happen on a built floor)
+  // Walk parents back to the cell whose parent IS the start → that's the next step.
+  let ci = foundI;
+  while (prev[ci] !== startI && prev[ci] !== ci) ci = prev[ci];
+  const cx = ci % gw, cy = (ci - cx) / gw;
+  return { x: cx * CELL + CELL / 2, z: cy * CELL + CELL / 2 };
+}
+
+/* Spawn THE CHASER near the player start. Host-authoritative (clients mirror it
+   via the enemy snapshot). FIXED speed (no depth scaling), unkillable, always
+   hunts via BFS. A short spawn-grace gives the player a head start. */
+function spawnChaser() {
+  if (netIsClient()) return; // MP: the chaser is simulated on the host only
+  const gh = mazeGrid.length, gw = mazeGrid[0].length;
+
+  // Place it on a walkable cell at/near spawn (1,1). The grace timer + the player
+  // running for the exit opens the gap; spawning ON the start keeps it "right
+  // behind you" from the first second.
+  let sx = 1, sy = 1;
+  if (!(mazeGrid[1] && mazeGrid[1][1] === 1)) {
+    outer: for (let r = 1; r < Math.max(gw, gh); r++) {
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const nx = 1 + dx, ny = 1 + dy;
+        if (nx > 0 && ny > 0 && nx < gw - 1 && ny < gh - 1 && mazeGrid[ny][nx] === 1) { sx = nx; sy = ny; break outer; }
+      }
+    }
+  }
+  const wx = sx * CELL + CELL / 2, wz = sy * CELL + CELL / 2;
+
+  const mt = MOB_TYPES.chaser;
+  const mesh = buildMobModel('chaser', mt.scale);
+  mesh.position.set(wx, mesh.isGroup ? 0 : mt.scale * 2.5 / 2, wz);
+  scene.add(mesh);
+
+  // FIXED world speed — derived HERE (runtime) from main.js globals, never at top
+  // level. Deliberately depth-INDEPENDENT: the whole floor is tuned to this pace.
+  const sprintSpeed = MOVE_SPEED * SPRINT_MULT;
+
+  const enemy = {
+    id: ++netEnemyIdCounter,
+    type: 'chaser', mesh,
+    height: mt.height,
+    scale: mt.scale,
+    hp: mt.health, maxHp: mt.health,
+    speed: sprintSpeed * CHASER_SPRINT_FRAC,
+    damage: mt.damage,
+    attackRange: mt.attackRange,
+    attackCooldown: mt.attackCooldown,
+    erratic: false,
+    pos: new THREE.Vector3(wx, mt.scale * 2.5 / 2, wz),
+    attackTimer: mt.attackCooldown,
+    erraticTimer: 0,
+    erraticDir: new THREE.Vector3(),
+    alive: true,
+    deathTimer: 0,
+    stunTimer: 0,
+    hitFlashTimer: 0,
+    aggroTimer: 0,
+    aggroPeer: null,
+    behavior: 'hunt',
+    state: 'hunt',
+    roamDir: new THREE.Vector3(),
+    roamTimer: 0,
+    huntMemory: 0,
+    losTimer: 0,
+    // CHASER-specific:
+    isChaser: true,
+    unkillable: true,            // applyEnemyHit (main.js) flinches but never kills it
+    spawnGrace: CHASER_GRACE,    // stands still & harmless this long
+    pathTimer: 0,                // 0 → recompute BFS waypoint next frame
+    wp: null                     // current world waypoint {x,z} or null
+  };
+  enemies.push(enemy);
+  return enemy;
+}
+
+// Host: spawn this floor's chaser(s). theme.chaserCount (default 1). Called from
+// startGame / advanceFloor right after the wave kicks off (host/solo path).
+function spawnFloorChasers() {
+  if (netIsClient()) return;
+  const n = Math.max(1, getTheme(currentFloor).chaserCount || 1);
+  for (let i = 0; i < n; i++) spawnChaser();
 }
 
 function updateEnemies(dt) {
@@ -1115,52 +1263,76 @@ function updateEnemies(dt) {
     const dz = tgt.z - e.pos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
 
-    // ── BEHAVIOR: resolve HUNT vs ROAM for this frame ──
-    let hunting;
-    if (e.aggroTimer > 0 || e.behavior === 'hunt') {
-      hunting = true; // balloon-trap grudge, or a pure hunter → always pursue
-    } else {
-      // Roamer: notice the player by proximity (always) or by line-of-sight
-      // within vision range (throttled). Detection refreshes a hunt "memory" so
-      // it keeps chasing briefly after losing you, then drifts back to roaming.
-      let detected = dist < HUNT_NEAR;
-      e.losTimer -= dt;
-      if (!detected && dist < HUNT_VISION && e.losTimer <= 0) {
-        e.losTimer = 0.3;
-        detected = mobHasLineOfSight(e.pos, tgt, dist);
-      }
-      if (detected) e.huntMemory = HUNT_MEMORY;
-      else if (e.huntMemory > 0) e.huntMemory -= dt;
-      hunting = e.huntMemory > 0;
-    }
-    e.state = hunting ? 'hunt' : 'roam';
-
     let moveX = 0, moveZ = 0, moveScale = 1;
-    if (hunting) {
-      if (dist > 0.3) { moveX = dx / dist; moveZ = dz / dist; }
-      if (e.erratic) {
-        e.erraticTimer -= dt;
-        if (e.erraticTimer <= 0) {
-          e.erraticTimer = 0.4 + Math.random() * 1.2;
-          e.erraticDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize();
+
+    if (e.isChaser) {
+      // ── THE CHASER: relentless fixed-speed BFS pursuit ──
+      e.state = 'hunt'; // always faces the player
+      if (e.spawnGrace > 0) {
+        e.spawnGrace -= dt;
+        moveScale = 0;  // head start: stand still (the attack block is grace-gated too)
+      } else {
+        e.pathTimer -= dt;
+        if (e.pathTimer <= 0 || !e.wp) {
+          e.pathTimer = CHASER_REPATH;
+          e.wp = chaserNextWaypoint(e.pos, tgt);
         }
-        moveX = moveX * 0.55 + e.erraticDir.x * 0.45;
-        moveZ = moveZ * 0.55 + e.erraticDir.z * 0.45;
-        const m = Math.sqrt(moveX * moveX + moveZ * moveZ);
-        if (m > 0) { moveX /= m; moveZ /= m; }
+        let aimX = dx, aimZ = dz; // fall back to a straight aim if BFS found nothing
+        if (e.wp) {
+          const wdx = e.wp.x - e.pos.x, wdz = e.wp.z - e.pos.z;
+          const wl = Math.hypot(wdx, wdz);
+          if (wl > 0.001) { aimX = wdx / wl; aimZ = wdz / wl; }
+          if (wl < CELL * CHASER_WP_REACH_CELLS) e.wp = null; // reached → repath next frame
+        } else if (dist > 0.001) { aimX = dx / dist; aimZ = dz / dist; }
+        moveX = aimX; moveZ = aimZ; moveScale = 1;
       }
     } else {
-      // ROAM: hold a wander heading; repick when it expires OR dead-ends a wall.
-      e.roamTimer -= dt;
-      const aheadOpen = isOpenCell(e.pos.x + e.roamDir.x * CELL * 0.85, e.pos.z + e.roamDir.z * CELL * 0.85);
-      if (e.roamTimer <= 0 || !aheadOpen) {
-        e.roamTimer = 2 + Math.random() * 3;
-        e.roamDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2);
-        const rl = Math.hypot(e.roamDir.x, e.roamDir.z) || 1;
-        e.roamDir.x /= rl; e.roamDir.z /= rl;
+      // ── BEHAVIOR: resolve HUNT vs ROAM for this frame ──
+      let hunting;
+      if (e.aggroTimer > 0 || e.behavior === 'hunt') {
+        hunting = true; // balloon-trap grudge, or a pure hunter → always pursue
+      } else {
+        // Roamer: notice the player by proximity (always) or by line-of-sight
+        // within vision range (throttled). Detection refreshes a hunt "memory" so
+        // it keeps chasing briefly after losing you, then drifts back to roaming.
+        let detected = dist < HUNT_NEAR;
+        e.losTimer -= dt;
+        if (!detected && dist < HUNT_VISION && e.losTimer <= 0) {
+          e.losTimer = 0.3;
+          detected = mobHasLineOfSight(e.pos, tgt, dist);
+        }
+        if (detected) e.huntMemory = HUNT_MEMORY;
+        else if (e.huntMemory > 0) e.huntMemory -= dt;
+        hunting = e.huntMemory > 0;
       }
-      moveX = e.roamDir.x; moveZ = e.roamDir.z;
-      moveScale = ROAM_SPEED_MULT;
+      e.state = hunting ? 'hunt' : 'roam';
+
+      if (hunting) {
+        if (dist > 0.3) { moveX = dx / dist; moveZ = dz / dist; }
+        if (e.erratic) {
+          e.erraticTimer -= dt;
+          if (e.erraticTimer <= 0) {
+            e.erraticTimer = 0.4 + Math.random() * 1.2;
+            e.erraticDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize();
+          }
+          moveX = moveX * 0.55 + e.erraticDir.x * 0.45;
+          moveZ = moveZ * 0.55 + e.erraticDir.z * 0.45;
+          const m = Math.sqrt(moveX * moveX + moveZ * moveZ);
+          if (m > 0) { moveX /= m; moveZ /= m; }
+        }
+      } else {
+        // ROAM: hold a wander heading; repick when it expires OR dead-ends a wall.
+        e.roamTimer -= dt;
+        const aheadOpen = isOpenCell(e.pos.x + e.roamDir.x * CELL * 0.85, e.pos.z + e.roamDir.z * CELL * 0.85);
+        if (e.roamTimer <= 0 || !aheadOpen) {
+          e.roamTimer = 2 + Math.random() * 3;
+          e.roamDir.set((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2);
+          const rl = Math.hypot(e.roamDir.x, e.roamDir.z) || 1;
+          e.roamDir.x /= rl; e.roamDir.z /= rl;
+        }
+        moveX = e.roamDir.x; moveZ = e.roamDir.z;
+        moveScale = ROAM_SPEED_MULT;
+      }
     }
 
     // Wall-aware steering: round corners toward the heading instead of jamming
@@ -1234,7 +1406,7 @@ function updateEnemies(dt) {
       e.debugLabel.position.set(e.pos.x, labelY, e.pos.z);
     }
 
-    if (dist < e.attackRange) {
+    if (dist < e.attackRange && !(e.spawnGrace > 0)) {
       e.attackTimer -= dt;
       if (e.attackTimer <= 0) {
         e.attackTimer = e.attackCooldown;

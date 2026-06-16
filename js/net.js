@@ -652,7 +652,9 @@ function netOnSceneRebuilt() {
 
 const NET_SNAPSHOT_HZ = 10;
 // Wire-format type indices — order must match on every game version.
-const NET_TYPE_LIST = ['stalker', 'crawler', 'phantom', 'danger_stalker', 'danger_crawler', 'spider', 'partygoer'];
+// APPEND-ONLY: new types go on the END so existing wire indices never shift.
+// (Adding 'chaser' is a protocol addition — both players must run the new build.)
+const NET_TYPE_LIST = ['stalker', 'crawler', 'phantom', 'danger_stalker', 'danger_crawler', 'spider', 'partygoer', 'chaser'];
 const netR2 = (v) => Math.round(v * 100) / 100; // 2-decimal wire rounding
 
 let netEnemyIdCounter = 0;     // host: stable per-spawn enemy ids (spawnEnemy)
@@ -1106,6 +1108,9 @@ onMessage('reward', (d) => {
 function netExitGateOpen() {
   const theme = getTheme(currentFloor);
   if (theme.isBoss) return true; // boss floors: the boss death spawns the exit
+  // REACH gate (Hotel Chase): the exit is open from the start — surviving the
+  // run to it IS the win. No kills, no items.
+  if ((theme.gate || 'kills') === 'reach') return true;
   // ITEM gate: collect every artifact (applies in SOLO and co-op — the lore
   // objective is the gate). The count is shared/host-validated (see main.js).
   if ((theme.gate || 'kills') === 'item') return artifactsTotal > 0 ? artifactsCollected >= artifactsTotal : true;

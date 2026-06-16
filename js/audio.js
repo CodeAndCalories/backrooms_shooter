@@ -896,12 +896,119 @@ function stopLevelFunMusic() {
   levelFunMusic = null;
 }
 
+/* ═══════════════════════════════════════════
+   HOTEL CHASE AMBIENCE (chase archetype — floor 17)
+   Procedural through ambientGain, three layers:
+   1. LOW DREAD DRONE — a constant sub-saw under everything.
+   2. BLARING EVACUATION ALARM — a two-tone beep looping forever (the "RUN" cue).
+   3. FAINT ELEVATOR MUSIC — a cheesy major phrase whose gain is driven by
+      updateChaseAudio(distToExit): near-silent down the corridor, swelling at the
+      exit (the canon "elevator music near the way out" detail).
+   Started/stopped by updateFloorMusic() like the Level Fun music. The alarm/elev
+   note timers use Math.random for tiny humanisation — per-machine ambience, not
+   world state, so the seeded-rng rule doesn't apply.
+   ═══════════════════════════════════════════ */
+let hotelChaseAudio = null; // { nodes, alarmId, elevId, elevGain, elevTarget } while playing
+
+function startHotelChaseAmbience() {
+  if (!audioCtx || hotelChaseAudio) return;
+  const out = ambientGain;
+  const nodes = [];
+
+  // 1. Low dread drone.
+  const drone = audioCtx.createOscillator(); drone.type = 'sawtooth'; drone.frequency.value = 41;
+  const droneF = audioCtx.createBiquadFilter(); droneF.type = 'lowpass'; droneF.frequency.value = 130;
+  const droneG = audioCtx.createGain(); droneG.gain.value = 0.05;
+  drone.connect(droneF); droneF.connect(droneG); droneG.connect(out);
+  drone.start();
+  nodes.push(drone);
+
+  // 2. Blaring two-tone alarm.
+  const alarmOut = audioCtx.createGain(); alarmOut.gain.value = 0.055; alarmOut.connect(out);
+  const beep = (freq, dur) => {
+    const t = audioCtx.currentTime;
+    const o = audioCtx.createOscillator(); o.type = 'square'; o.frequency.value = freq;
+    const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = 3.5;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(1, t + 0.03);
+    g.gain.setValueAtTime(1, t + dur - 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(bp); bp.connect(g); g.connect(alarmOut);
+    o.start(t); o.stop(t + dur + 0.02);
+  };
+  let alarmHigh = true;
+  const scheduleAlarm = () => {
+    if (!hotelChaseAudio) return;
+    hotelChaseAudio.alarmId = setTimeout(() => {
+      if (!hotelChaseAudio) return;
+      beep(alarmHigh ? 740 : 560, 0.46);
+      alarmHigh = !alarmHigh;
+      scheduleAlarm();
+    }, 600);
+  };
+
+  // 3. Faint elevator music — gain driven by updateChaseAudio (distance to exit).
+  const elevGain = audioCtx.createGain(); elevGain.gain.value = 0.0; elevGain.connect(out);
+  const elevNotes = [523.25, 659.25, 783.99, 659.25, 587.33, 698.46, 587.33, 493.88]; // C E G E D F D B
+  let elevI = 0;
+  const elevNote = () => {
+    const t = audioCtx.currentTime;
+    const f = elevNotes[elevI % elevNotes.length]; elevI++;
+    const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+    const o2 = audioCtx.createOscillator(); o2.type = 'sine'; o2.frequency.value = f * 2;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.46);
+    const g2 = audioCtx.createGain(); g2.gain.value = 0.18;
+    o.connect(g); o2.connect(g2); g2.connect(g); g.connect(elevGain);
+    o.start(t); o2.start(t); o.stop(t + 0.5); o2.stop(t + 0.5);
+  };
+  const scheduleElev = () => {
+    if (!hotelChaseAudio) return;
+    hotelChaseAudio.elevId = setTimeout(() => {
+      if (!hotelChaseAudio) return;
+      if (hotelChaseAudio.elevTarget > 0.02) elevNote(); // only synth when audible (near the exit)
+      scheduleElev();
+    }, 360);
+  };
+
+  hotelChaseAudio = { nodes, alarmId: null, elevId: null, elevGain, elevTarget: 0 };
+  scheduleAlarm();
+  scheduleElev();
+}
+
+function stopHotelChaseAmbience() {
+  if (!hotelChaseAudio) return;
+  if (hotelChaseAudio.alarmId) clearTimeout(hotelChaseAudio.alarmId);
+  if (hotelChaseAudio.elevId) clearTimeout(hotelChaseAudio.elevId);
+  for (const n of hotelChaseAudio.nodes) { try { n.stop(); } catch (e) {} }
+  hotelChaseAudio = null;
+}
+
+// Per-frame from animate(): fade the elevator music up as the player nears the
+// exit. distToExit is in world units (or <0 / undefined → silent). No-op off the
+// chase floor (hotelChaseAudio is null).
+function updateChaseAudio(distToExit) {
+  if (!hotelChaseAudio || !audioCtx) return;
+  let target = 0;
+  if (typeof distToExit === 'number' && distToExit >= 0) {
+    target = Math.max(0, Math.min(1, 1 - distToExit / 16)) * 0.5; // audible within ~16m
+  }
+  hotelChaseAudio.elevTarget = target;
+  hotelChaseAudio.elevGain.gain.setTargetAtTime(target, audioCtx.currentTime, 0.3);
+}
+
 // Called on every floor entry (from buildMazeScene): play the Level Fun loop on floor 5,
 // stop it everywhere else. Theme-keyed (id 5), so it also works on later loops.
 function updateFloorMusic() {
   if (!audioCtx) return;
   if (getTheme(currentFloor).id === 5) startLevelFunMusic();
   else stopLevelFunMusic();
+  // Hotel Chase ambience on the chase archetype (alarm + dread + elevator bed).
+  if (getTheme(currentFloor).archetype === 'chase') startHotelChaseAmbience();
+  else stopHotelChaseAmbience();
 }
 
 /* ═══════════════════════════════════════════

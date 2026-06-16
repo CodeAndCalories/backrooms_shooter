@@ -4,14 +4,14 @@
 BACKROOMS_STATE.md") to resume with full context. UPDATE THIS at the end of every
 session: what changed, what's validated vs unplayed, what's next.
 
-**Last updated:** June 12, 2026
+**Last updated:** June 16, 2026
 
 ---
 
 ## THE GAME
 Three.js r128 (CDN) WebGL first-person shooter. P2P co-op, host-authoritative.
 Repo: `github.com/CodeAndCalories/backrooms_shooter`, deployed on Vercel.
-17 themed floors (Lobby → Dark Pools), bosses every 5 levels, anti-linger spawner,
+18 themed floors (Lobby → Hotel Chase), bosses every 5 levels, anti-linger spawner,
 fog-of-war minimap, pool/water system with fake caustics.
 
 ## HARD CONSTRAINTS (go in EVERY Claude Code prompt)
@@ -24,6 +24,71 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **NEW FLOOR 18 — "Hotel Chase" (chase archetype, June 16, UNPLAYED):** a CHASE
+  level — a new gameplay verb (survive & run, not clear-the-room). Floor index 17,
+  appended after Dark Pools. Canon "Run For Your Life." **The level IS the enemy.**
+  - **New 'chase' generator (`generateChase`, main.js):** a serpentine of horizontal
+    LANES (3 cells tall) stacked vertically, each linked to the next by a 3-wide
+    vertical CONNECTOR at a SEEDED column → the player serpentines through sharp
+    90°/180° turns, and the lane ends past the connectors are real DEAD-ENDS that
+    punish wrong turns. **Flood-fill safety by construction:** a guaranteed-clear
+    SPINE (entry-vertical + bottom-row run + connector links per lane) is reserved
+    first and NEVER furnished; FURNITURE (new grid value **3** — collidable, drawn as
+    knee-high props, never tall walls) is scattered only on non-spine cells; a final
+    flood-fill seals any stray island (→ value 3). Seeded rng() only, co-op safe.
+    `pickExitCell` (unchanged far-band path) lands the exit deep in the last lane.
+  - **THE CHASER (`spawnChaser`/`chaserNextWaypoint`, enemies.js):** a new `chaser`
+    mob type (skinstealer model, scaled 2.0 + red color-tint). **Host-authoritative,
+    UNKILLABLE** (`applyEnemyHit` flinches it — NO damage, NO stun [so a fast gun
+    can't freeze it], NO death). Pursues via **BFS waypoints** (robust around the
+    sharp turns/dead-ends — never permanently stuck; proven 200 seeds), at a **FIXED
+    speed = 0.9× the player's full sprint** (depth-independent; derived at RUNTIME
+    inside spawnChaser, not at enemies.js top level — load-order safe). 3s spawn-grace
+    head start; targets the nearest non-downed player; heavy melee (34 dmg). 1 chaser
+    (theme.chaserCount). Mirrors to clients via the existing snapshot (no death → it
+    never vanishes → clients never animate its death).
+  - **NO STAMINA on this floor (`theme.noStamina`):** `updatePlayer` pins stamina full
+    and lets sprint run forever — "run for your life" would be ruined by stamina mgmt.
+  - **SHOOTABLE OBSTACLE MOBS:** sparse, slow, weak crawlers/spiders (theme.mobs:
+    speedMult 0.55 / hpMult 0.6 / countMult 0.45) as living obstacles — shoot to clear
+    the path, but stopping lets the chaser close in. Risk/reward.
+  - **REACH gate (`gate: 'reach'`, net.js `netExitGateOpen`):** exit is OPEN from the
+    start — surviving the run TO it wins. No kills, no items. Goal HUD: "RUN — REACH
+    THE EXIT". Exit is the existing glowing door (now mounts only on a REAL wall, not
+    on furniture — a no-op change for floors 0-16, which only use grid values 0/1/2).
+  - **Atmosphere:** neon-RED ceiling lights (theme.lightColor — intensity/color only,
+    **no net-new lights**, generic sampler within the 25-ceiling budget), vintage
+    maroon wallpaper/carpet palette, `decorations: 'hotel'` = furniture barricades
+    (3-4 InstancedMeshes, SAME instanced-Standard-no-map family the light fixtures
+    already use every floor → no new shader program) + cosmetic hotel-room doors.
+    Audio (audio.js): blaring two-tone ALARM loop + low dread drone + faint ELEVATOR
+    music that swells as the exit nears (`updateChaseAudio` distance-driven), all
+    procedural through ambientGain, started/stopped by `updateFloorMusic`.
+  - **PROTOCOL ADDITIONS (both players on new build):** `'chaser'` APPENDED to
+    `NET_TYPE_LIST` (existing wire indices unchanged) + the `'reach'` gate type. No
+    new message types — the chaser rides the existing 'enemies' snapshot.
+  - **Latent bug fixed in passing:** `generatePools` could roll zero basins on rare
+    seeds (a pool-less "pools" floor); adding an 18th theme shifted the floor→seed
+    map and exposed it at floor 39. Added a deterministic forced-basin fallback
+    (ZERO extra rng() draws → post-gen stream unchanged for the common case).
+  - **Headless: `tools/test_chase.js`** (new) — generateChase path/connectivity/
+    furniture/no-pools/determinism over 600 seeds; chaserNextWaypoint reaches the
+    player from spawn over 200 seeds (never stuck) + every waypoint is a walkable
+    neighbour; theme/gate/noStamina/chaser-type/wire-index/unkillable/stamina-override
+    invariants; prints ASCII maps proving a clear path. `sim_levels.js` extended
+    (generateChase registered, floor 17 shown, furniture glyph ▒) — **4500/4500
+    arbitrary seeds + all floors pass.** Full suite green; node --check clean.
+  - **Needs a browser/co-op session — playtest gate:**
+    - **Floor 18 (LEVEL 18, "Hotel Chase"):** does the chaser's 0.9× pace feel right —
+      escapable on a clean run, catches you on a wrong turn/obstacle/stopping to
+      shoot? (THE key knob — `CHASER_SPRINT_FRAC` in enemies.js.) Spawn-grace head
+      start length, heavy-hit lethality, the BFS pursuit looking smart around corners.
+    - The weave: furniture density (`P_FURNITURE` 0.42) — too blocking / not enough?
+      Dead-end lane ends actually punishing? The red-lit vintage-hotel read.
+    - Audio mix: alarm not fatiguing on a loop, elevator music swelling at the exit,
+      dread drone. Unlimited-sprint feel (no stamina). Bullets-do-nothing flinch read.
+    - **Co-op:** chaser targets nearest non-downed, shared via snapshot, both players
+      see the same pursuer; reaching the exit advances the party.
 - **CO-OP HOST-FREEZE REGRESSION FIXED (June 12, validated in a live headless
   2-browser session):** the reported "host fully lags / can't move, clients
   fine" bug. **Root cause:** the roam/hunt AI batch (42ca481) added top-level
@@ -383,6 +448,11 @@ additive glow sprites on emissives gets 80% later).
 **The design roadmap is now fully cleared.** Possible next directions (unprioritized):
 more gate variants (escort/survive-timer), item lore text on pickup, per-floor
 objective variety, or circling back to the parked VISUAL FIX QUEUE (sRGB pass etc.).
+
+**New gameplay verb added June 16 (beyond the roadmap):** the CHASE archetype +
+'reach' gate (Hotel Chase, floor 18) — survive-and-run instead of clear-the-room,
+with an unkillable BFS pursuer. The 'reach' gate + the chase generator are reusable
+for future survive/escort floors. See CURRENT STATE.
 
 ## WHAT DIDN'T WORK / DECIDED AGAINST
 - Bloom via EffectComposer — parked (pipeline risk vs payoff)

@@ -54,6 +54,7 @@ const pieces = [
   'function generateOpen',
   'function generateField',
   'function generateLinear',
+  'function generateChase',
   'function generateBossArena',
   'function generateLevel',
   'function pickExitCell',
@@ -154,6 +155,7 @@ function drawMap(grid, exit) {
       if (x === 1 && y === 1) line += 'S';
       else if (exit && x === exit.ex && y === exit.ey) line += 'E';
       else if (grid[y][x] === 2) line += '≈'; // sunken pool basin
+      else if (grid[y][x] === 3) line += '▒'; // furniture / obstacle (chase)
       else line += grid[y][x] === 1 ? '·' : '█';
     }
     lines.push(line);
@@ -162,7 +164,7 @@ function drawMap(grid, exit) {
 }
 
 /* ── 1. eyeball maps ── */
-const SHOW = process.argv.includes('--pools') ? [3, 16] : [0, 1, 2, 3, 5, 6, 7, 10, 13, 16];
+const SHOW = process.argv.includes('--pools') ? [3, 16] : [0, 1, 2, 3, 5, 6, 7, 10, 13, 16, 17];
 for (const f of SHOW) {
   const { theme, grid, exit } = genFloor(f);
   const { errs, floorCells, total } = check(grid, theme, exit);

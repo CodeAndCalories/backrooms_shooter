@@ -470,6 +470,34 @@ const LEVEL_THEMES = [
     // phantoms over black water. The emptiness is the point.
     mobs: { types: ['phantom', 'stalker'], weights: [2, 1], danger: ['danger_stalker'],
             speedMult: 0.9, hpMult: 1.25, countMult: 0.5, waveBase: 2, waveCap: 4 }
+  },
+  {
+    id: 17,
+    archetype: 'chase', // CHASE level: winding hotel corridor, run from an unkillable pursuer to the far exit
+    name: "Hotel Chase",
+    subtitle: "Run for your life. Don't stop. Don't look back. The hallways go on forever.",
+    // Vintage hotel: deep maroon patterned wallpaper, dark-red carpet, neon-RED light.
+    wallColor: '#5e2530', wallColor2: '#43161e',
+    floorColor: '#3a1216', floorColor2: '#290c10',
+    ceilColor: '#4a1c22',
+    fogColor: 0x140204, fogNear: 1, fogFar: 20,
+    lightColor: 0xff2630, lightIntensity: 0.62,   // blaring neon RED corridor lights
+    ambientColor: 0x3a0a0c, ambientIntensity: 0.05,
+    bgColor: 0x0e0203,
+    mazeSize: 12,
+    floorType: 'carpet',
+    decorations: 'hotel',
+    enemyTint: 0.5,
+    darknessLevel: 0.5,
+    // OBJECTIVE: REACH the far exit (no kills, no items — surviving the run wins).
+    gate: 'reach',
+    // THE LEVEL IS THE ENEMY: no stamina drain (sprint forever), 1 unkillable chaser.
+    noStamina: true,
+    chaserCount: 1,
+    // A FEW weak, SLOW shootable mobs scattered as living obstacles in the path —
+    // shoot to clear the way, but stopping to fight lets the chaser close in.
+    mobs: { types: ['crawler', 'spider'], weights: [3, 1], danger: ['crawler'],
+            speedMult: 0.55, hpMult: 0.6, countMult: 0.45, waveBase: 2, waveCap: 4 }
   }
 ];
 
@@ -1287,6 +1315,9 @@ function generateLevel(theme, w, h) {
     case 'linear':
       generateLinear(w, h);
       break;
+    case 'chase':
+      generateChase(w, h, theme);
+      break;
     case 'chambers':
       generateChambers(w, h, theme);
       break;
@@ -1385,6 +1416,27 @@ function generatePools(w, h, theme) {
       }
     } else {
       poolRects.push({ x0: px0, y0: py0, x1: px1, y1: py1 });
+    }
+  }
+
+  // SAFETY: a 'pools' floor must have at least one basin (rare seeds can roll the
+  // pool chance off in every hall). If none were placed, FORCE one in the largest
+  // hall, inset 1 from its edges so the deck ring (and thus connectivity) survives.
+  // Deterministic and consumes ZERO rng() draws → the post-generation rng stream
+  // (pickExitCell, ammo) stays identical for the common already-has-a-pool case.
+  if (poolRects.length === 0) {
+    let best = null, bestArea = 0;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const a = (x1s[c] - x0s[c] + 1) * (y1s[r] - y0s[r] + 1);
+      if (a > bestArea) { bestArea = a; best = { c, r }; }
+    }
+    if (best) {
+      const px0 = x0s[best.c] + 1, px1 = x1s[best.c] - 1;
+      const py0 = y0s[best.r] + 1, py1 = y1s[best.r] - 1;
+      if (px1 - px0 >= 1 && py1 - py0 >= 1) {
+        for (let y = py0; y <= py1; y++) for (let x = px0; x <= px1; x++) mazeGrid[y][x] = 2;
+        poolRects.push({ x0: px0, y0: py0, x1: px1, y1: py1 });
+      }
     }
   }
 }
@@ -1607,6 +1659,106 @@ function generateLinear(w, h) {
   }
 }
 
+// 'chase' archetype — Hotel Chase (Run For Your Life). A long WINDING corridor
+// route from spawn to a distant exit: horizontal LANES (LANE_H cells tall) stacked
+// vertically, each linked to the next by a 3-wide vertical CONNECTOR punched at a
+// SEEDED column — so the player serpentines, hitting sharp 90°/180° turns, while
+// the lane ends past the connectors are real DEAD-ENDS that punish wrong turns.
+//
+// FLOOD-FILL SAFETY (the whole point of a chase): a guaranteed-clear SPINE
+// (entry-vertical + bottom-row run + connector links, per lane) is reserved up
+// front and NEVER furnished, so a valid spawn→exit path always exists by
+// construction. Furniture (grid value 3 — collidable, rendered as low props, not
+// tall walls) is then scattered only on NON-spine lane cells, forcing the player
+// to weave. A final flood-fill from spawn seals any stray island (→ value 3) so
+// every remaining deck cell (value 1) stays reachable. Grid contract: 0 = wall,
+// 1 = walkable deck, 3 = furniture/obstacle (blocks movement + BFS, like a wall,
+// but the renderer draws a knee-high prop instead of a full wall block).
+// Deterministic via the seeded rng(); co-op machines build the identical maze.
+function generateChase(w, h, theme) {
+  const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+  const LANE_H = 3;                                  // interior rows per lane
+  const NL = Math.min(7, Math.max(5, 3 + Math.round((h || 12) / 4))); // 5..7 lanes
+  const LANE_LEN = Math.min(21, Math.max(13, (w || 12) + 5));         // interior columns
+  const gw = LANE_LEN + 2;                           // + the two side border walls
+  const gh = 1 + NL * (LANE_H + 1);                  // top border + NL bands (lane + wall row)
+
+  // 1. Solid everywhere; carve lane interiors open below.
+  mazeGrid = [];
+  for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
+
+  // Per-lane interior row range. rTop(i)..rBot(i); the wall row BELOW lane i is
+  // wallRow(i) = rBot(i)+1 (= top border of the band below, or the bottom border).
+  const rTop = (i) => 1 + i * (LANE_H + 1);
+  const rBot = (i) => rTop(i) + LANE_H - 1;
+  for (let i = 0; i < NL; i++)
+    for (let y = rTop(i); y <= rBot(i); y++)
+      for (let x = 1; x <= gw - 2; x++) mazeGrid[y][x] = 1;
+
+  // 2. Connector columns: where each lane drops into the next. Seeded, kept off
+  // the very ends so the 3-wide opening fits and there's lane to run past it.
+  const conn = [];
+  for (let i = 0; i < NL - 1; i++) conn.push(ri(2, gw - 3));
+
+  // Entry/exit column of each lane along the spine. Lane 0 enters at the spawn
+  // corner (x=1); the last lane exits at the FAR end (opposite its entry) so the
+  // final stretch is long and the exit lands deep down the corridor.
+  const entryCol = (i) => (i === 0 ? 1 : conn[i - 1]);
+  const lastEntry = entryCol(NL - 1);
+  const exitCol = (i) => (i === NL - 1 ? (lastEntry < gw / 2 ? gw - 2 : 1) : conn[i]);
+
+  // 3. SPINE — reserve the guaranteed-clear through-path (anti-furniture set).
+  const spine = new Set();
+  const keep = (x, y) => { if (mazeGrid[y] && mazeGrid[y][x] === 1) spine.add(y * gw + x); };
+  for (let i = 0; i < NL; i++) {
+    const ec = entryCol(i), xc = exitCol(i), top = rTop(i), bot = rBot(i);
+    for (let y = top; y <= bot; y++) keep(ec, y);                 // entry vertical (down from the connector above)
+    const lo = Math.min(ec, xc), hi = Math.max(ec, xc);
+    for (let x = lo; x <= hi; x++) keep(x, bot);                  // run along the bottom row to the exit column
+    if (i < NL - 1) {                                             // open + reserve the connector to the next lane
+      const c = conn[i], wy = bot + 1;
+      for (let dx = -1; dx <= 1; dx++) { const nx = c + dx; if (nx >= 1 && nx <= gw - 2) mazeGrid[wy][nx] = 1; }
+      keep(c, wy);            // wall-row link cell
+      keep(c, rTop(i + 1));   // ...landing in the next lane's top row (its entry vertical continues down)
+    }
+  }
+
+  // 4. Furniture: scatter obstacles on NON-spine lane cells (never the spine, never
+  // walls/connectors). Probability tuned for a furnished-but-passable corridor.
+  const P_FURNITURE = 0.42;
+  for (let i = 0; i < NL; i++) {
+    for (let y = rTop(i); y <= rBot(i); y++) {
+      for (let x = 1; x <= gw - 2; x++) {
+        if (mazeGrid[y][x] !== 1) continue;
+        if (spine.has(y * gw + x)) continue;
+        if (rng() < P_FURNITURE) mazeGrid[y][x] = 3;
+      }
+    }
+  }
+
+  // 5. Seal islands: flood from spawn over deck (1); any unreached deck cell is
+  // converted to furniture (3) so EVERY remaining deck cell is reachable — the
+  // invariant the connectivity test asserts. The spine guarantees the flood
+  // reaches the exit region; this only cleans up pockets furniture boxed off.
+  const seen = [];
+  for (let y = 0; y < gh; y++) seen.push(new Array(gw).fill(false));
+  if (mazeGrid[1][1] === 1) {
+    seen[1][1] = true;
+    const q = [[1, 1]];
+    for (let qi = 0; qi < q.length; qi++) {
+      const [x, y] = q[qi];
+      for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+        if (mazeGrid[ny][nx] === 1 && !seen[ny][nx]) { seen[ny][nx] = true; q.push([nx, ny]); }
+      }
+    }
+  }
+  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
+    if (mazeGrid[y][x] === 1 && !seen[y][x]) mazeGrid[y][x] = 3;
+  }
+}
+
 /* ═══════════════════════════════════════════
    EXIT PLACEMENT — seeded random, far from spawn
    Replaces the old fixed corner search from (gw-2, gh-2): BFS the walkable
@@ -1695,8 +1847,12 @@ function buildExitDoor(ex, ey, radius) {
   let wd = null;
   for (const [dx, dy] of neigh) {
     const nx = ex + dx, ny = ey + dy;
+    // Mount on a REAL wall (value 0 / out-of-bounds) only — NOT on a chase
+    // furniture obstacle (value 3), which is knee-high, nor on deck/pool. For
+    // floors 0-16 (which only use values 0/1/2) this is identical to the old
+    // `cell !== 1 && cell !== 2` test; it only matters on the chase floor.
     const cell = (ny >= 0 && ny < gh && nx >= 0 && nx < gw) ? mazeGrid[ny][nx] : 0;
-    if (cell !== 1 && cell !== 2) { wd = { dx, dy }; break; }
+    if (cell === 0) { wd = { dx, dy }; break; }
   }
   if (!wd) wd = { dx: 0, dy: -1 }; // freestanding fallback
 
@@ -2938,6 +3094,79 @@ function addDecorations(theme, gw, gh) {
         mazeWalls.push({ minX: x * CELL + CELL / 2 - 0.25, maxX: x * CELL + CELL / 2 + 0.25, minZ: y * CELL + CELL / 2 - 0.25, maxZ: y * CELL + CELL / 2 + 0.25 });
       }
     }
+  } else if (theme.decorations === 'hotel') {
+    // HOTEL CHASE (chase archetype). Two cosmetic-deterministic passes, both via a
+    // floorSeed-derived prng (0 world-rng draws — same pattern as party/scares, so
+    // exit/ammo placement is undisturbed and co-op machines agree):
+    //   (a) FURNITURE BARRICADES on every grid value-3 cell — knee-high piles that
+    //       block the corridor (full-cell collision, like a wall, but you see over
+    //       them). Drawn as a FEW InstancedMeshes (one per palette tone) — the SAME
+    //       program family the light fixtures already instance every floor (instanced
+    //       MeshStandardMaterial, no map, no instanceColor), so NO new shader program.
+    //   (b) HOTEL-ROOM DOORS on lane-facing walls — pure flavor, no collision change.
+    const prng = mulberry32((floorSeed ^ 0x40DEED) >>> 0);
+    const TONES = [0x4a3526, 0x39281c, 0x52403a, 0x2c2622]; // wood / dark wood / dust / shadow
+    const unitBox = new THREE.BoxGeometry(1, 1, 1);
+    const furMats = TONES.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.92, metalness: 0.04 }));
+    const toneMatrices = TONES.map(() => []);
+
+    for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
+      if (mazeGrid[y][x] !== 3) continue;
+      const cx = x * CELL + CELL / 2, cz = y * CELL + CELL / 2;
+      // Full-cell collision so the obstacle blocks exactly its grid cell (matches
+      // the chaser BFS + the connectivity guarantee — value 3 is impassable).
+      mazeWalls.push({ minX: x * CELL, maxX: x * CELL + CELL, minZ: y * CELL, maxZ: y * CELL + CELL });
+      // A pile: a wide low base + a smaller offset piece on top (reads as stacked
+      // furniture / a barricade). Position/scale/rotation jittered per cell.
+      const baseH = 0.9 + prng() * 0.6;
+      const bw = CELL * (0.78 + prng() * 0.14), bd = CELL * (0.78 + prng() * 0.14);
+      const ry1 = (prng() - 0.5) * 0.5;
+      const m1 = new THREE.Matrix4().compose(
+        new THREE.Vector3(cx + (prng() - 0.5) * 0.4, baseH / 2, cz + (prng() - 0.5) * 0.4),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry1, 0)),
+        new THREE.Vector3(bw, baseH, bd));
+      toneMatrices[Math.floor(prng() * TONES.length)].push(m1);
+      const topH = 0.5 + prng() * 0.7;
+      const tw = CELL * (0.4 + prng() * 0.22), td = CELL * (0.4 + prng() * 0.22);
+      const m2 = new THREE.Matrix4().compose(
+        new THREE.Vector3(cx + (prng() - 0.5) * 1.0, baseH + topH / 2, cz + (prng() - 0.5) * 1.0),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, (prng() - 0.5) * 1.2, 0)),
+        new THREE.Vector3(tw, topH, td));
+      toneMatrices[Math.floor(prng() * TONES.length)].push(m2);
+    }
+    for (let ti = 0; ti < TONES.length; ti++) {
+      const mats = toneMatrices[ti];
+      if (!mats.length) continue;
+      const im = new THREE.InstancedMesh(unitBox, furMats[ti], mats.length);
+      mats.forEach((m, i) => im.setMatrixAt(i, m));
+      im.instanceMatrix.needsUpdate = true;
+      scene.add(im);
+    }
+
+    // (b) Hotel-room doors: a dark panel flush on a wall face that borders a lane
+    // cell. Cosmetic only (no AABB — the wall already blocks). Capped + sparse.
+    const doorMat = new THREE.MeshStandardMaterial({ color: 0x2a1410, roughness: 0.7, metalness: 0.1 });
+    const knobMat = new THREE.MeshStandardMaterial({ color: 0xc9a23a, roughness: 0.4, metalness: 0.7, emissive: 0x6a5212, emissiveIntensity: 0.3 });
+    const doorGeo = new THREE.BoxGeometry(1.4, 2.4, 0.08);
+    const knobGeo = new THREE.BoxGeometry(0.12, 0.12, 0.14);
+    const neigh = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    let doorCount = 0;
+    for (let y = 1; y < gh - 1 && doorCount < 48; y++) for (let x = 1; x < gw - 1 && doorCount < 48; x++) {
+      if (mazeGrid[y][x] !== 0) continue;            // doors mount on solid wall cells
+      if (prng() > 0.16) continue;                   // sparse
+      // pick a neighbouring open (deck) cell to face into
+      let f = null;
+      for (const [dx, dy] of neigh) { const nx = x + dx, ny = y + dy; if (mazeGrid[ny] && mazeGrid[ny][nx] === 1) { f = { dx, dy }; break; } }
+      if (!f) continue;
+      const cx = x * CELL + CELL / 2, cz = y * CELL + CELL / 2;
+      const door = new THREE.Group();
+      door.position.set(cx + f.dx * (CELL / 2 - 0.05), 1.2, cz + f.dy * (CELL / 2 - 0.05));
+      door.rotation.y = Math.atan2(-f.dx, -f.dy);
+      const panel = new THREE.Mesh(doorGeo, doorMat); door.add(panel);
+      const knob = new THREE.Mesh(knobGeo, knobMat); knob.position.set(0.5, 0, 0.06); door.add(knob);
+      scene.add(door);
+      doorCount++;
+    }
   } else if (theme.decorations === 'party') {
     // CREEPY BIRTHDAY PARTY (Level Fun only). EVERYTHING here places via prng,
     // a SEPARATE seeded stream derived from floorSeed: balloons are shootable
@@ -3783,6 +4012,15 @@ function raycastEnemies(ray, origin) {
 // player) so the kill reward is credited to whoever actually got the kill.
 // Returns true if this hit killed the enemy.
 function applyEnemyHit(e, dmg, shooterConn) {
+  // THE CHASER (Hotel Chase) is UNKILLABLE: bullets only FLINCH it — no damage,
+  // and crucially NO stun (a stun per shot would let a fast gun freeze it in
+  // place and trivialize the level). Returns not-killed → no reward / kill-gate
+  // credit. There is no death state for it.
+  if (e.unkillable) {
+    e.hitFlashTimer = 0.1;
+    setMobFlash(e, true);
+    return false;
+  }
   e.hp -= dmg;
   e.stunTimer = 0.12;
   e.hitFlashTimer = 0.15;
@@ -3865,14 +4103,19 @@ function updatePlayer(dt) {
   const isMoving = moveDir.length() > 0.01;
   if (isMoving) moveDir.normalize();
 
-  player.isSprinting = keys['ShiftLeft'] && isMoving && player.stamina > 0 && player.onGround;
+  // CHASE floors (Hotel Chase) override stamina: you can sprint the WHOLE way.
+  // Stamina is pinned full and never gates/drains — "run for your life" would be
+  // ruined by stamina management (see theme.noStamina).
+  const noStamina = !!getTheme(currentFloor).noStamina;
+  player.isSprinting = keys['ShiftLeft'] && isMoving && (noStamina || player.stamina > 0) && player.onGround;
   // Pools: wading below the water line slows you (per-theme theme.water.slow).
   const inWater = !!poolWater && floorHeightAt(player.pos.x, player.pos.z) < 0 &&
                   (player.pos.y - 1.6) < -poolWater.surfaceDrop + 0.05;
   const speed = MOVE_SPEED * (player.isSprinting ? SPRINT_MULT : 1) * (player.isADS ? 0.6 : 1) *
                 (inWater ? poolWater.slow : 1);
 
-  if (player.isSprinting) player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN * dt);
+  if (noStamina) player.stamina = MAX_STAMINA;       // pinned full — no drain, no gate
+  else if (player.isSprinting) player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN * dt);
   else player.stamina = Math.min(shopStats.maxHealth, player.stamina + STAMINA_REGEN * shopStats.staminaRegenMult * dt);
 
   const newX = player.pos.x + moveDir.x * speed * dt;
@@ -3991,6 +4234,9 @@ function advanceFloor() {
     setTimeout(() => { if (gameState === 'playing') spawnBoss(); }, 1500);
   } else {
     spawnWave();
+    // CHASE floors: release the unkillable pursuer(s) shortly after the floor
+    // builds (each has its own spawn-grace head start — see spawnChaser).
+    if (theme.archetype === 'chase') setTimeout(() => { if (gameState === 'playing') spawnFloorChasers(); }, 1500);
   }
 
   updateHUD();
@@ -4327,7 +4573,13 @@ function updateHUD() {
   //  • 'kills' : ELIMINATIONS n/m (solo AND co-op now — the kill gate applies to both).
   //  • boss / no gate: hidden (the boss HP bar carries the boss goal).
   const gate = theme.gate || 'kills';
-  if (!theme.isBoss && gate === 'item' && artifactsTotal > 0) {
+  if (!theme.isBoss && gate === 'reach') {
+    // CHASE: the exit is always open — the goal is to survive the run TO it.
+    hudSetStyle('goalHud', 'display', 'block');
+    hudSetText('goalHudText', 'RUN — REACH THE EXIT');
+    hudSetStyle('goalHudFill', 'width', '100%');
+    if (!_goalHudOpen) { _goalHudOpen = true; hudEl('goalHud').classList.toggle('goal-open', true); }
+  } else if (!theme.isBoss && gate === 'item' && artifactsTotal > 0) {
     const open = artifactsCollected >= artifactsTotal;
     const label = theme.itemLabel || 'ARTIFACTS';
     hudSetStyle('goalHud', 'display', 'block');
@@ -4745,6 +4997,8 @@ function startGame() {
     setTimeout(() => { if (gameState === 'playing') spawnBoss(); }, 2000);
   } else {
     setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
+    // CHASE floors: release the unkillable pursuer(s) (own spawn-grace head start).
+    if (theme.archetype === 'chase') setTimeout(() => { if (gameState === 'playing') spawnFloorChasers(); }, 1500);
   }
 }
 
@@ -5345,6 +5599,12 @@ function animate() {
     updateConsumables(dt); // almond water / bandage pickups
     updateSanity(dt);      // passive recovery, heal-over-time pools, low-sanity vignette/whisper
     updateBalloons(dt); // Level Fun: balloon bob/sway (no-op elsewhere — empty list)
+    // Hotel Chase: swell the faint elevator music as the exit nears (no-op off the
+    // chase floor — updateChaseAudio bails when its ambience isn't running).
+    if (exitZone && getTheme(currentFloor).archetype === 'chase') {
+      const cdx = player.pos.x - exitZone.x, cdz = player.pos.z - exitZone.z;
+      updateChaseAudio(Math.sqrt(cdx * cdx + cdz * cdz));
+    }
     updateHUD();
   }
 
