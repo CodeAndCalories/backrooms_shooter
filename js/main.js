@@ -494,6 +494,10 @@ const LEVEL_THEMES = [
     // THE LEVEL IS THE ENEMY: no stamina drain (sprint forever), 1 unkillable chaser.
     noStamina: true,
     chaserCount: 1,
+    // REAL MUSIC FILE (opt-in; see audio.js startFileMusic + assets/audio/README.md).
+    // Streamed through ambientGain, looped. Tries .ogg then .mp3; if NEITHER is
+    // present it gracefully falls back to the procedural alarm/elevator ambience.
+    musicFile: ['assets/audio/hotel_chase.ogg', 'assets/audio/hotel_chase.mp3'],
     // A FEW weak, SLOW shootable mobs scattered as living obstacles in the path —
     // shoot to clear the way, but stopping to fight lets the chaser close in.
     mobs: { types: ['crawler', 'spider'], weights: [3, 1], danger: ['crawler'],
@@ -589,6 +593,62 @@ let selectedStartFloor = 0;
    activate when the URL contains ?dev=1. Friends loading the plain URL get none.
    ═══════════════════════════════════════════ */
 const DEV_MODE = new URLSearchParams(location.search).get('dev') === '1';
+
+/* ═══════════════════════════════════════════
+   PART 1b — DEV PLAYTEST CHEATS (?dev=1 ONLY)
+   Toggles/actions for feel-testing (esp. the Hotel Chase chaser) without dying.
+   ALL gated behind DEV_MODE at the keydown handler, so the normal/co-op build
+   never reads or shows any of this. No protocol impact (purely local state):
+     G = God mode (damagePlayer no-ops → no damage, no down)
+     I = Infinite ammo (clip never decrements → never empties / never reloads)
+     C = Give cash (+$1000)
+     K = Kill all mobs (host/solo; spares the unkillable chaser)
+   The active toggles + last action show in a small dev-only #hudCheats readout.
+   ═══════════════════════════════════════════ */
+const DEV_CASH_GRANT = 1000;
+let cheatGod = false, cheatInfAmmo = false;
+let cheatFlashMsg = '', cheatFlashTO = null;
+
+function renderCheatHud() {
+  if (!DEV_MODE) return;
+  const el = document.getElementById('hudCheats');
+  if (!el) return;
+  const parts = [];
+  if (cheatGod) parts.push('🛡 GOD');
+  if (cheatInfAmmo) parts.push('∞ AMMO');
+  if (cheatFlashMsg) parts.push(cheatFlashMsg);
+  el.textContent = parts.length ? ('CHEATS  ' + parts.join('   ·   ')) : '';
+}
+// Briefly show a momentary action (give-cash / kill-all) alongside the toggles.
+function cheatFlash(msg) {
+  cheatFlashMsg = msg;
+  if (cheatFlashTO) clearTimeout(cheatFlashTO);
+  cheatFlashTO = setTimeout(() => { cheatFlashMsg = ''; renderCheatHud(); }, 1300);
+  renderCheatHud();
+}
+// Kill every killable mob (host/solo only — clients mirror the host, so killing
+// mirrors locally would just desync on the next snapshot). Spares the unkillable
+// chaser (the whole point is to feel-test IT). Leaves the wave counter alone so
+// it doesn't instantly respawn a fresh wave.
+function devKillAllMobs() {
+  if (typeof netIsClient === 'function' && netIsClient()) { cheatFlash('KILL-ALL (host only)'); return; }
+  let n = 0;
+  for (const e of enemies) {
+    if (e.alive && !e.unkillable) { e.alive = false; e.deathTimer = 0; n++; }
+  }
+  cheatFlash('KILLED ' + n);
+}
+// Dev cheat dispatch — called ONLY from the DEV_MODE-gated keydown branch.
+function handleDevCheatKey(code) {
+  if (code === 'KeyG') { cheatGod = !cheatGod; renderCheatHud(); }
+  else if (code === 'KeyI') {
+    cheatInfAmmo = !cheatInfAmmo;
+    if (cheatInfAmmo) { player.clipAmmo = wpnClip(curWeapon()); player.reserveAmmo = wpnReserve(curWeapon()); updateHUD(); }
+    renderCheatHud();
+  }
+  else if (code === 'KeyC') { playerMoney += DEV_CASH_GRANT; updateHUD(); cheatFlash('+$' + DEV_CASH_GRANT); }
+  else if (code === 'KeyK') { devKillAllMobs(); }
+}
 
 /* ═══════════════════════════════════════════
    PART 2 — PLAYER PROGRESSION (unlock gating, persisted)
@@ -3018,6 +3078,11 @@ function buildMazeScene() {
   // floor. Runs here because buildMazeScene is the one path hit on every floor entry.
   updateFloorMusic();
 
+  // Per-theme AMBIENT BED (fluorescent buzz / water / HVAC / transformer / …) —
+  // rebuilt on every floor entry (this is the one path hit on every floor change,
+  // host + solo + client). startGame no longer pre-starts it; this drives it.
+  startAmbient();
+
   // Reset anti-linger
   floorTimer = 0;
   dangerLevel = 0;
@@ -3579,6 +3644,7 @@ function updateWaterPlayerFX(dt, isMoving, inWater) {
    PLAYER
    ═══════════════════════════════════════════ */
 function damagePlayer(amount, fromPos) {
+  if (cheatGod) return;      // DEV god mode (?dev=1 only): no damage, no down
   if (player.isDown) return; // MP: a downed player can't be damaged further
   player.health -= amount;
   // SANITY drains ONLY from taking damage — scaled to the hit, capped, and never
@@ -3916,7 +3982,7 @@ function playerShoot() {
   if (player.isDown) return; // MP: downed players can't shoot
   if (player.isReloading || player.fireTimer > 0 || player.clipAmmo <= 0) return;
   const w = curWeapon();
-  player.clipAmmo--;
+  if (!cheatInfAmmo) player.clipAmmo--; // DEV infinite ammo: clip never drops → never empties/reloads
   player.fireTimer = wpnFireRate(w);
   gunRecoil = w.recoil;
   muzzleFlashTimer = w.muzzleTime;
@@ -4914,6 +4980,31 @@ function scarePanToward(wx, wz) {
   return Math.max(-1, Math.min(1, dx * rightX + dz * rightZ));
 }
 
+/* ═══════════════════════════════════════════
+   MOB VOCALIZATIONS — spatialize a creature sound from the LOCAL camera (distance
+   attenuation like the remote gunshots + a stereo pan toward the source) and play
+   it. `mobVocalLocal` runs on every machine for what it can see; `hostMobVocal`
+   ALSO broadcasts the event so co-op players share the scary aggro/attack/roar
+   (idle ambience stays local — each machine voices its own nearby mobs). kind:
+   'idle' | 'aggro' | 'attack' | 'roar'. Cosmetic — capped in audio.js.
+   ═══════════════════════════════════════════ */
+function mobVocalLocal(type, kind, wx, wz) {
+  if (typeof camera === 'undefined' || !camera || typeof playMobVocal !== 'function') return;
+  const dx = wx - camera.position.x, dz = wz - camera.position.z;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+  // idle ambience is quiet + NEARBY only (skitters/whispers around you); events
+  // (aggro/attack/roar) carry further + louder so you hear the threat coming.
+  if (kind === 'idle' && dist > 34) return; // ~8.5 cells — keep idle local, not level-wide
+  const base = (kind === 'idle') ? 0.18 : 0.5;
+  const gain = base / (1 + dist * 0.10);
+  if (gain < 0.015) return; // too far to bother (also reserves the voice cap for near mobs)
+  playMobVocal(type, kind, gain, scarePanToward(wx, wz));
+}
+function hostMobVocal(type, kind, wx, wz) {
+  mobVocalLocal(type, kind, wx, wz);
+  if (typeof netBroadcastMobVocal === 'function') netBroadcastMobVocal(type, kind, wx, wz);
+}
+
 // Floor teardown: pull active watcher sprites out of the scene BEFORE the
 // dispose traverse (their .map is the shared mob texture — must not be caught),
 // and clear every active effect / trigger.
@@ -4934,7 +5025,7 @@ function startGame() {
   if (netGateStart()) return;
 
   initAudio();
-  startAmbient();
+  // (the per-floor ambient bed is started by buildMazeScene → startAmbient below)
 
   player.health = shopStats.maxHealth;
   player.stamina = MAX_STAMINA;
@@ -5162,6 +5253,11 @@ document.addEventListener('keydown', e => {
     console.log('debug labels:', window.debugLabels); // confirms the L handler fired
     if (!window.debugLabels) clearDebugLabels();  // tear down immediately when off
   }
+  // PART 1b: dev-only PLAYTEST CHEATS (G god / I infinite-ammo / C cash / K kill-all).
+  // Guarded by DEV_MODE so the normal/co-op build never reacts to these keys at all.
+  if (DEV_MODE && gameState === 'playing' && (e.code === 'KeyG' || e.code === 'KeyI' || e.code === 'KeyC' || e.code === 'KeyK')) {
+    handleDevCheatKey(e.code);
+  }
   if (e.code === 'Escape') {
     e.preventDefault();
     // The ONE ESC handler. Priority: black market → pause menu → pause.
@@ -5250,16 +5346,22 @@ document.getElementById('btnRestart').addEventListener('click', startGame);
   LEVEL_THEMES.forEach((theme, i) => {
     const b = document.createElement('button');
     b.className = 'dev-ls-btn' + (theme.isBoss ? ' boss' : '') + (i === selectedStartFloor ? ' selected' : '');
-    b.textContent = i;
-    b.title = theme.name + (theme.archetype ? ' [' + theme.archetype + ']' : '');
+    // Clear named row: "L18  Hotel Chase            [chase]" (was a bare number +
+    // hover-only tooltip — clunky to scan).
+    const tag = theme.isBoss ? 'BOSS' : (theme.archetype || 'rooms');
+    b.innerHTML = `<span class="ls-num">L${i + 1}</span><span class="ls-name"></span><span class="ls-tag"></span>`;
+    b.querySelector('.ls-name').textContent = theme.name;
+    b.querySelector('.ls-tag').textContent = tag;
+    b.title = 'Level ' + (i + 1) + ' — ' + theme.name + ' [' + tag + '] (floor index ' + i + ')';
     b.addEventListener('click', () => {
       selectedStartFloor = i;
-      label.textContent = i;
+      label.textContent = (i + 1) + ' · ' + theme.name;
       wrap.querySelectorAll('.dev-ls-btn').forEach(el => el.classList.remove('selected'));
       b.classList.add('selected');
     });
     wrap.appendChild(b);
   });
+  if (label) label.textContent = (selectedStartFloor + 1) + ' · ' + LEVEL_THEMES[selectedStartFloor].name;
 })();
 
 /* ════ PART 2 — PLAYER level-select (always visible). Replays of BEATEN levels only:
@@ -5299,6 +5401,9 @@ buildPlayerLevelSelect(); // initial build at load
 if (!DEV_MODE) {
   const _fps = document.getElementById('hudFps'); if (_fps) _fps.style.display = 'none';
   const _st = document.getElementById('hudStats'); if (_st) _st.style.display = 'none';
+  const _ch = document.getElementById('hudCheats'); if (_ch) _ch.style.display = 'none';
+} else {
+  renderCheatHud(); // dev: prime the cheats readout (blank until a cheat is toggled)
 }
 
 /* ════ PAUSE-MENU SETTINGS: minimap mode + gun sound (both persisted) ════ */

@@ -4,7 +4,7 @@
 let audioCtx = null, masterGain = null, sfxGain = null, ambientGain = null;
 let humNode = null, humGain = null, poolNode = null, pipeNode = null;
 let volMaster = 1.0, volAmbient = 0.6, volSFX = 1.0;
-let humFlickerTimer = 0;
+let humFlickerTimer = 0, humBaseGain = 0.018;
 
 /* ═══════════════════════════════════════════
    PROCEDURAL AUDIO
@@ -534,26 +534,33 @@ function playBalloonPop() {
   playSound(() => {
     const t = audioCtx.currentTime;
     const sr = audioCtx.sampleRate;
-    // 1. SNAP — white noise, ~6ms decay, highpassed so it cracks
-    const len = sr * 0.07;
+    // 1. SNAP — white noise, ~4ms decay, sharply highpassed so it CRACKS (crisper
+    //    + louder than before for a satisfying latex burst).
+    const len = sr * 0.06;
     const buf = audioCtx.createBuffer(1, len, sr);
     const d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.006));
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.004));
     const src = audioCtx.createBufferSource(); src.buffer = buf;
-    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800; hp.Q.value = 0.7;
+    const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200; hp.Q.value = 0.8;
     const g = audioCtx.createGain();
-    g.gain.setValueAtTime(1.4, t);
-    g.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    g.gain.setValueAtTime(1.8, t);
+    g.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
     src.connect(hp); hp.connect(g); g.connect(sfxGain); src.start(t);
-    // 2. BLIP — fast 300→80Hz square pip (the rubber recoiling)
+    // 2. BLIP — fast 320→70Hz square pip (the rubber recoiling)
     const o = audioCtx.createOscillator(); o.type = 'square';
-    o.frequency.setValueAtTime(300, t);
-    o.frequency.exponentialRampToValueAtTime(80, t + 0.05);
+    o.frequency.setValueAtTime(320, t);
+    o.frequency.exponentialRampToValueAtTime(70, t + 0.05);
     const og = audioCtx.createGain();
-    og.gain.setValueAtTime(0.22, t);
+    og.gain.setValueAtTime(0.24, t);
     og.gain.exponentialRampToValueAtTime(0.01, t + 0.055);
     o.connect(og); og.connect(sfxGain);
     o.start(t); o.stop(t + 0.06);
+    // 3. LATEX FWIP — a tiny downward sine slap for body (the skin whipping back)
+    const fw = audioCtx.createOscillator(); fw.type = 'sine';
+    fw.frequency.setValueAtTime(140, t); fw.frequency.exponentialRampToValueAtTime(45, t + 0.04);
+    const fwg = audioCtx.createGain();
+    fwg.gain.setValueAtTime(0.18, t); fwg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    fw.connect(fwg); fwg.connect(sfxGain); fw.start(t); fw.stop(t + 0.06);
   });
 }
 
@@ -566,13 +573,16 @@ function playPartyGrowl() {
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) {
       const t = i / audioCtx.sampleRate;
-      d[i] = Math.sin(t * 38 * (1 + Math.sin(t * 3) * 0.6)) * Math.exp(-t * 0.9) * 0.7;
+      // base growl SWEEPS UP a touch over the tail → reads as "rising anger"
+      const sweep = 38 * (1 + t * 0.25);
+      d[i] = Math.sin(t * sweep * (1 + Math.sin(t * 3) * 0.6)) * Math.exp(-t * 0.9) * 0.7;
       d[i] += (Math.random() * 2 - 1) * Math.exp(-t * 1.2) * 0.35;
       d[i] += Math.sin(t * 19) * Math.exp(-t * 0.7) * 0.35;
+      d[i] += Math.sin(t * 26) * Math.exp(-t * 0.6) * 0.3; // sub-octave for menace/weight
     }
     const src = audioCtx.createBufferSource(); src.buffer = buf;
-    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
-    const g = audioCtx.createGain(); g.gain.value = 0.55;
+    const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 340;
+    const g = audioCtx.createGain(); g.gain.value = 0.62;
     src.connect(lp); lp.connect(g); g.connect(sfxGain); src.start();
   });
 }
@@ -666,82 +676,283 @@ function playWade() {
   });
 }
 
-function startAmbient() {
-  if (!audioCtx) return;
-  if (humNode) { humNode.stop(); humNode = null; }
+/* ═══════════════════════════════════════════
+   PER-THEME AMBIENT BEDS — a distinct low, looping room tone per floor so the
+   levels don't feel dead. All procedural, routed through ambientGain (Master +
+   Ambient sliders apply), deliberately SUBTLE (low gain — atmosphere, not noise).
+   REBUILT ON EVERY FLOOR ENTRY (buildMazeScene → startAmbient), unlike before
+   when it was set once at game start. Floors with dedicated audio (Level Fun
+   music id 5, Hotel Chase alarm — 'chase') get NO bed; everything else gets a
+   theme bed or a generic quiet hum. Cheap: a couple of long-lived oscillators +
+   one setInterval of short one-shots per floor; all torn down by stopAmbient.
+   ═══════════════════════════════════════════ */
+let ambientExtra = null; // { oscs:[], intervals:[] } — every long-lived node/timer of the active bed
+
+function stopAmbient() {
+  if (humNode) { try { humNode.stop(); } catch (e) {} humNode = null; }
+  humGain = null;
   if (poolNode) { clearInterval(poolNode); poolNode = null; }
   if (pipeNode) { clearInterval(pipeNode); pipeNode = null; }
+  if (ambientExtra) {
+    for (const o of ambientExtra.oscs) { try { o.stop(); } catch (e) {} }
+    for (const id of ambientExtra.intervals) clearInterval(id);
+    ambientExtra = null;
+  }
+}
 
+/* ── one-shot ambient textures (each a few nodes through ambientGain, then gone) ── */
+function ambDrip(dark) {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); o.type = 'sine';
+  const f0 = dark ? 350 : 800, f1 = dark ? 550 : 1200;
+  o.frequency.setValueAtTime(f0 + Math.random() * 400, t);
+  o.frequency.exponentialRampToValueAtTime(f1 + Math.random() * 200, t + 0.1);
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+  const delay = audioCtx.createDelay(); delay.delayTime.value = 0.3;
+  const fb = audioCtx.createGain(); fb.gain.value = 0.4; delay.connect(fb); fb.connect(delay);
+  o.connect(g); g.connect(ambientGain); g.connect(delay); delay.connect(ambientGain);
+  o.start(t); o.stop(t + 0.5);
+}
+function ambClank() {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); o.type = 'square';
+  o.frequency.setValueAtTime(40, t); o.frequency.exponentialRampToValueAtTime(10, t + 0.2);
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 400;
+  o.connect(f); f.connect(g); g.connect(ambientGain); o.start(t); o.stop(t + 0.4);
+}
+function ambGroan() { // freezer: metal/pipe stress groan
+  const t = audioCtx.currentTime, dur = 1.2 + Math.random() * 0.9;
+  const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+  const base = 58 + Math.random() * 34;
+  o.frequency.setValueAtTime(base, t); o.frequency.linearRampToValueAtTime(base * 0.7, t + dur);
+  const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 220;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.04, t + dur * 0.3); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  const lfo = audioCtx.createOscillator(); lfo.frequency.value = 5 + Math.random() * 4;
+  const lfoG = audioCtx.createGain(); lfoG.gain.value = 6; lfo.connect(lfoG); lfoG.connect(o.detune); lfo.start(t); lfo.stop(t + dur);
+  o.connect(f); f.connect(g); g.connect(ambientGain); o.start(t); o.stop(t + dur + 0.02);
+}
+function ambBeep() { // hospital: distant monitor blip
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); o.type = 'sine'; o.frequency.value = 920 + Math.random() * 60;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.022, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+  o.connect(g); g.connect(ambientGain); o.start(t); o.stop(t + 0.18);
+}
+function ambZap() { // electrical: arc/sputter
+  const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+  const len = Math.floor(sr * 0.13), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.02)) * (Math.random() < 0.5 ? 1 : 0);
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 2000;
+  const g = audioCtx.createGain(); g.gain.value = 0.05;
+  src.connect(f); f.connect(g); g.connect(ambientGain); src.start(t);
+}
+function ambCrackle() { // lobby: fluorescent flicker tick
+  const t = audioCtx.currentTime, sr = audioCtx.sampleRate;
+  const len = Math.floor(sr * 0.08), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.03));
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2600; bp.Q.value = 2;
+  const g = audioCtx.createGain(); g.gain.value = 0.03;
+  src.connect(bp); bp.connect(g); g.connect(ambientGain); src.start(t);
+}
+
+function startAmbient() {
+  if (!audioCtx) return;
+  stopAmbient();
+  const out = ambientGain;
   const theme = getTheme(currentFloor);
+  const extra = { oscs: [], intervals: [] };
+  ambientExtra = extra;
+
+  // steady tonal drone (osc → optional lowpass → gain → ambientGain). returns the gain node.
+  const drone = (freq, type, vol, lpf) => {
+    const o = audioCtx.createOscillator(); o.type = type; o.frequency.value = freq;
+    const g = audioCtx.createGain(); g.gain.value = vol;
+    if (lpf) { const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = lpf; o.connect(f); f.connect(g); }
+    else o.connect(g);
+    g.connect(out); o.start(); extra.oscs.push(o);
+    return g;
+  };
+  // steady filtered-noise drone (airy/rumble bed) — a 2s looping noise buffer.
+  const noiseDrone = (vol, ftype, freq, q) => {
+    const sr = audioCtx.sampleRate, len = sr * 2;
+    const buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = audioCtx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const f = audioCtx.createBiquadFilter(); f.type = ftype; f.frequency.value = freq; if (q) f.Q.value = q;
+    const g = audioCtx.createGain(); g.gain.value = vol;
+    src.connect(f); f.connect(g); g.connect(out); src.start(); extra.oscs.push(src);
+    return g;
+  };
+  // periodic one-shot loop (drips/beeps/zaps/groans) — fixed interval, probabilistic
+  // firing for irregularity, cleanly torn down via clearInterval.
+  const loop = (intervalMs, prob, fn) => {
+    extra.intervals.push(setInterval(() => { if (audioCtx && Math.random() < prob) fn(); }, intervalMs));
+  };
+  // fluorescent hum (uses humNode/humGain so updateAmbient's flicker still works).
+  const startHum = (vol, buzzy) => {
+    humBaseGain = vol;
+    humNode = audioCtx.createOscillator(); humGain = audioCtx.createGain();
+    humNode.type = 'sawtooth'; humNode.frequency.value = 60; humGain.gain.value = vol;
+    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = buzzy ? 260 : 120;
+    humNode.connect(f); f.connect(humGain); humGain.connect(out); humNode.start();
+    if (buzzy) { // 2nd harmonic for the electrical "buzz"
+      const h = audioCtx.createOscillator(); h.type = 'sawtooth'; h.frequency.value = 120;
+      const hf = audioCtx.createBiquadFilter(); hf.type = 'lowpass'; hf.frequency.value = 420;
+      const hg = audioCtx.createGain(); hg.gain.value = vol * 0.4;
+      h.connect(hf); hf.connect(hg); hg.connect(out); h.start(); extra.oscs.push(h);
+    }
+  };
+
+  // Floors with dedicated audio already carry the bed (music / alarm).
+  if (theme.id === 5 || theme.archetype === 'chase') return;
 
   if (theme.water) {
-    // Pools floors (Poolrooms + Dark Pools): echoing water drops. The dark
-    // variant drips slower and lower-pitched.
+    // Poolrooms / Dark Pools: water lapping + echoing drips (+ ominous sub on dark).
     const dark = (theme.darknessLevel || 0) > 0.5;
-    poolNode = setInterval(() => {
-      playSound(() => {
-        const t = audioCtx.currentTime;
-        const osc = audioCtx.createOscillator();
-        const g = audioCtx.createGain();
-        osc.type = 'sine';
-        const f0 = dark ? 350 : 800, f1 = dark ? 550 : 1200;
-        osc.frequency.setValueAtTime(f0 + Math.random() * 400, t);
-        osc.frequency.exponentialRampToValueAtTime(f1 + Math.random() * 200, t + 0.1);
-        g.gain.setValueAtTime(0.05, t);
-        g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
-        
-        // Add echo (delay)
-        const delay = audioCtx.createDelay();
-        delay.delayTime.value = 0.3;
-        const fb = audioCtx.createGain(); fb.gain.value = 0.4;
-        delay.connect(fb); fb.connect(delay);
-        
-        osc.connect(g); g.connect(ambientGain);
-        g.connect(delay); delay.connect(ambientGain);
-        
-        osc.start(t); osc.stop(t + 0.5);
-      });
-    }, dark ? 2400 : 1500);
-  } else if (theme.id === 2) {
-    // Pipe Dreams: Metallic clanks
-    pipeNode = setInterval(() => {
-      playSound(() => {
-        const t = audioCtx.currentTime;
-        const osc = audioCtx.createOscillator();
-        const g = audioCtx.createGain();
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(40, t);
-        osc.frequency.exponentialRampToValueAtTime(10, t + 0.2);
-        g.gain.setValueAtTime(0.1, t);
-        g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
-        
-        const filter = audioCtx.createBiquadFilter();
-        filter.type = 'lowpass'; filter.frequency.value = 400;
-        
-        osc.connect(filter); filter.connect(g); g.connect(ambientGain);
-        osc.start(t); osc.stop(t + 0.4);
-      });
-    }, 2500);
-  } else {
-    // Standard Fluorescent Hum
-    humNode = audioCtx.createOscillator();
-    humGain = audioCtx.createGain();
-    humNode.type = 'sawtooth'; humNode.frequency.value = 60;
-    humGain.gain.value = 0.018;
-    const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 120;
-    humNode.connect(f); f.connect(humGain); humGain.connect(ambientGain);
-    humNode.start();
+    const lapG = noiseDrone(dark ? 0.012 : 0.016, 'lowpass', dark ? 280 : 480);
+    const lfo = audioCtx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.22 + Math.random() * 0.1;
+    const lfoAmt = audioCtx.createGain(); lfoAmt.gain.value = dark ? 0.006 : 0.008;
+    lfo.connect(lfoAmt); lfoAmt.connect(lapG.gain); lfo.start(); extra.oscs.push(lfo);
+    loop(dark ? 2400 : 1500, 0.85, () => ambDrip(dark));
+    if (dark) drone(30, 'sine', 0.05, 80); // deep ominous sub-drone (Dark Pools)
+  } else if (theme.id === 2) {        // Pipe Dreams: metallic clanks
+    loop(2500, 0.8, ambClank);
+  } else if (theme.id === 13) {       // Freezer: HVAC rumble + pipe groans
+    noiseDrone(0.03, 'lowpass', 90);
+    drone(48, 'sawtooth', 0.018, 110);
+    loop(7000, 0.6, ambGroan);
+  } else if (theme.id === 10) {       // Hospital: air handling + monitor beeps
+    noiseDrone(0.014, 'bandpass', 500, 0.7);
+    loop(4500, 0.7, ambBeep);
+  } else if (theme.id === 6) {        // Electrical Station: transformer hum + zaps
+    drone(60, 'sawtooth', 0.02, 220);
+    drone(120, 'sawtooth', 0.012, 420);
+    loop(6000, 0.6, ambZap);
+  } else if (theme.id === 0) {        // Lobby: classic fluorescent buzz + flicker crackle
+    startHum(0.02, true);
+    loop(5000, 0.5, ambCrackle);
+  } else {                            // GENERIC quiet room-tone hum
+    startHum(0.014, false);
   }
 }
 
 function updateAmbient(dt) {
-  if (humGain && getTheme(currentFloor).id !== 2 && getTheme(currentFloor).id !== 3) {
+  // Fluorescent flicker on the hum bed (lobby + generic floors only — humGain is
+  // null on water/pipe/freezer/etc. beds, so this no-ops there).
+  if (humGain) {
     humFlickerTimer -= dt;
     if (humFlickerTimer <= 0) {
       humFlickerTimer = 3 + Math.random() * 8;
-      humGain.gain.setValueAtTime(0.002, audioCtx.currentTime);
-      humGain.gain.linearRampToValueAtTime(0.018, audioCtx.currentTime + 0.06 + Math.random() * 0.1);
+      humGain.gain.setValueAtTime(humBaseGain * 0.12, audioCtx.currentTime);
+      humGain.gain.linearRampToValueAtTime(humBaseGain, audioCtx.currentTime + 0.06 + Math.random() * 0.1);
     }
+  }
+}
+
+/* ═══════════════════════════════════════════
+   MOB VOCALIZATIONS — procedural creature sounds, the dread layer. The AI
+   (main.js mobVocalLocal / hostMobVocal) computes gain+pan from the listener's
+   camera and calls playMobVocal(type, kind, gain, pan); host events also
+   broadcast so co-op players share them. kind: 'idle' (ambient creature noise),
+   'aggro' (roam→hunt — the scary one), 'attack' (it just hit), 'roar' (chaser).
+   CHEAP + CAPPED: at most a few concurrent voices (important events get a small
+   reserve) so a whole wave never becomes a cacophony.
+   ═══════════════════════════════════════════ */
+let activeVocals = 0;
+const MOB_VOCAL_CAP = 4;
+function vocalSlot(dur, important) {
+  const cap = important ? MOB_VOCAL_CAP + 2 : MOB_VOCAL_CAP;
+  if (activeVocals >= cap) return false;
+  activeVocals++;
+  setTimeout(() => { activeVocals = Math.max(0, activeVocals - 1); }, dur * 1000 + 60);
+  return true;
+}
+// shared synth primitives → write into a destination node (a StereoPanner).
+function _vNoise(dest, t, dur, decay, ftype, freq, q, peak) {
+  const sr = audioCtx.sampleRate, len = Math.max(1, Math.floor(sr * dur));
+  const buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * decay));
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const f = audioCtx.createBiquadFilter(); f.type = ftype; f.frequency.value = freq; if (q) f.Q.value = q;
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(Math.max(0.0001, peak), t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f); f.connect(g); g.connect(dest); src.start(t); src.stop(t + dur + 0.02);
+}
+function _vTone(dest, t, dur, f0, f1, type, peak) {
+  const o = audioCtx.createOscillator(); o.type = type;
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(Math.max(0.0001, peak), t + dur * 0.18); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(dest); o.start(t); o.stop(t + dur + 0.02);
+}
+
+function playMobVocal(type, kind, gain, pan) {
+  if (!audioCtx) return;
+  const important = (kind === 'aggro' || kind === 'attack' || kind === 'roar');
+  const durs = {
+    crawler: important ? 0.45 : 0.28, danger_crawler: important ? 0.45 : 0.28, spider: important ? 0.45 : 0.28,
+    stalker: important ? 1.1 : 0.9, danger_stalker: important ? 1.1 : 0.9,
+    phantom: important ? 0.55 : 0.7, partygoer: important ? 0.9 : 0.8, chaser: important ? 1.5 : 1.2
+  };
+  const dur = durs[type] || (important ? 0.6 : 0.5);
+  if (!vocalSlot(dur, important)) return;
+  const t = audioCtx.currentTime;
+  const panner = audioCtx.createStereoPanner();
+  panner.pan.value = Math.max(-1, Math.min(1, pan || 0));
+  panner.connect(sfxGain);
+  const G = Math.max(0.01, gain);
+
+  switch (type) {
+    case 'crawler': case 'danger_crawler': case 'spider': {
+      // wet skittering: a flurry of short clicks; aggro/attack add a rising squeal
+      const n = important ? 6 : 4;
+      for (let i = 0; i < n; i++) _vNoise(panner, t + i * 0.04, 0.05, 0.004, 'highpass', 2600 + Math.random() * 1500, 0.7, G * (important ? 1.3 : 0.9));
+      if (important) _vTone(panner, t, 0.4, 700, 1700, 'sawtooth', G * 0.7);
+      break;
+    }
+    case 'stalker': case 'danger_stalker': {
+      // low growl; aggro/attack = a sharper, louder snarl-roar
+      _vTone(panner, t, dur, important ? 150 : 90, important ? 70 : 55, 'sawtooth', G * (important ? 1.1 : 0.6));
+      _vNoise(panner, t, dur * 0.8, dur * 0.4, 'lowpass', important ? 700 : 400, 0, G * (important ? 0.5 : 0.25));
+      if (important) _vTone(panner, t + 0.05, 0.5, 320, 120, 'square', G * 0.4);
+      break;
+    }
+    case 'phantom': {
+      // soft fluttering wingbeats / whisper; aggro = a sharp hiss
+      if (important) { _vNoise(panner, t, 0.5, 0.12, 'bandpass', 2400, 3, G * 1.1); }
+      else {
+        const sr = audioCtx.sampleRate, len = Math.floor(sr * dur), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) { const tt = i / sr; d[i] = (Math.random() * 2 - 1) * (0.5 + 0.5 * Math.sin(tt * 2 * Math.PI * 16)); }
+        const s = audioCtx.createBufferSource(); s.buffer = buf;
+        const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1500; f.Q.value = 1.5;
+        const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(G * 0.6, t + 0.1); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        s.connect(f); f.connect(g); g.connect(panner); s.start(t); s.stop(t + dur + 0.02);
+      }
+      break;
+    }
+    case 'partygoer': {
+      // unsettling descending giggle/murmur; aggro = manic, with a yell under it
+      const n = important ? 6 : 4;
+      for (let i = 0; i < n; i++) {
+        const f = (important ? 560 : 440) - i * 32 + (Math.random() - 0.5) * 30;
+        _vTone(panner, t + i * (important ? 0.07 : 0.11), important ? 0.08 : 0.1, f, f * 0.85, 'square', G * (important ? 0.9 : 0.5));
+      }
+      if (important) _vTone(panner, t + 0.1, 0.5, 300, 700, 'sawtooth', G * 0.6);
+      break;
+    }
+    case 'chaser': {
+      // RELENTLESS angry roar — big, harsh, low: the Hotel Chase signature
+      _vTone(panner, t, dur, 130, 60, 'sawtooth', G * 1.2);
+      _vTone(panner, t, dur * 0.9, 90, 45, 'square', G * 0.7);
+      _vNoise(panner, t, dur * 0.7, dur * 0.5, 'lowpass', 900, 0, G * 0.6);
+      _vTone(panner, t + 0.08, dur * 0.6, 380, 140, 'sawtooth', G * 0.5);
+      break;
+    }
+    default:
+      _vTone(panner, t, dur, 200, 90, 'sawtooth', G * 0.6);
   }
 }
 
@@ -1000,15 +1211,102 @@ function updateChaseAudio(distToExit) {
   hotelChaseAudio.elevGain.gain.setTargetAtTime(target, audioCtx.currentTime, 0.3);
 }
 
-// Called on every floor entry (from buildMazeScene): play the Level Fun loop on floor 5,
-// stop it everywhere else. Theme-keyed (id 5), so it also works on later loops.
+/* ═══════════════════════════════════════════
+   REAL MUSIC FILES (assets/audio/*.ogg|.mp3)
+   DELIBERATE exception to the procedural-only rule (like the boss GLB/PNG assets —
+   see PROJECT_GUIDE §3.4). A floor opts in with `theme.musicFile` (a path, or an
+   array of fallback paths tried in order, e.g. .ogg then .mp3). The file is STREAMED
+   via an HTMLAudioElement wired into the Web Audio graph through ambientGain, so the
+   Master + Ambient volume sliders control it exactly like the procedural music, and
+   it loops. LOAD WEIGHT: streamed lazily ON FLOOR ENTRY — it does NOT gate the
+   startup loading screen (unlike the GLB mob models), and only the floors that use a
+   file pay for it. Keep files modest (see assets/audio/README.md).
+   GRACEFUL FALLBACK: if every candidate path is missing / fails / stalls, onFail()
+   runs (the caller starts that floor's procedural track) — it NEVER crashes or
+   leaves the floor silent when a file is absent.
+   ═══════════════════════════════════════════ */
+let fileMusic = null;       // { audio, srcNode, path } while a file track plays
+let fileMusicToken = 0;     // bumps on every floor change → in-flight loads abort
+
+function startFileMusic(paths, onFail) {
+  if (!audioCtx) { if (onFail) onFail(); return; }
+  const candidates = Array.isArray(paths) ? paths.slice() : [paths];
+  const token = ++fileMusicToken; // a later floor change (stopFileMusic) invalidates this load
+
+  const tryNext = () => {
+    if (token !== fileMusicToken) return;                 // floor changed mid-load → abort silently
+    if (!candidates.length) { if (onFail) onFail(); return; } // all paths failed → procedural fallback
+    const path = candidates.shift();
+    const audio = new Audio();
+    audio.loop = true;
+    audio.preload = 'auto';
+    let settled = false;
+    const cleanup = () => {
+      audio.removeEventListener('canplay', onReady);
+      audio.removeEventListener('error', onErr);
+      clearTimeout(timer);
+    };
+    const onReady = () => {
+      if (settled || token !== fileMusicToken) { if (token !== fileMusicToken) { try { audio.pause(); } catch (e) {} } return; }
+      settled = true; cleanup();
+      // Route the element through the Ambient bus (volume sliders apply, like procedural).
+      let srcNode;
+      try { srcNode = audioCtx.createMediaElementSource(audio); }
+      catch (e) { console.warn('[music] graph wire failed for', path, e); tryNext(); return; }
+      srcNode.connect(ambientGain);
+      audio.play().catch(e => console.warn('[music] autoplay blocked (will play on next gesture):', e));
+      fileMusic = { audio, srcNode, path };
+      console.log('[music] file track:', path);
+    };
+    const onErr = () => {
+      if (settled) return;
+      settled = true; cleanup();
+      console.warn('[music] missing/failed, falling back:', path);
+      tryNext(); // try the next candidate; if none remain, onFail() (procedural)
+    };
+    const timer = setTimeout(onErr, 8000); // stalled fetch → treat as a miss
+    audio.addEventListener('canplay', onReady);
+    audio.addEventListener('error', onErr);
+    audio.src = path;
+    audio.load();
+  };
+  tryNext();
+}
+
+function stopFileMusic() {
+  fileMusicToken++; // abort any load still in flight
+  if (!fileMusic) return;
+  try { fileMusic.audio.pause(); } catch (e) {}
+  try { fileMusic.srcNode.disconnect(); } catch (e) {}
+  fileMusic.audio.src = ''; // release the stream; the MediaElementSource GCs with the element
+  fileMusic = null;
+}
+
+// The procedural music starter for the CURRENT floor (null = floor has no music).
+// Used both as the default track and as the file-load fallback.
+function proceduralMusicStarterFor() {
+  const theme = getTheme(currentFloor);
+  if (theme.id === 5) return startLevelFunMusic;          // Level Fun
+  if (theme.archetype === 'chase') return startHotelChaseAmbience; // Hotel Chase alarm/elevator bed
+  return null;
+}
+
+// Called on every floor entry (from buildMazeScene). Stops all music, then starts
+// the right track: a real file (theme.musicFile) if one is configured — falling
+// back to the floor's procedural track if the file is missing — else procedural.
 function updateFloorMusic() {
   if (!audioCtx) return;
-  if (getTheme(currentFloor).id === 5) startLevelFunMusic();
-  else stopLevelFunMusic();
-  // Hotel Chase ambience on the chase archetype (alarm + dread + elevator bed).
-  if (getTheme(currentFloor).archetype === 'chase') startHotelChaseAmbience();
-  else stopHotelChaseAmbience();
+  stopFileMusic();
+  stopLevelFunMusic();
+  stopHotelChaseAmbience();
+
+  const theme = getTheme(currentFloor);
+  const startProcedural = proceduralMusicStarterFor();
+  if (theme.musicFile) {
+    startFileMusic(theme.musicFile, () => { if (startProcedural) startProcedural(); });
+  } else if (startProcedural) {
+    startProcedural();
+  }
 }
 
 /* ═══════════════════════════════════════════

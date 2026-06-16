@@ -74,6 +74,9 @@ suite (all must stay green):
 | `tools/test_ai.js` | `isOpenCell`, `steerAround` (clear pass-through vs rounds-a-wall), roam/hunt threshold constants, danger-always-hunts. |
 | `tools/test_sanity.js` | Consumable placement determinism + 0 world draws + constraints, sanity drain math + Poolrooms safe-zone guard, tuning constants, no-new-lights. |
 | `tools/test_loadorder.js` | Executes the REAL top-level code of audio/net/enemies in index.html load order (browser stubs, deliberately NO main.js globals): no load-time throw, no TDZ casualties, plus a static no-top-level-main.js-global-reads scan. Catches the bug class the extraction sandboxes mask. |
+| `tools/test_devcheats.js` | `?dev=1` playtest cheats: god toggle + `damagePlayer` no-op, infinite-ammo clip top-up, repeatable give-cash, kill-all (spares the unkillable chaser, host/solo only), the `DEV_MODE` gating, and the `#hudCheats` + named level-select wiring. |
+| `tools/test_audio.js` | Audio pass: mob-vocal concurrency cap (4 idle + 2 event reserve, frees on voice end) via the real `vocalSlot`; every `playMobVocal` type×kind synth branch runs without throwing + routes through `sfxGain` (real `_vNoise`/`_vTone` over a fake Web Audio graph); per-theme ambient beds exist + are rebuilt per floor; the vocal trigger + `mob_vocal` broadcast/handler wiring; balloon-pop + growl improvements. |
+| `tools/test_music.js` | Real-music-file loader: extracts `startFileMusic`/`stopFileMusic` and drives every branch over a fake Audio/Web-Audio graph — present file wired+played+looped through `ambientGain`; missing/error/stall → procedural `onFail`; `.ogg→.mp3` candidate fallthrough; floor-change aborts a stale load; `stopFileMusic` tears down. Plus `updateFloorMusic` wiring + `assets/audio/` exists. |
 | `tools/test_chase.js` | Hotel Chase (floor 17, 'chase' archetype): `generateChase` spawn→exit path always exists + every deck cell reachable (furniture never seals it) + furniture present + no pools + determinism (600 seeds); `chaserNextWaypoint` BFS reaches the player from spawn over 200 seeds (never stuck) with valid single-step waypoints; theme/gate/noStamina/chaser-type/wire-index/unkillable-hit/stamina-override/`netExitGateOpen('reach')` invariants. Prints ASCII maps. |
 
 Non-test tooling: `optimize_models.js` (GLB Draco/quantize — how the boss mob models
@@ -115,9 +118,19 @@ delays, stereo panners) — no audio files. Key groups: weapon shots (pistol sel
 sharp/heavy/suppressed + shotgun/smg/flare + remote-attenuated variants), hit/reload/
 pickup/death, boss roar, scare one-shots (`playRumble`/`playDistantRoar`/`playWhisper`/
 `playSlam`(panned)), sanity (`playSanityWhisper`/`playDrink`/`playBandage`), ambient
-hum/pools, and the **Level Fun music** (`startLevelFunMusic`/`stopLevelFunMusic`, floor 5
-only, drone + sparse warped music-box + distant party stabs). `updateFloorMusic()`
-starts/stops it on floor entry.
+hum/pools, the **Level Fun music** (`startLevelFunMusic`/`stopLevelFunMusic`, floor 5
+only, drone + sparse warped music-box + distant party stabs), the **per-theme ambient
+beds** (`startAmbient`/`stopAmbient` — rebuilt EVERY floor entry; Lobby buzz / Pools water
+/ Freezer HVAC / Hospital beeps / Electrical transformer / Pipe clanks / generic room-tone,
+all subtle through `ambientGain`), and the **mob vocalizations** (`playMobVocal(type, kind,
+gain, pan)` + the `vocalSlot` voice cap; idle/aggro/attack/roar synths per mob type — the
+chaser roar is the Hotel Chase signature). `updateFloorMusic()` starts/stops music on floor
+entry; the ambient bed is driven from `buildMazeScene → startAmbient`. Mob vocals are
+triggered by the AI via main.js `mobVocalLocal`/`hostMobVocal` (distance/pan from the
+camera). **Real music files** (`startFileMusic`/`stopFileMusic`):
+floors with `theme.musicFile` stream an `assets/audio/*.ogg|.mp3` through `ambientGain`
+(looped), with a graceful fallback to the procedural track if the file is absent — see
+§3.4. `updateFloorMusic` picks file-vs-procedural per floor (`proceduralMusicStarterFor`).
 
 ### `js/enemies.js` (~1250 lines)
 **Mobs + bosses + waves (host-authoritative sim).** `spriteTextures` (procedural mob art
@@ -191,7 +204,11 @@ apply damage), `reward` (host → killer: money + kill credit).
 floor advance; host re-validates `netExitGateOpen` then advances all).
 
 **Events:** `scare` (host → all: `{type, data}` — shared scripted scares; data carries
-only what each client needs to reproduce it from its own viewpoint).
+only what each client needs to reproduce it from its own viewpoint). `mob_vocal` (host →
+all: `{t:type, k:kind, x, z}` — state-driven mob vocalizations [aggro/attack/chaser-roar]
+so co-op players share them; each receiver re-spatializes from its own camera. Idle mob
+ambience is NOT broadcast — every machine voices its own nearby mobs. Cosmetic, no
+gameplay state).
 
 **The pickup contract** (ammo/consumable/artifact/balloon all follow it): items get
 **seeded sequential ids** in deterministic creation order, so the same id names the same
@@ -252,12 +269,24 @@ pickups/sparks/decals/flare/consumables/exit-door reuse that family for free. **
 introduce a genuinely new material/shader family, pin it in the keepalive** or it
 recompiles every floor.
 
-### 3.4 Procedural-assets-only → a zero-asset pipeline
-Textures are canvas-drawn at runtime; audio is synthesized. This keeps the repo asset-free
-and instantly deployable. The **deliberate exceptions**: 4 boss mob GLB models + 3 boss
-sprite PNGs (procedural bosses looked weak). Those are optimized offline via
-`tools/optimize_models.js` (Draco/quantization) + `tools/quantize_pngs.js`, and the GLB
-load is gated behind a loading screen (see §3.7 war story). Don't add casual file assets.
+### 3.4 Procedural-FIRST assets → a near-zero-asset pipeline
+Textures are canvas-drawn at runtime; audio is synthesized. This keeps the repo nearly
+asset-free and instantly deployable. The **deliberate exceptions** (kept few):
+- **4 boss mob GLB models + 3 boss sprite PNGs** (procedural bosses looked weak). Optimized
+  offline via `tools/optimize_models.js` (Draco/quantization) + `tools/quantize_pngs.js`,
+  and the GLB load is **gated behind the loading screen** (see §3.7 war story) — they MUST
+  be ready before gameplay, so they block startup.
+- **Real music files in `assets/audio/` (.ogg/.mp3)** — added June 16. A floor opts in with
+  `theme.musicFile` (a path or an ordered candidate array); `startFileMusic` (audio.js)
+  streams it via an HTMLAudioElement wired through **`ambientGain`** (so the volume sliders
+  apply), looped, with a **graceful fallback to that floor's procedural track** if every
+  candidate is missing/errors/stalls — it never crashes or goes silent. CONTRAST with the
+  GLBs: music is **streamed LAZILY on floor entry**, so it does NOT gate the loading screen,
+  and only the floors that set `musicFile` pay for it (and only on arrival). Keep tracks
+  ≤ ~3 MB (see `assets/audio/README.md`). Files are committed + served by Vercel like
+  `models/`. No co-op protocol impact (music is per-machine ambience).
+
+Don't add casual file assets beyond these categories.
 
 ### 3.5 No head-bob / no screen shake → accessibility
 A hard accessibility line. Recoil is **gun-model-only** (the camera never moves). Impact

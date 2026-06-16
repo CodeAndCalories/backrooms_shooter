@@ -573,7 +573,11 @@ function spawnEnemy(type, forcePos) {
     roamDir: new THREE.Vector3((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2),
     roamTimer: 0,                        // 0 → pick a fresh wander heading next frame
     huntMemory: 0,                       // >0 = still hunting after a recent detection
-    losTimer: Math.random() * 0.3        // throttles line-of-sight checks (staggered)
+    losTimer: Math.random() * 0.3,       // throttles line-of-sight checks (staggered)
+    // VOCALIZATIONS (cosmetic): idle ambience timer + last hunt state (to fire the
+    // aggro screech on the roam→hunt transition). See updateEnemies.
+    vocalTimer: 1 + Math.random() * 3,
+    prevHunting: false
   };
   enemies.push(enemy);
   return enemy; // popBalloon stamps aggro on trap spawns; other callers ignore it
@@ -1184,7 +1188,9 @@ function spawnChaser() {
     unkillable: true,            // applyEnemyHit (main.js) flinches but never kills it
     spawnGrace: CHASER_GRACE,    // stands still & harmless this long
     pathTimer: 0,                // 0 → recompute BFS waypoint next frame
-    wp: null                     // current world waypoint {x,z} or null
+    wp: null,                    // current world waypoint {x,z} or null
+    vocalTimer: 0.5,             // cadence of the relentless roar (see updateEnemies)
+    prevHunting: true
   };
   enemies.push(enemy);
   return enemy;
@@ -1335,6 +1341,29 @@ function updateEnemies(dt) {
       }
     }
 
+    // ── VOCALIZATIONS (cosmetic). Host/solo only (this loop never runs on
+    // clients). Idle ambience plays LOCALLY (each machine voices its own nearby
+    // mobs — clients do their mirrors in netClientUpdate); aggro/attack/roar are
+    // EVENTS that hostMobVocal also broadcasts so co-op players share the dread. ──
+    if (e.vocalTimer === undefined) e.vocalTimer = Math.random() * 3; // defensive default
+    e.vocalTimer -= dt;
+    if (e.isChaser) {
+      if (e.spawnGrace <= 0 && e.vocalTimer <= 0) {
+        e.vocalTimer = 2.4 + Math.random() * 1.4;
+        hostMobVocal('chaser', 'roar', e.pos.x, e.pos.z); // relentless angry roar
+      }
+    } else {
+      const huntingNow = (e.state === 'hunt');
+      if (huntingNow && !e.prevHunting) {
+        e.vocalTimer = 1.5 + Math.random() * 2;
+        hostMobVocal(e.type, 'aggro', e.pos.x, e.pos.z);  // the scary one: just noticed you
+      } else if (e.vocalTimer <= 0) {
+        e.vocalTimer = (huntingNow ? 2.5 : 4) + Math.random() * 3;
+        mobVocalLocal(e.type, 'idle', e.pos.x, e.pos.z);  // ambient creature noise (local)
+      }
+      e.prevHunting = huntingNow;
+    }
+
     // Wall-aware steering: round corners toward the heading instead of jamming
     // into the wall (fixes mobs piling up on walls).
     const steer = steerAround(e.pos.x, e.pos.z, moveX, moveZ);
@@ -1412,6 +1441,8 @@ function updateEnemies(dt) {
         e.attackTimer = e.attackCooldown;
         netDealDamage(tgt, e.damage, e.pos); // hits whichever player it's chasing
         e.aggroTimer = 0; // balloon-trap grudge is satisfied once it lands a hit
+        // angry attack vocal — chaser always; others throttled so a swarm doesn't spam
+        if (e.isChaser || Math.random() < 0.5) hostMobVocal(e.type, 'attack', e.pos.x, e.pos.z);
       }
     } else {
       e.attackTimer = Math.max(0, e.attackTimer - dt * 0.5);

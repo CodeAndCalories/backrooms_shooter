@@ -20,16 +20,22 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .menu-btn:hover::before{left:100%;}
 
 /* ════ DEV TOOL: level select (safe to delete this block) ════ */
-#devLevelSelect{margin-top:26px;padding:14px 18px;border:1px dashed #6a5a2a;border-radius:4px;max-width:440px;background:rgba(0,0,0,0.3);}
+#devLevelSelect{margin-top:26px;padding:14px 18px;border:1px dashed #6a5a2a;border-radius:4px;max-width:460px;background:rgba(0,0,0,0.3);}
 .dev-ls-title{color:#ff8844;font-size:0.72em;letter-spacing:3px;margin-bottom:10px;text-transform:uppercase;}
-.dev-ls-buttons{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;}
+/* Named, scrollable floor list (was tiny numbered squares with hover-only names). */
+.dev-ls-buttons{display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto;text-align:left;}
 .dev-ls-hint{color:#8a7f55;font-size:0.7em;letter-spacing:1px;margin-top:10px;}
 .dev-ls-hint span{color:#d4c36a;}
-.dev-ls-btn{background:none;border:1px solid #d4c36a33;color:#8a7f55;width:34px;height:30px;font-family:'Courier New',monospace;font-size:0.85em;cursor:pointer;transition:all 0.2s;}
+.dev-ls-btn{display:flex;align-items:baseline;gap:8px;background:none;border:1px solid #d4c36a33;color:#8a7f55;width:100%;padding:5px 10px;font-family:'Courier New',monospace;font-size:0.82em;text-align:left;cursor:pointer;transition:all 0.15s;}
+.dev-ls-btn .ls-num{color:#d4c36a;min-width:38px;font-weight:bold;}
+.dev-ls-btn .ls-tag{margin-left:auto;color:#6a6048;font-size:0.85em;letter-spacing:1px;}
 .dev-ls-btn:hover{background:rgba(212,195,106,0.12);color:#d4c36a;border-color:#d4c36a;}
 .dev-ls-btn.boss{color:#bb5544;border-color:#ff442233;}
+.dev-ls-btn.boss .ls-num{color:#ff6644;}
 .dev-ls-btn.boss:hover{background:rgba(255,68,34,0.12);color:#ff6644;border-color:#ff6644;}
 .dev-ls-btn.selected{background:rgba(212,195,106,0.22);color:#fff;border-color:#d4c36a;box-shadow:0 0 10px rgba(212,195,106,0.4);}
+/* DEV playtest-cheats indicator (top-left, ?dev=1 only) */
+.hud-cheats{position:absolute;top:8px;left:10px;color:#ff8844;font-size:0.62em;letter-spacing:2px;text-transform:uppercase;text-shadow:0 0 4px #000;line-height:1.6;pointer-events:none;}
 /* PART 2 — player level select (gold/Courier, matches menu) */
 #playerLevelSelect{margin-top:24px;padding:14px 18px;border:1px solid #6a5a2a;border-radius:4px;max-width:460px;background:rgba(0,0,0,0.3);}
 .pls-title{color:#d4c36a;font-size:0.8em;letter-spacing:4px;margin-bottom:12px;text-transform:uppercase;}

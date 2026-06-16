@@ -873,7 +873,7 @@ function netMobSpawn(id, type, x, z, hp, maxHp) {
   const sH = mt.scale * 2.5;
   mesh.position.set(x, mesh.isGroup ? 0 : sH / 2, z);
   scene.add(mesh);
-  const m = { id, type, mesh, scale: mt.scale, tx: x, tz: z, hp, maxHp, flashT: 0, dying: false, deathT: 0 };
+  const m = { id, type, mesh, scale: mt.scale, tx: x, tz: z, hp, maxHp, flashT: 0, dying: false, deathT: 0, vocalTimer: Math.random() * 3 };
   netMobs.set(id, m);
   return m;
 }
@@ -999,6 +999,18 @@ function netClientUpdate(dt) {
       if (m.type === 'phantom') yPos += Math.sin(Date.now() * 0.003 + m.mesh.position.x) * 0.4;
       else yPos += wadeY;
       m.mesh.position.y = yPos;
+    }
+
+    // IDLE vocalizations for this mirror (per-machine ambience — the client voices
+    // its OWN nearby mobs). State-driven events (aggro/attack/roar) instead arrive
+    // from the host via 'mob_vocal'. Skip the chaser (its roar is broadcast).
+    if (m.type !== 'chaser' && typeof mobVocalLocal === 'function') {
+      if (m.vocalTimer === undefined) m.vocalTimer = Math.random() * 3;
+      m.vocalTimer -= dt;
+      if (m.vocalTimer <= 0) {
+        m.vocalTimer = 3 + Math.random() * 3.5;
+        mobVocalLocal(m.type, 'idle', m.mesh.position.x, m.mesh.position.z);
+      }
     }
   }
 
@@ -1265,6 +1277,24 @@ function netBroadcastScare(type, data) {
 
 onMessage('scare', (d) => {
   if (netIsClient() && d && gameState === 'playing') applyScare(d.type, d.data); // main.js
+});
+
+/* ── mob vocalizations (audio pass) ──
+   The HOST owns mob STATE, so the state-driven scary vocals (aggro on roam→hunt,
+   attack, the chaser's roar) are host events: hostMobVocal (main.js) plays them
+   locally AND calls this to broadcast {t:type, k:kind, x, z} so co-op players
+   share the dread. Each receiver re-spatializes from its OWN camera. IDLE
+   ambience is NOT broadcast — every machine voices its own nearby mobs/mirrors.
+   PROTOCOL ADDITION: an old build logs it unhandled (just misses the sound) —
+   both players on the new build (already required by prior additions). Cosmetic,
+   no gameplay state. */
+
+function netBroadcastMobVocal(type, kind, x, z) {
+  if (netState.role === 'host' && netState.peers.length > 0) sendToAll('mob_vocal', { t: type, k: kind, x: netR2(x), z: netR2(z) });
+}
+
+onMessage('mob_vocal', (d) => {
+  if (netIsClient() && d && gameState === 'playing' && typeof mobVocalLocal === 'function') mobVocalLocal(d.t, d.k, d.x, d.z); // main.js
 });
 
 /* ── minimap blip sources (host/solo: real lists; client: mirrors) ── */

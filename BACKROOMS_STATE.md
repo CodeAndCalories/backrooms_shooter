@@ -19,11 +19,124 @@ fog-of-war minimap, pool/water system with fake caustics.
 - Fixed light budget: 32 point + 1 spot + 1 ambient per floor (budget pads fill to 26
   ceiling lights) — never exceed, never destabilize the shader program cache
 - New material/shader families must be pinned in the program keepalive
-- Procedural assets (canvas textures + Web Audio); boss PNGs are the only file assets
+- Procedural-FIRST assets (canvas textures + Web Audio). File assets are the
+  DELIBERATE exceptions, kept few: boss GLB models + boss PNG sprites, and — as of
+  June 16 — **real music files in `assets/audio/` (.ogg/.mp3)** for floors that opt
+  in via `theme.musicFile` (streamed through `ambientGain`, looped, graceful
+  fallback to the procedural track if absent). Don't add casual file assets beyond
+  these.
 - No head-bob / no screen shake (accessibility) — gun-only recoil
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **DEV PLAYTEST CHEATS (June 16) — `?dev=1` ONLY, zero effect on the normal/co-op
+  build, no protocol impact:**
+  - **Clearer jump-to-floor:** the dev level-select (start menu, `?dev=1`) was tiny
+    numbered squares with hover-only names — now a scrollable NAMED list:
+    `L18  Hotel Chase            [chase]` (boss floors tinted red), so you can scan
+    + click the floor you want. (`buildDevLevelSelect` in main.js + `.dev-ls-*` CSS.)
+  - **Cheat keys (in-game, `?dev=1` only — all gated by `DEV_MODE && gameState==='playing'`):**
+    **G** = god mode (toggle — `damagePlayer` no-ops: no damage, no down) ·
+    **I** = infinite ammo (toggle — clip never decrements, never empties/reloads) ·
+    **C** = give cash (+$1000, repeatable) ·
+    **K** = kill all mobs (host/solo only — clients mirror; **spares the unkillable
+    chaser** so you can feel-test IT; leaves the wave counter so it doesn't instantly
+    respawn). Built for tuning the Hotel Chase chaser without dying repeatedly.
+  - **Indicator:** a small dev-only `#hudCheats` readout (top-left) shows active
+    toggles (`🛡 GOD`, `∞ AMMO`) + a brief flash for give-cash / kill-all. Hidden
+    entirely unless `?dev=1` (like the FPS/PROG readouts).
+  - **Gating proof:** every cheat is behind `DEV_MODE`; the normal build never reads
+    the keys or shows the HUD. Cheat state is local only (no co-op message).
+  - **Headless: `tools/test_devcheats.js`** (new) — extracts the REAL
+    `handleDevCheatKey`/`devKillAllMobs`/`damagePlayer` and verifies: god toggle +
+    damage no-op (and the existing downed-guard still holds), infinite-ammo top-up,
+    repeatable cash, kill-all sparing the chaser, the client kill-all guard, and the
+    `DEV_MODE` gating + HUD/level-select wiring. Full suite green (15 tools);
+    node --check clean.
+- **AUDIO PASS — richer procedural soundscape (June 16, UNPLAYED). All Web Audio
+  synthesis (no files); the file loader from the previous batch is untouched.**
+  - **PER-THEME AMBIENT BEDS (audio.js `startAmbient`, now rebuilt EVERY floor via
+    buildMazeScene — previously it was set ONCE at game start, a real gap):** each
+    theme gets a distinct subtle looping bed through `ambientGain` (sliders apply):
+    Lobby = fluorescent buzz (60Hz + 120Hz harmonic) + flicker crackle; Poolrooms/
+    Dark Pools = water-lapping noise bed + echoing drips (+ deep ominous sub-drone on
+    the dark variant); Freezer = low HVAC rumble + motor hum + occasional pipe groan;
+    Hospital = soft air-handling + intermittent monitor beeps; Electrical = 60/120Hz
+    transformer hum + intermittent zap; Pipe Dreams = metallic clanks; **everything
+    else = a generic quiet room-tone hum.** Level Fun (music) + Hotel Chase (alarm)
+    get NO bed (their dedicated audio IS the bed). `stopAmbient` tears every bed down
+    (oscillators + intervals). Gains deliberately low (atmosphere, not noise).
+  - **MOB VOCALIZATIONS (the dread layer):** procedural per-type creature sounds,
+    distance-attenuated + stereo-panned from the listener's camera (like the remote
+    gunshots). `playMobVocal(type, kind, gain, pan)` (audio.js); `mobVocalLocal` /
+    `hostMobVocal` (main.js) spatialize + trigger. Per type: crawler/spider = wet
+    skitter-clicks; stalker = low growl; phantom = soft fluttering wingbeats; partygoer
+    = unsettling descending giggle. **kind = idle | aggro | attack | roar.** The big
+    ones for dread: **aggro screech on the roam→hunt transition**, an attack
+    growl/screech on a landed hit, and the **Hotel Chase CHASER's relentless angry
+    roar** (~every 2.4-3.8s while pursuing). Throttled per-mob + a global **voice cap
+    (4 idle, +2 reserve for events)** so a wave never becomes a cacophony; idle gated
+    by audible distance. Idle ambience plays **per-machine** (host voices `enemies`,
+    each client voices its `netMobs` mirrors); state-driven events are host-owned.
+  - **⚠ PROTOCOL ADDITION — `'mob_vocal'` {t,k,x,z}, host → all (FLAGGED per the
+    prompt).** State-driven events (aggro/attack/roar) are broadcast so co-op players
+    SHARE the scares (each re-spatializes from its own camera). Idle ambience is NOT
+    broadcast. Cosmetic only — no gameplay state, no host-authority change. Old builds
+    log it unhandled (just miss the sound) → both players on the new build (already
+    required by recent batches).
+  - **BALLOON POP improved (Level Fun):** crisper/louder latex snap (4ms decay,
+    2.2kHz highpass) + a downward latex "fwip" body + the recoil blip; the following
+    `playPartyGrowl` deepened (sub-octave + a rising-anger sweep) for menace.
+  - **Headless: `tools/test_audio.js`** (new) — extracts the REAL vocalSlot + the
+    synth (`_vNoise`/`_vTone`/`playMobVocal`) and drives a fake Web Audio graph:
+    the concurrency cap (4 idle + 2 reserve, frees on voice end), EVERY type×kind
+    synth branch runs without throwing + routes through sfxGain, the per-theme beds
+    exist + are rebuilt per floor, and the trigger/broadcast wiring across all four
+    files. Full suite green (14 tools); node --check clean.
+  - **Needs a browser/co-op session — playtest gate:** Are the ambient beds
+    audible-but-subtle (Lobby buzz, Freezer rumble, Hospital beeps, Electrical zap,
+    Dark Pools sub)? Do mob vocals add dread without nagging — the aggro screech land,
+    the attack growl read, the **chaser roar feel relentless** on Hotel Chase? Is the
+    voice cap enough that a full wave isn't a wall of noise? Balloon pop satisfying +
+    growl menacing? **Co-op:** both players hear aggro/attack/roar (the 'mob_vocal'
+    broadcast) while idle ambience is each player's own nearby mobs.
+- **REAL MUSIC FILES now supported (June 16, UNPLAYED) — deliberate relaxation of
+  the procedural-only audio rule (see HARD CONSTRAINTS; PROJECT_GUIDE §3.4):**
+  - **Loader (`startFileMusic`/`stopFileMusic`, audio.js):** a floor opts in with
+    `theme.musicFile` (a path, or an array of fallback candidates tried in order —
+    e.g. `.ogg` then `.mp3`). The file STREAMS via an HTMLAudioElement wired into the
+    Web Audio graph through **`ambientGain`** (Master + Ambient sliders control it,
+    like procedural music) and **loops**.
+  - **Graceful fallback (never crashes / never silent on a missing file):** if every
+    candidate 404s / errors / stalls (8s), it falls back to that floor's PROCEDURAL
+    track. A floor-change mid-load is token-guarded so a stale load can't start
+    playing after you've left. `updateFloorMusic` now: stop all → if `musicFile`
+    play the file (fallback procedural) → else procedural (`proceduralMusicStarterFor`).
+  - **First floor wired: Hotel Chase (Floor 18).** `theme.musicFile =
+    ['assets/audio/hotel_chase.ogg','assets/audio/hotel_chase.mp3']`. With NO file
+    present (current state — none committed yet) it plays the existing procedural
+    alarm + dread drone + elevator-near-exit. Drop a file in to upgrade it.
+    **Trade-off accepted:** a file REPLACES the chase procedural, so the alarm 'run!'
+    cue + distance-faded elevator are only present in the fallback (say the word to
+    LAYER the file over the alarm instead).
+  - **Files live in `assets/audio/`** (new folder; see its README) — committed +
+    served by Vercel as static assets like `models/`. **LOAD WEIGHT:** streamed
+    LAZILY on floor entry, so they do NOT gate the startup loading screen (unlike the
+    GLB mob models); only floors that use a file pay, and only on arrival. Guidance:
+    ≤ ~3 MB per track (~96-128 kbps OGG, mono ok).
+  - **No new shader/light/protocol impact.** Audio-only; no co-op protocol change
+    (music is per-machine ambience). Both players hear their own bus.
+  - **Headless: `tools/test_music.js`** (new) — extracts the REAL loader and drives
+    every branch with a fake Audio/Web-Audio graph: present file wired+played+looped
+    through ambientGain; missing/erroring → onFail (procedural); `.ogg→.mp3`
+    candidate fallthrough; all-fail → onFail; 8s stall → onFail; floor-change aborts
+    a stale load; stop tears down (pause+disconnect). Plus wiring + folder-exists
+    checks. Full suite green; node --check clean.
+  - **Needs a browser session — playtest gate:** drop a real `hotel_chase.ogg` into
+    `assets/audio/`, hard-refresh, enter Floor 18 → confirm it streams, loops, the
+    Master/Ambient sliders move it, and that DELETING/renaming the file cleanly
+    falls back to the procedural alarm (no crash, no silence). Co-op: each player
+    streams its own copy.
 - **NEW FLOOR 18 — "Hotel Chase" (chase archetype, June 16, UNPLAYED):** a CHASE
   level — a new gameplay verb (survive & run, not clear-the-room). Floor index 17,
   appended after Dark Pools. Canon "Run For Your Life." **The level IS the enemy.**
