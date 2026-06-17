@@ -121,5 +121,117 @@ console.log('2. auto-run movement wiring');
   else fail('AUTORUN_SPEED pace multiplier not 1.7');
 }
 
+/* ── 3. advancing wall: arc lookup, projection, advance, caught ── */
+console.log('3. advancing wall (track projection + caught)');
+{
+  const CATCH = constNum('CHASE_CATCH_GAP');
+  const AUTOSPD = 5.5 * 1.65 * parseFloat(mainSrc.match(/AUTORUN_SPEED = MOVE_SPEED \* SPRINT_MULT \* ([\d.]+)/)[1]);
+  const WALL_FRAC = parseFloat(mainSrc.match(/CHASE_WALL_SPEED = AUTORUN_SPEED \* ([\d.]+)/)[1]);
+  const WALL_SPEED = AUTOSPD * WALL_FRAC; // the REAL wall pace (≈14.2 u/s), not the raw fraction
+
+  const wallApi = (env) => new Function('env', `
+    with (env) {
+      function netIsClient(){ return netState.role === 'client'; }
+      function animateChaserMesh(){}
+      function mobVocalLocal(){ env.roars++; }
+      function gameOver(){ env.gameovers++; }
+      function netGoDown(){ env.downs++; }
+      function playDamage(){}
+      ${extractFn(mainSrc, 'function chaseProjectProgress')}
+      ${extractFn(mainSrc, 'function chaseWorldAtArc')}
+      ${extractFn(mainSrc, 'function updateChaseWall')}
+      return { project: chaseProjectProgress, worldAt: chaseWorldAtArc, tick: updateChaseWall };
+    }
+  `)(env);
+
+  // Build an L-shaped track: 10 cells east, then 10 cells south (cell centers).
+  const C = 4, pts = [];
+  for (let i = 0; i <= 10; i++) pts.push({ x: (1 + i) * C + C / 2, z: 1 * C + C / 2 });
+  for (let i = 1; i <= 10; i++) pts.push({ x: 11 * C + C / 2, z: (1 + i) * C + C / 2 });
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+  const total = cum[cum.length - 1];
+  const mkState = (extra) => Object.assign({
+    worldPts: pts, cum, total, runStarted: true, gateOpen: true,
+    wallS: -16, wallTargetS: -16, myIdx: 0, myS: 0, caught: false, wallGroup: null, wallBlobs: []
+  }, extra || {});
+
+  // worldAt clamps + interpolates
+  {
+    const env = { player: { pos: { x: 0, z: 0 } }, chaseState: mkState(), netState: { role: 'solo' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const api = wallApi(env);
+    const a = api.worldAt(-5), b = api.worldAt(total + 5), mid = api.worldAt(total / 2);
+    const okEnds = a.x === pts[0].x && a.z === pts[0].z && b.x === pts[pts.length - 1].x && b.z === pts[pts.length - 1].z;
+    const okMid = mid.x >= pts[0].x - 1e-6 && mid.z >= pts[0].z - 1e-6; // on the track somewhere
+    if (okEnds && okMid) ok('worldAtArc clamps to track ends and interpolates the middle');
+    else fail(`worldAtArc wrong (a=${a.x},${a.z} b=${b.x},${b.z})`);
+  }
+
+  // projection: player standing on a track point → myS ≈ cum there; lateral offset barely changes it
+  {
+    const onPt = pts[6];
+    const env = { player: { pos: { x: onPt.x, z: onPt.z }, isDown: false }, chaseState: mkState(), netState: { role: 'solo' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const api = wallApi(env);
+    api.project();
+    const sOn = env.chaseState.myS;
+    env.player.pos.x = onPt.x; env.player.pos.z = onPt.z + 1.2; // dodge sideways 1.2u
+    api.project();
+    const sOff = env.chaseState.myS;
+    if (Math.abs(sOn - cum[6]) < 0.6 && Math.abs(sOn - sOff) < 0.6) ok('projection: progress ≈ arc-length, lateral dodge barely changes it');
+    else fail(`projection off (sOn=${sOn.toFixed(1)} cum6=${cum[6].toFixed(1)} sOff=${sOff.toFixed(1)})`);
+  }
+
+  // host advances the wall at the fixed pace; client lerps toward the broadcast target
+  {
+    const envH = { player: { pos: { x: pts[0].x, z: pts[0].z }, isDown: true }, chaseState: mkState(), netState: { role: 'host' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const apiH = wallApi(envH);
+    const s0 = envH.chaseState.wallS; apiH.tick(0.1);
+    const adv = envH.chaseState.wallS - s0;
+    if (Math.abs(adv - WALL_SPEED * 0.1) < 1e-6) ok(`host advances wall at fixed CHASE_WALL_SPEED (${WALL_SPEED.toFixed(1)} u/s)`);
+    else fail(`host wall advance wrong (${adv.toFixed(3)} vs ${(WALL_SPEED * 0.1).toFixed(3)})`);
+    if (WALL_SPEED < AUTOSPD) ok(`wall (${WALL_SPEED.toFixed(1)}) is slower than auto-run (${AUTOSPD.toFixed(1)}) — a clean run stays ahead`);
+    else fail('wall not slower than auto-run');
+
+    const envC = { player: { pos: { x: pts[0].x, z: pts[0].z }, isDown: true }, chaseState: mkState({ wallS: 0, wallTargetS: 20 }), netState: { role: 'client' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const apiC = wallApi(envC);
+    for (let i = 0; i < 60; i++) apiC.tick(1 / 60);
+    if (Math.abs(envC.chaseState.wallS - 20) < 0.5) ok('client lerps wall toward the host-broadcast position');
+    else fail(`client wall lerp off (${envC.chaseState.wallS.toFixed(2)})`);
+  }
+
+  // caught: ahead of the wall → safe; wall reaches you → solo game over / co-op down
+  {
+    const safe = { player: { pos: { x: pts[8].x, z: pts[8].z }, isDown: false }, chaseState: mkState({ wallS: cum[2] }), netState: { role: 'solo' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const apiS = wallApi(safe); apiS.tick(1 / 60);
+    if (!safe.chaseState.caught && safe.gameovers === 0) ok('ahead of the wall → not caught');
+    else fail('false catch while ahead');
+
+    const caughtSolo = { player: { pos: { x: pts[2].x, z: pts[2].z }, isDown: false }, chaseState: mkState({ wallS: cum[2] }), netState: { role: 'solo' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const apiCS = wallApi(caughtSolo); apiCS.tick(1 / 60);
+    if (caughtSolo.chaseState.caught && caughtSolo.gameovers === 1) ok('wall reaches you (solo) → game over');
+    else fail(`solo catch failed (caught=${caughtSolo.chaseState.caught} go=${caughtSolo.gameovers})`);
+
+    const caughtCo = { player: { pos: { x: pts[2].x, z: pts[2].z }, isDown: false }, chaseState: mkState({ wallS: cum[2] }), netState: { role: 'host' }, CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const apiCC = wallApi(caughtCo); apiCC.tick(1 / 60);
+    if (caughtCo.chaseState.caught && caughtCo.downs === 1) ok('wall reaches you (co-op) → DOWN (non-revivable)');
+    else fail(`co-op catch failed (down=${caughtCo.downs})`);
+  }
+}
+
+/* ── 4. the wall adds NO lights (budget intact) ── */
+console.log('4. wall visual: no new lights');
+{
+  const enemSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'enemies.js'), 'utf8');
+  const buildWall = extractFn(mainSrc, 'function buildChaseWall');
+  const buildBlob = extractFn(enemSrc, 'function buildChaserMonster');
+  const lightRe = /new THREE\.(PointLight|SpotLight|DirectionalLight|HemisphereLight)/;
+  if (!lightRe.test(buildWall) && !lightRe.test(buildBlob)) ok('buildChaseWall + buildChaserMonster add ZERO lights');
+  else fail('the wall introduces a light');
+  if (/buildChaserMonster/.test(buildWall)) ok('wall reuses the procedural blob-mass look (buildChaserMonster), widened across the corridor');
+  else fail('wall does not reuse the blob-mass');
+  if (/MeshStandardMaterial/.test(buildWall)) ok('occluder slab uses the pinned no-map Standard family');
+  else fail('slab material not Standard');
+}
+
 console.log(fails === 0 ? '\nALL AUTO-RUN TESTS PASSED' : `\n${fails} FAILURE(S)`);
 process.exit(fails === 0 ? 0 : 1);

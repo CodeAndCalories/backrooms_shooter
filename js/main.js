@@ -2905,6 +2905,7 @@ let chaseRunStarted = false; // mirror flag audio.js reads (defer the alarm unti
 const CHASE_GATE_HOLD = 2.0;        // seconds of (any-player) HOLD-E to open the start gate
 const CHASE_WALL_GRACE_DIST = 16;   // wall starts this far BEHIND the gate (head start), world units
 const CHASE_WALL_SPEED = AUTORUN_SPEED * 0.92; // the wall's fixed track pace (just below auto-run)
+const CHASE_CATCH_GAP = 2.0;        // caught when your track progress is within this of the wall (its reach)
 function initChaseState(theme) {
   chaseState = null;
   chaseRunStarted = false;
@@ -2994,10 +2995,109 @@ function openChaseRun() {
   player.noDamageTimer = 0;
 }
 
-// §3 fills these in (build + advance the wall, project player progress, caught).
-// Stubs keep §2 self-contained and the animate() wiring stable.
-function spawnChaseWall() {}
-function updateChaseWall(dt) {}
+// THE WALL — a writhing mass of flesh filling the corridor, advancing along the
+// TRACK (not pathfinding). It rides arc-length wallS; a dead-end / wrong turn / hit
+// just stops your own progress, so the wall (fixed pace) reaches you. Visual: a dark
+// occluder slab spanning the corridor + 3 procedural blob-masses (buildChaserMonster,
+// enemies.js — NO lights, pinned no-map Standard flesh + unlit eyes), oriented so the
+// eyes face the fleeing players. Built once when the gate opens; disposed with the floor.
+function buildChaseWall() {
+  if (!chaseState || chaseState.wallGroup) return;
+  const grp = new THREE.Group();
+  const blobs = [];
+  const width = CELL * CHASE_BAND_H; // corridor cross-section (~8 units)
+  // Dark occluder slab (pinned no-map Standard) BEHIND the blobs — reads as "no way past".
+  const slabMat = new THREE.MeshStandardMaterial({ color: 0x1a0306, emissive: 0x330507, emissiveIntensity: 0.25, roughness: 0.92, metalness: 0.05 });
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(width * 1.15, WALL_H, 0.7), slabMat);
+  slab.position.set(0, WALL_H / 2, -0.9); // local -Z = behind (away from the players)
+  grp.add(slab);
+  // 3 writhing masses across the width; local +Z faces the fleeing players (eyes forward).
+  for (let k = -1; k <= 1; k++) {
+    const blob = buildChaserMonster(1.7); // enemies.js procedural limb-mass; zero lights
+    blob.position.set(k * (width * 0.33), 0, 0.3);
+    grp.add(blob); blobs.push(blob);
+  }
+  scene.add(grp);
+  chaseState.wallGroup = grp;
+  chaseState.wallBlobs = blobs;
+}
+
+// Project the local player's position onto the track polyline (local window around
+// the last index) → arc-length progress. Lateral dodging barely changes progress;
+// turning around / leaving the track stops it advancing (→ the wall catches you).
+function chaseProjectProgress() {
+  const cs = chaseState, pts = cs.worldPts;
+  const px = player.pos.x, pz = player.pos.z;
+  let bestD2 = Infinity, bestS = cs.myS, bestIdx = cs.myIdx;
+  const W = 14, lo = Math.max(0, cs.myIdx - W), hi = Math.min(pts.length - 2, cs.myIdx + W);
+  for (let i = lo; i <= hi; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const dx = b.x - a.x, dz = b.z - a.z;
+    const len2 = dx * dx + dz * dz;
+    let t = len2 > 0 ? ((px - a.x) * dx + (pz - a.z) * dz) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const cxp = a.x + dx * t, czp = a.z + dz * t;
+    const d2 = (px - cxp) * (px - cxp) + (pz - czp) * (pz - czp);
+    if (d2 < bestD2) { bestD2 = d2; bestIdx = i; bestS = cs.cum[i] + Math.sqrt(len2) * t; }
+  }
+  cs.myIdx = bestIdx; cs.myS = bestS;
+}
+
+// World point + tangent at a track arc-length (clamped to the track). Cached segment
+// index walks forward as the wall advances. Used to place/orient the wall mesh.
+function chaseWorldAtArc(s) {
+  const cs = chaseState, pts = cs.worldPts, cum = cs.cum, n = pts.length - 1;
+  if (s <= 0) return { x: pts[0].x, z: pts[0].z, dx: pts[1].x - pts[0].x, dz: pts[1].z - pts[0].z };
+  if (s >= cs.total) return { x: pts[n].x, z: pts[n].z, dx: pts[n].x - pts[n - 1].x, dz: pts[n].z - pts[n - 1].z };
+  let i = cs.wallIdx || 0;
+  if (cum[i] > s) i = 0;
+  while (i < n - 1 && cum[i + 1] <= s) i++;
+  cs.wallIdx = i;
+  const seg = cum[i + 1] - cum[i], t = seg > 0 ? (s - cum[i]) / seg : 0, a = pts[i], b = pts[i + 1];
+  return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t, dx: b.x - a.x, dz: b.z - a.z };
+}
+
+function spawnChaseWall() {
+  if (!chaseState) return;
+  buildChaseWall(); // wallS already starts at -CHASE_WALL_GRACE_DIST (initChaseState) → head start
+}
+
+// Per-frame on every machine while the run is on: advance/sync the wall, project the
+// local player's progress, position+animate the wall, roar, and detect "caught".
+function updateChaseWall(dt) {
+  const cs = chaseState;
+  if (!cs || !cs.runStarted) return;
+  // Wall track position: host/solo advance at the FIXED pace; clients smooth toward
+  // the host's broadcast value (snapshot cs.ws → wallTargetS).
+  if (netIsClient()) cs.wallS += (cs.wallTargetS - cs.wallS) * Math.min(1, dt * 8);
+  else cs.wallS += CHASE_WALL_SPEED * dt;
+
+  if (!player.isDown) chaseProjectProgress();
+
+  if (cs.wallGroup) {
+    const w = chaseWorldAtArc(cs.wallS);
+    cs.wallGroup.position.set(w.x, 0, w.z);
+    if (w.dx || w.dz) cs.wallGroup.rotation.y = Math.atan2(w.dx, w.dz); // local +Z = travel dir → eyes face players
+    cs.wallAnimT = (cs.wallAnimT || 0) + dt;
+    if (typeof animateChaserMesh === 'function') for (const b of cs.wallBlobs) animateChaserMesh(b, cs.wallAnimT);
+  }
+
+  // Relentless roar, spatialized from the wall toward THIS machine's camera (per-machine).
+  cs.roarTimer = (cs.roarTimer || 0) - dt;
+  if (cs.roarTimer <= 0) {
+    cs.roarTimer = 2.4 + Math.random() * 1.4;
+    if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
+  }
+
+  // CAUGHT — your progress fell to the wall's reach. Solo → game over; co-op → DOWN
+  // (non-revivable this floor, theme.noRevive → out/spectating; all-down = wipe).
+  if (!player.isDown && !cs.caught && cs.myS - cs.wallS <= CHASE_CATCH_GAP) {
+    cs.caught = true;
+    playDamage();
+    if (netState.role === 'solo') gameOver();
+    else if (typeof netGoDown === 'function') netGoDown();
+  }
+}
 
 /* ═══════════════════════════════════════════
    BUILD SCENE

@@ -1588,7 +1588,8 @@ function netShowDownedMsg(on, prog, reviverName) {
   if (!on) { if (netDownedMsgHtml !== '') { netDownedMsgHtml = ''; el.style.display = 'none'; } return; }
   const pct = Math.floor((prog || 0) * 100);
   let line;
-  if (reviverName) line = `${reviverName.toUpperCase()} IS REVIVING YOU… ${pct}%`;
+  if (getTheme(currentFloor).noRevive) line = 'CAUGHT BY THE WALL — out for the run (waiting on the others)';
+  else if (reviverName) line = `${reviverName.toUpperCase()} IS REVIVING YOU… ${pct}%`;
   else if (prog > 0) line = `REVIVE PAUSED — ${pct}%`;
   else line = 'YOU ARE DOWN — a teammate can hold [E] near you';
   // reviverName comes from netCleanName'd roster entries — safe charset.
@@ -1612,6 +1613,7 @@ let netLastSentProg = -1;
 
 function netUpdateReviverSide(dt) {
   if (gameState !== 'playing' || player.isDown) { netShowRevivePrompt(false); return; }
+  if (getTheme(currentFloor).noRevive) { netShowRevivePrompt(false); return; } // chase: caught = out, no revive
   let best = null, bestD2 = NET_REVIVE_RANGE * NET_REVIVE_RANGE;
   for (const av of netAvatars.values()) {
     if (!av.down) continue;
@@ -1656,6 +1658,9 @@ function netOnRevivingMe(fromId) {
 // decays at half speed otherwise; streams the % to everyone for the reviver bar.
 function netUpdateDownState(dt) {
   if (!player.isDown || gameState !== 'playing') return;
+  // CHASE (noRevive): caught = OUT for the run — no revive accumulation, fixed message.
+  // You're carried to the next floor when a survivor reaches the exit (all-down = wipe).
+  if (getTheme(currentFloor).noRevive) { netShowDownedMsg(true, 0); return; }
   const active = clock.getElapsedTime() < netBeingRevivedUntil;
   if (active) {
     player.reviveProgress += dt;
