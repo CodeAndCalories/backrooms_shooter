@@ -119,6 +119,12 @@ console.log('2. auto-run movement wiring');
   const m = mainSrc.match(/AUTORUN_SPEED = MOVE_SPEED \* SPRINT_MULT \* ([\d.]+)/);
   if (m && parseFloat(m[1]) === 1.7) ok('AUTORUN_SPEED = 1.7× sprint (the pace knob)');
   else fail('AUTORUN_SPEED pace multiplier not 1.7');
+
+  // spawn faces DOWN the corridor (else gate-open would auto-run into the start wall)
+  if (/theme\.autoRun && chaseState && chaseState\.worldPts\.length > 1/.test(mainSrc) &&
+      /player\.yaw = Math\.atan2\(-\(b\.x - a\.x\), -\(b\.z - a\.z\)\)/.test(mainSrc))
+    ok('spawn faces down the track on auto-run floors');
+  else fail('spawn-facing for auto-run not set');
 }
 
 /* ── 3. advancing wall: arc lookup, projection, advance, caught ── */

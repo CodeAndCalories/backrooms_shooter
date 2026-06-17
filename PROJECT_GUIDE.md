@@ -84,7 +84,8 @@ suite (all must stay green):
 | `tools/test_music.js` | Real-music-file loader: extracts `startFileMusic`/`stopFileMusic` and drives every branch over a fake Audio/Web-Audio graph — present file wired+played+looped through `ambientGain`; missing/error/stall → procedural `onFail`; `.ogg→.mp3` candidate fallthrough; floor-change aborts a stale load; `stopFileMusic` tears down. Plus `updateFloorMusic` wiring + `assets/audio/` exists. |
 | `tools/test_avatar.js` | Co-op humanoid soldier avatars: static `netAvatarBuild` invariants (NO new lights, ONE shared colored no-map Standard suit material + one dark gear material, TWO articulated legs + TWO arms via hip/knee + shoulder/elbow pivot groups, helmet/visor/backpack, the `group.userData.rig` walk stash, slot color + name label kept, the smoothing-loop wiring) + the extracted `netTickAvatarWalk` over a fake rig (moving → swing amp ramps + limbs swing, legs anti-phase, arm⟂own-side-leg contralateral, knee bend ≥ 0, idle → eases to neutral still pose, downed → never swings, determinism). |
 | `tools/test_spawn.js` | Co-op spawn fan-out: extracts the real `SPAWN_FANOUT_OFFSETS`/`spawnOpenCells`/`playerSpawnCellFor` and proves slot 0 → canonical (1,1) (solo unaffected), every slot's cell is open floor (value 1, never wall/pool/furniture) across 400 hazard grids × 5 slots, distinct cells while candidates last + graceful clamp-to-last when the spawn corner is tight, determinism, near-first offset ordering, and the `buildMazeScene` wiring (local `netMySlot()` → cell-centered spawn). |
-| `tools/test_chase.js` | Hotel Chase (floor 17, 'chase' archetype): `generateChase` spawn→exit path always exists + every deck cell reachable (furniture never seals it) + furniture present + no pools + determinism (600 seeds); `chaserNextWaypoint` BFS reaches the player from spawn over 200 seeds (never stuck) with valid single-step waypoints; theme/gate/noStamina/chaser-type/wire-index/unkillable-hit/stamina-override/`netExitGateOpen('reach')` invariants. Prints ASCII maps. |
+| `tools/test_autorun.js` | Hotel Chase AUTO-RUN: the start gate (`updateChaseGate` — HOLD-E accumulates to open in `CHASE_GATE_HOLD`s, decays on release, single-holder opens it, client streams the signal while host owns progress) + movement source invariants (mouse-look-steers-forward, A/D strafe, W/S ignored, constant `AUTORUN_SPEED`, rooted until `runStarted`, guns disabled) + the advancing WALL (`chaseWorldAtArc` clamp/interp, `chaseProjectProgress` arc-length projection unaffected by lateral dodge, host advances at fixed `CHASE_WALL_SPEED` while clients lerp the broadcast position, caught solo→gameOver / co-op→down, wall slower than auto-run, the wall + `buildChaserMonster` add ZERO lights). |
+| `tools/test_chase.js` | Hotel Chase (floor 17, 'chase' = ON-RAILS AUTO-RUN): `generateCorridorChase` connectivity (spawn→exit, no islands) + determinism over 400 seeds; the `chasePath` track is a continuous walkable rail spawn→exit (4-neighbour steps); obstacles present + never block both band rows in a column + never adjacent columns (forces dodges, never seals); overshoot dead-ends past every turn; last lanes narrow to 1 row; theme wiring (autoRun/gate reach/noStamina/noRevive/no-mobs). Prints ASCII maps. (Auto-run movement + wall math live in `test_autorun.js`.) | `generateChase` spawn→exit path always exists + every deck cell reachable (furniture never seals it) + furniture present + no pools + determinism (600 seeds); `chaserNextWaypoint` BFS reaches the player from spawn over 200 seeds (never stuck) with valid single-step waypoints; theme/gate/noStamina/chaser-type/wire-index/unkillable-hit/stamina-override/`netExitGateOpen('reach')` invariants. Prints ASCII maps. |
 
 Non-test tooling: `optimize_models.js` (GLB Draco/quantize — how the boss mob models
 were shrunk), `quantize_pngs.js` (boss sprite PNG palette reduction), `inspect_glb.js`,
@@ -148,11 +149,12 @@ floors with `theme.musicFile` stream an `assets/audio/*.ogg|.mp3` through `ambie
 the swappable visual seam (GLB clones via SkeletonUtils, or the cheap wire-figure
 fallback). `spawnEnemy` (seeds the enemy object incl. **roam/hunt behavior**),
 `updateEnemies` (the AI loop: target nearest player, **roam vs hunt state**, `steerAround`
-wall avoidance, attack, death fade, pools wading; the **chaser** gets its own BFS-waypoint
-branch). **THE CHASER (Hotel Chase): `spawnChaser`/`spawnFloorChasers` + `chaserNextWaypoint`**
-(grid-BFS pursuit, robust around sharp turns; fixed speed = 0.95× sprint derived at runtime;
-`unkillable` flag → `applyEnemyHit` flinches but never kills/stuns it). Its visual is a fully
-PROCEDURAL writhing limb-mass (`buildChaserMonster` + `animateChaserMesh`), no model file. `bossHpFor` (PURE, co-op HP scaling),
+wall avoidance, attack, death fade, pools wading). The PROCEDURAL writhing limb-mass
+(`buildChaserMonster` + `animateChaserMesh`, no model file, no lights) is REUSED by the
+Hotel-Chase advancing wall (see main.js chase section). The old BFS-pursuit chaser
+(`spawnChaser`/`spawnFloorChasers`/`chaserNextWaypoint`, `CHASER_*`) is **retired/unused**
+— Hotel Chase is now an on-rails auto-run with a track-space wall, not a pathfinding mob.
+`bossHpFor` (PURE, co-op HP scaling),
 `spawnBoss`/`updateBoss`/`updateBossProjectiles`, `createBossExit`. Wave system
 (`spawnWave`, `waveSizeFor`) + anti-linger (`updateAntiLinger`, `spawnDangerMob`).
 Clients never run any of this — they render mirrors from snapshots.
@@ -184,7 +186,12 @@ texture creators + `themeTextureCache` + `texMarkSRGB`, level generators (per ar
 — `doScanPulse`/`spawnScanDot`/`updateScanDots`: emissive-only InstancedMesh dots, ZERO
 lights, per-instance-scale fade, reuses the instanced-Standard-no-map family; plus
 `fireScannerLocal`, the LMB-scan/RMB-shoot routing, and the darkness override in
-buildMazeScene), `buildMazeScene` (the per-floor teardown +
+buildMazeScene), the **Hotel-Chase auto-run/wall system** (floor 17 — `generateCorridorChase`
+builds the on-rails serpentine + the `chasePath` rail; `initChaseState`/`updateChaseGate`/
+`openChaseRun` run the HOLD-E start gate; `spawnChaseWall`/`updateChaseWall` +
+`chaseProjectProgress`/`chaseWorldAtArc` advance the track-space wall, project the local
+player's progress, and detect "caught"; the auto-run branch lives in `updatePlayer`),
+`buildMazeScene` (the per-floor teardown +
 rebuild — read its teardown comment carefully before adding any scene object), shooting
 (`playerShoot`/`resolveCombatPellet`/`raycastWall`), `damagePlayer` + **sanity** +
 `updateSanity`, **scare events**, minimap (fog-of-war), HUD, the menu/ESC state machine,
@@ -205,10 +212,13 @@ build via the same `generateCurrentFloor` path).
 
 **Position / sim:** `pos` (15Hz position/orientation stream, both directions), `enemies`
 (host → all: enemy snapshot — id, type, x/z, hp, maxHp; clients rebuild mirrors + the
-kill-gate count `k`). The **chaser** rides this same snapshot (its wire type `'chaser'` is
-APPENDED to `NET_TYPE_LIST` — existing indices unchanged; it never dies so it never leaves
-the snapshot). The **'reach' gate** (chase floors) is decided in `netExitGateOpen` (always
-open), no message of its own. Both are protocol additions → both players on the new build.
+kill-gate count `k`). The **'reach' gate** (chase + Lights Out) is decided in
+`netExitGateOpen` (always open), no message of its own. The **AUTO-RUN chase** rides the
+enemy snapshot via a `cs` field `{gp gate-progress, go gate-open, rs run-started, ws
+wall-arc-length}` — host owns the start-gate progress + the advancing wall's track
+position; clients lerp `ws` and self-detect their own catch against it. (The old
+BFS-pursuit chaser is retired; `'chaser'` stays in `NET_TYPE_LIST` for wire-compat but no
+chaser mob spawns.) Protocol additions → both players on the new build.
 
 **Combat:** `shoot` (client → host: ray origin/dir + weapon id `w` + pellet rays `p` +
 damage mult `m`; host resolves authoritatively), `shot_fx` (cosmetic relay so teammates
@@ -234,7 +244,10 @@ the victory screen (host-authoritative; `showVictory`). `mob_vocal` (host →
 all: `{t:type, k:kind, x, z}` — state-driven mob vocalizations [aggro/attack/chaser-roar]
 so co-op players share them; each receiver re-spatializes from its own camera. Idle mob
 ambience is NOT broadcast — every machine voices its own nearby mobs. Cosmetic, no
-gameplay state).
+gameplay state). `chase_hold` (client → host): on the AUTO-RUN chase floor, a freshness
+signal (8Hz) sent while the client holds E on the start gate; the host accumulates the
+shared gate progress (any single holder opens it) and broadcasts it in the snapshot `cs`
+field. No gameplay state crosses beyond the gate timer.
 
 **The pickup contract** (ammo/consumable/artifact/balloon all follow it): items get
 **seeded sequential ids** in deterministic creation order, so the same id names the same
@@ -406,7 +419,7 @@ re-run the relevant test, playtest.
 | Ammo | main.js `CLIP_SIZE`/`RESERVE_MAX`/`AMMO_DROP_CHANCE` 0.2; per-weapon stats in `WEAPONS` | Pistol baseline + each gun's damage/fireRate/clip/pellets/spread/falloff. |
 | Scare frequency | main.js `placeScareTriggers` (1-2/floor), `SCARE_SAFE_TIME` 30, `rollScareType` weights | How often/early scares fire + per-theme flavor. |
 | AI behavior | enemies.js `ROAM` roll (~0.42 in `spawnEnemy`), `HUNT_NEAR` 3cells, `HUNT_VISION` 8cells, `HUNT_MEMORY` 5s, `ROAM_SPEED_MULT` 0.5 | Roam-vs-hunt mix + detection ranges. |
-| Hotel Chase (chaser) | enemies.js `CHASER_SPRINT_FRAC` 0.95 (**the key knob** — chaser speed vs player sprint; 0.95 = knife-edge), `CHASER_GRACE` 3s (head start), `CHASER_REPATH` 0.3s (BFS interval), `MOB_TYPES.chaser.damage` 34 / `.scale` 1.5; main.js `generateChase` `P_FURNITURE` 0.55 (obstacle density), `LANE_H` 2 / `NL` 7-9 / `LANE_LEN` (corridor shape — narrower/more turns); theme 17 `chaserCount`/`mobs` (obstacle-mob sparsity) | Chase pace, head start, obstacle density, corridor tightness. The chaser visual is procedural (`buildChaserMonster`). |
+| Hotel Chase (AUTO-RUN) | main.js `AUTORUN_SPEED` (1.7× sprint — run pace), `AUTORUN_STRAFE_FRAC` 0.55 (A/D dodge), `CHASE_WALL_SPEED` 0.92× auto-run (**the knife-edge knob** — wall pace vs run; ↓0.90 kinder / ↑0.94 brutal), `CHASE_WALL_GRACE_DIST` 16 (head start), `CHASE_CATCH_GAP` 2 (wall reach), `CHASE_GATE_HOLD` 2s (HOLD-E gate), `CHASE_RUNS` 15 / `CHASE_RUN_LEN` 15 / `CHASE_NARROW_RUNS` 3 / `CHASE_OBST_MAX` 0.5 (length, narrowing, obstacle density) | On-rails auto-run pace, the wall's knife-edge pace + head start + reach, gate hold time, corridor length/difficulty. The wall reuses the procedural blob-mass (`buildChaserMonster`), widened to fill the corridor; it advances in TRACK space (not pathfinding). |
 | Mob ecology | `LEVEL_THEMES[].mobs` (types/weights/danger/speedMult/hpMult/countMult/waveBase/waveCap) | Per-floor roster, difficulty, pacing. |
 | Anti-linger | main.js `LINGER_SAFE_TIME` 45, `LINGER_SPAWN_BASE/MIN` | When/how fast danger mobs pressure a lingering player. |
 | Level Fun music | audio.js `startLevelFunMusic`: note gap 3.5-10s, drone gain 0.16, stab interval 30-70s | Dread pacing (sparse music-box, leading drone, rare distant stabs). |

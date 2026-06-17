@@ -30,6 +30,78 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 18 "HOTEL CHASE" REBUILT → ON-RAILS AUTO-RUN (June 17, UNPLAYED) — the
+  serpentine-maze/BFS-pursuit version is GONE; replaced by a Temple-Run-style auto-run.
+  Shipped in 4 commits (generator → movement+gate → wall → docs). PROTOCOL ADDITION
+  (both players on new build): snapshot `cs` field + `chase_hold` message.**
+  - **MOVEMENT — auto-run (`theme.autoRun`, updatePlayer branch):** forced FORWARD at
+    `AUTORUN_SPEED` (= 1.7× sprint ≈ 15.4 u/s). **Steering = MOUSE-LOOK-STEERS-FORWARD:**
+    velocity is along the camera's horizontal heading, so wherever you look you run
+    (look left → curve left); pitch ignored (constant pace, look up/down freely). **A/D**
+    add a lateral dodge nudge (`AUTORUN_STRAFE_FRAC` 0.55); **W/S do nothing**. No
+    head-bob/shake (velocity only). **Guns disabled** (playerShoot bails, viewmodel
+    hidden); flashlight still works. Rooted until the gate opens / while downed.
+  - **LAYOUT — `generateCorridorChase`:** ONE readable serpentine of long narrow
+    corridors (2-row lanes), sharp U-turns at alternating ends, **narrowing** (last 3
+    lanes → 1 row). **Dodgeable obstacles** (value 3): one row per column, never adjacent
+    columns → never seals the path, density rises with lane index. **Overshoot dead-ends**
+    past every turn (miss the turn = run into a lethal stub). Emits `chasePath` (the rail)
+    + a deterministic track-end exit. Flood-fill-safe, seeded, co-op-identical. ~15 lanes
+    × ~15 cells ≈ a 20×46 grid (instanced walls = 1 draw call), clean run ~75-110s.
+  - **THE CHASER = an advancing WALL (not a pathfinder):** a wall of writhing flesh
+    fills the corridor and advances along the TRACK at `CHASE_WALL_SPEED` (= 0.92× auto-run
+    ≈ 14.2 u/s), fixed. Each machine projects its OWN player onto the rail (`chaseProjectProgress`
+    — lateral dodging barely changes progress; turning around / leaving the track stops
+    it). **Caught = your track progress falls within `CHASE_CATCH_GAP` of the wall →**
+    solo game over / co-op DOWN. So a dead-end, wrong turn, obstacle-hit or any slowdown
+    lets the fixed-pace wall reach you, and you can't "hide behind" it (track-space, not
+    world chase). 16-unit head start. Visual: a dark occluder slab + 3 procedural
+    blob-masses (reuses `buildChaserMonster`/`animateChaserMesh`, widened across the hall,
+    eyes facing you) — **ZERO lights**, pinned no-map Standard family. Relentless roar
+    spatialized per-machine.
+  - **START GATE:** players spawn behind a closed shutter; **HOLD-E** (host-authoritative,
+    `CHASE_GATE_HOLD` 2s) — progress accumulates while ANY player holds (**a single player
+    opens it**; decays on release). The MOMENT it opens: barrier drops, the run begins, the
+    wall spawns, the alarm/music kick in (`playChaseGateOpen` + deferred `updateFloorMusic`).
+    Gives everyone a moment to load in.
+  - **CAUGHT = OUT for the level** (`theme.noRevive` disables the revive hold) — you
+    spectate; the party only wipes if ALL are caught; reaching the exit advances everyone
+    (downed carried + revived on the next floor). REACH gate (find the far exit = win).
+  - **CO-OP:** host owns gate progress + the wall's track position, broadcast in the
+    enemy snapshot's new **`cs` field** `{gp gate-progress, go gate-open, rs run-started,
+    ws wall-arc}`; clients lerp `ws` + self-detect their own catch; clients stream a
+    **`chase_hold`** signal (8Hz) while holding E. Each player auto-runs locally (movement
+    is client-local as always) → positions sync via the existing pos stream.
+  - **Light budget intact** (wall/gate add no lights; corridor uses the normal capped
+    ceiling placement + exit-door slot → 32). No new shader family (all pinned no-map
+    Standard + the blob's MeshBasic eyes, which are floor-18-local exactly like the old
+    chaser → no per-floor PROG churn elsewhere). Old BFS chaser (`spawnChaser`/
+    `chaserNextWaypoint`) retired/unused; the blob LOOK is reused by the wall.
+  - **Knobs:** `AUTORUN_SPEED` (1.7×), `AUTORUN_STRAFE_FRAC` 0.55, `CHASE_WALL_SPEED`
+    (0.92×, **the knife-edge knob**), `CHASE_WALL_GRACE_DIST` 16, `CHASE_CATCH_GAP` 2,
+    `CHASE_GATE_HOLD` 2, `CHASE_RUNS` 15 / `CHASE_RUN_LEN` 15 / `CHASE_NARROW_RUNS` 3 /
+    `CHASE_OBST_MAX` 0.5 (length/difficulty). All in main.js.
+  - **Headless:** `test_chase.js` rewritten (connectivity/no-islands, track continuity
+    spawn→exit, obstacle no-seal + non-adjacent, overshoot dead-ends, narrowing, theme
+    wiring; ASCII maps) + new `test_autorun.js` (gate accumulation/open/decay solo/host/
+    client + single-holder, movement+disabled-gun source invariants, wall arc-lookup +
+    projection + fixed-pace advance + client lerp + caught solo/co-op + wall<auto-run +
+    no-light). `sim_levels` 68/68 + 4800/4800 (exit-variety exempts the fixed track).
+    Full suite green (22 tools); node --check clean.
+  - **Needs a co-op + solo session — playtest gate (FEEL, the part tests can't cover):**
+    - **The knife-edge** — is `CHASE_WALL_SPEED` 0.92× right (clean run barely stays ahead,
+      any fumble = caught)? Tune toward 0.90 (kinder) / 0.94 (brutal); `CHASE_WALL_GRACE_DIST`.
+    - **Steering feel** — does mouse-look-steers-forward read well at speed? Are the sharp
+      U-turns navigable but tense? Is A/D dodge useful? Motion-sickness OK (no shake)?
+    - **Readability** — can you SEE the path/turns ahead (lighting on the serpentine — the
+      generic capped placement may leave dark stretches; corridor-aware lights are a
+      follow-up if needed)? Do obstacles read as dodge-left/right in time?
+    - **The wall** — does the writhing mass fill the hall + read as horrifying? Roar
+      relentless? Dead-ends actually lethal (the wall reaches you)?
+    - **The gate** — HOLD-E load-in moment land? Alarm/music kick-in on open?
+    - **Co-op** — both run together on open; caught players go out (not wipe) + are carried
+      to the next floor on a survivor's reach; wall position agrees across machines.
+    - **Length** — clean run ~90-120s? (bump `CHASE_RUNS`/`CHASE_RUN_LEN` if short.)
 - **CO-OP AVATARS → HUMANOID SOLDIER + WALK ANIM (June 17, UNPLAYED) — cosmetic
   only, NO protocol change (avatars still sync via the existing `pos` stream):**
   the remote-player avatars were hazmat primitives (torso/hood/two arm-stubs). They

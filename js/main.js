@@ -3411,6 +3411,14 @@ function buildMazeScene() {
   player.pos.set(scx * CELL + CELL / 2, 1.6, scy * CELL + CELL / 2);
   player.vel.set(0, 0, 0);
   player.onGround = true;
+  // AUTO-RUN chase: face DOWN the corridor at spawn (the run begins the instant the
+  // gate opens, so the player must already be looking the right way — else they'd
+  // auto-run straight into the start wall). forward = (-sin yaw, -cos yaw) ∝ track dir.
+  if (theme.autoRun && chaseState && chaseState.worldPts.length > 1) {
+    const a = chaseState.worldPts[0], b = chaseState.worldPts[1];
+    player.yaw = Math.atan2(-(b.x - a.x), -(b.z - a.z));
+    player.pitch = 0;
+  }
 
   // Now that every PointLight is in the scene, schedule the flashlight shader
   // warm-up. It no longer renders synchronously here: the two warm-up renders are
