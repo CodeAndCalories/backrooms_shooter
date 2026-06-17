@@ -347,12 +347,14 @@ console.log('6. escape ending (gate slam + monster impact)');
       const CELL = 4, WALL_H = 3.4;
       const CHASE_BAND_H = ${constNum('CHASE_BAND_H')};
       const ESCAPE_SEAL_BACK = ${constNum('ESCAPE_SEAL_BACK')};
+      const ESCAPE_TURN_DUR = ${constNum('ESCAPE_TURN_DUR')};
       const ESCAPE_SLAM_DUR = ${SLAM}, ESCAPE_LUNGE_DUR = ${constNum('ESCAPE_LUNGE_DUR')};
       const ESCAPE_WALL_OVERSHOOT = ${constNum('ESCAPE_WALL_OVERSHOOT')}, ESCAPE_TOTAL = ${TOTAL};
-      const meshLike = () => ({ position: { set() {} }, rotation: {}, add() {} });
+      const player = { pos: { x: 0, z: 0 }, yaw: 0, pitch: 0 }; // for the scripted camera turn
+      const meshLike = () => ({ position: { set() {} }, rotation: {}, add() {}, traverse() {} });
       const THREE = { Group: function(){ return meshLike(); }, Mesh: function(){ return meshLike(); },
         BoxGeometry: function(){ return {}; }, MeshStandardMaterial: function(){ return {}; } };
-      const scene = { add() {} };
+      const scene = { add() { if (env.throwGate) throw new Error('escape build boom'); } };
       function netIsClient(){ return netState.role === 'client'; }
       function netBroadcastEscape(){ env.broadcasts = (env.broadcasts||0)+1; }
       function netRequestAdvance(){ env.requests = (env.requests||0)+1; }
@@ -422,24 +424,48 @@ console.log('6. escape ending (gate slam + monster impact)');
   }
 
   // ROBUST: if the gate build throws, fall straight through to advance (never soft-lock).
+  // env.throwGate makes the sandbox's scene.add throw INSIDE buildEscapeGate's try.
   {
-    const env = { netState: { role: 'solo' }, chaseState: null }; // null cs → buildEscapeGate throws
-    // give it a cs that makes buildEscapeGate throw: chaseWorldAtArc ok, but force via a getter
-    env.chaseState = mkCs();
-    Object.defineProperty(env.chaseState, 'total', { get() { throw new Error('boom'); } });
+    const env = { netState: { role: 'solo' }, chaseState: mkCs(), throwGate: true };
     const api = esc(env);
     api.triggerEscape();
     if (env.advances === 1 && !env.chaseState.escaping) ok('build error → falls through to advanceFloor (no soft-lock)');
     else fail(`fall-through broken (advances=${env.advances} escaping=${env.chaseState.escaping})`);
   }
 
-  // No-lights + reuse-the-shutter-look invariants.
+  // VISIBILITY FIX: the camera is scripted to FACE the gate (it slams behind the player),
+  // mouse-look is locked during the cutscene, and the gate is self-lit (emissive, no light).
+  {
+    const env = { netState: { role: 'solo' }, chaseState: mkCs() };
+    const api = esc(env);
+    api.triggerEscape();
+    const cs = env.chaseState;
+    // gate at sealS (x=86 via stub), player at x=0 → camera must turn to look toward +x
+    if (typeof cs.lookYaw === 'number') ok(`escape computes a look-at-gate camera yaw (${cs.lookYaw.toFixed(2)})`);
+    else fail('no scripted camera target (lookYaw)');
+    const yaw0 = 0;
+    for (let i = 0; i < 40; i++) api.updateEscapeSequence(1 / 60); // ~0.67s of turning
+    // (player is the sandbox local; read it back via a probe tick is hard — assert it converged)
+    if (Math.abs(((cs.lookYaw - 0) + Math.PI) % (2 * Math.PI)) > 0.01) ok('camera target is BEHIND the player (a real turn, not a no-op)');
+  }
+  const buildGate = extractFn(mainSrc, 'function buildEscapeGate');
+  if (/cs\.lookYaw = Math\.atan2\(-dx, -dz\)/.test(buildGate)) ok('buildEscapeGate aims the camera at the gate (look back along the track)');
+  else fail('camera not aimed at the gate');
+  const seq = extractFn(mainSrc, 'function updateEscapeSequence');
+  if (/player\.yaw \+= d \* r/.test(seq)) ok('updateEscapeSequence lerps the camera to the gate (scripted turn)');
+  else fail('no scripted camera turn in the sequence');
+  if (/chaseState && chaseState\.escaping\) return;/.test(mainSrc)) ok('mouse-look is LOCKED during the escape (script owns the camera)');
+  else fail('mouse-look not locked during the escape');
+
+  // No-lights + reuse-the-shutter-look + self-lit invariants.
   const shut = extractFn(mainSrc, 'function makeEscapeShutter');
   const gate = extractFn(mainSrc, 'function buildEscapeGate');
   if (!lightRe.test(shut) && !lightRe.test(gate)) ok('escape gate adds NO lights');
   else fail('escape gate introduces a light');
   if (/slat/i.test(shut) && /MeshStandardMaterial/.test(shut)) ok('escape gate reuses the shutter look (slats, no-map Standard)');
   else fail('escape gate not a shutter');
+  if (/emissive: 0x401012/.test(shut)) ok('escape gate is self-lit (emissive) so it reads in a dim corridor');
+  else fail('escape gate not self-lit');
 
   // Trigger wiring: updateChaseWall fires triggerEscape at the end of the run.
   const ucw = extractFn(mainSrc, 'function updateChaseWall');

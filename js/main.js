@@ -2922,11 +2922,12 @@ const CHASE_LIGHT_MULT = 2.7;       // corridor light base brightness vs the the
 const CHASE_TURN_LIGHT_MULT = 1.55; // turn/exit beacons are brighter (telegraph the turn)
 // ESCAPE ENDING — the scripted "we made it" beat at the end of the run (see triggerEscape).
 const ESCAPE_TRIGGER_BACK = 9;      // arc-length before the exit at which the escape fires (player ~2 cells out)
-const ESCAPE_SEAL_BACK = 11;        // the seal shutter drops this far back → just BEHIND the player
+const ESCAPE_SEAL_BACK = 14;        // seal shutter drops this far back → ~5 units BEHIND the player (a clear view when they turn)
+const ESCAPE_TURN_DUR = 0.3;        // the player is spun to FACE the gate (scripted camera) before it drops
 const ESCAPE_SLAM_DUR = 0.5;        // gate drops over this long (fast)
 const ESCAPE_LUNGE_DUR = 0.42;      // the chaser wall lunges into the closed gate over this long
 const ESCAPE_WALL_OVERSHOOT = 0.6;  // wall presses this far past the seal (jams its limbs/eyes through the slats)
-const ESCAPE_TOTAL = 3.7;           // total cinematic length, then auto-advance (also a soft-lock backstop)
+const ESCAPE_TOTAL = 4.2;           // total cinematic: turn + slam + lunge/impact + ~2.5s beat, then auto-advance (soft-lock backstop)
 function initChaseState(theme) {
   chaseState = null;
   chaseRunStarted = false;
@@ -2956,7 +2957,7 @@ function initChaseState(theme) {
     // ESCAPE ENDING state (set by triggerEscape):
     escaping: false, escapeT: 0, escapeGate: null, escapeDone: false, escapeReqSent: false,
     sealS: 0, wallLungeFrom: 0, gateBaseX: 0, gateBaseZ: 0, slamPlayed: false, impactPlayed: false,
-    poundTimer: 0, escapeShudder: 0
+    poundTimer: 0, escapeShudder: 0, lookYaw: undefined, lookPitch: 0, monsterGlow: 0
   };
   buildChaseGate(gx);
 }
@@ -3280,8 +3281,9 @@ function triggerEscape() {
   if (!cs || cs.escaping) return; // idempotent
   cs.escaping = true;
   cs.escapeT = 0;
+  console.log(`[escape] START role=${netState.role} myS=${(cs.myS || 0).toFixed(0)}/${(cs.total || 0).toFixed(0)}`);
   try {
-    buildEscapeGate(); // sets sealS / gateBase / wallLungeFrom and spawns the (raised) shutter
+    buildEscapeGate(); // sets sealS / gateBase / wallLungeFrom / lookYaw and spawns the (raised) shutter
   } catch (e) {
     console.warn('[chase] escape build failed — falling through to advance', e);
     cs.escaping = false;
@@ -3300,8 +3302,10 @@ function triggerEscape() {
 function makeEscapeShutter(span) {
   const g = new THREE.Group();
   const H = WALL_H;
-  const steel = new THREE.MeshStandardMaterial({ color: 0x474d56, roughness: 0.5, metalness: 0.7 });
-  const frameMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.55, metalness: 0.6 });
+  // Self-lit (emissive red) so the slamming gate READS even in a dim corridor stretch
+  // facing away from the exit beacon — still no-map Standard (pinned), NO point light.
+  const steel = new THREE.MeshStandardMaterial({ color: 0x474d56, roughness: 0.5, metalness: 0.7, emissive: 0x401012, emissiveIntensity: 0.55 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.55, metalness: 0.6, emissive: 0x300a0c, emissiveIntensity: 0.4 });
   const slats = 9, gap = 0.07, slatH = H / slats;
   const slatGeo = new THREE.BoxGeometry(span + 0.4, slatH - gap, 0.4); // slats span local X (corridor width)
   for (let k = 0; k < slats; k++) { const s = new THREE.Mesh(slatGeo, steel); s.position.set(0, slatH * (k + 0.5), 0); g.add(s); }
@@ -3321,6 +3325,14 @@ function buildEscapeGate() {
   if (w.dx || w.dz) g.rotation.y = Math.atan2(w.dx, w.dz); // local +Z = track tangent → slats span the corridor, seals it
   scene.add(g);
   cs.escapeGate = g;
+  // CAMERA TARGET: the player spins to LOOK BACK at the gate (it's behind them — they
+  // were running forward toward the exit). Without this the whole cinematic plays off
+  // screen behind their head. Each machine turns its OWN local camera. Slightly down so
+  // the dropping gate + the low monster are both framed.
+  const dx = cs.gateBaseX - player.pos.x, dz = cs.gateBaseZ - player.pos.z;
+  cs.lookYaw = Math.atan2(-dx, -dz); // camera forward (-sin,-cos) → points at the gate
+  cs.lookPitch = -0.1;
+  console.log(`[escape] gate built sealS=${cs.sealS.toFixed(0)} at (${w.x.toFixed(1)},${w.z.toFixed(1)}) | player (${player.pos.x.toFixed(1)},${player.pos.z.toFixed(1)}) | lookYaw=${cs.lookYaw.toFixed(2)} (turning ${(Math.abs(((cs.lookYaw - player.yaw + Math.PI) % (2 * Math.PI)) - Math.PI) * 57).toFixed(0)}°) | wall=${cs.wallLungeFrom.toFixed(0)} blobs=${cs.wallGroup ? (cs.wallBlobs || []).length : 'NONE'}`);
 }
 
 // Per-frame while escaping (all machines). Drives the gate slam, the wall lunge+impact,
@@ -3331,27 +3343,40 @@ function updateEscapeSequence(dt) {
   cs.escapeT += dt;
   const t = cs.escapeT;
   try {
-    // ── gate SLAMS down (0..SLAM_DUR): y from ceiling → floor, ease-out ──
+    // ── CAMERA: spin the player to FACE the gate (the moment plays BEHIND them) ──
+    // Scripted + locked from mouse (see the mousemove handler). Shortest-arc yaw lerp.
+    if (cs.lookYaw !== undefined && typeof player !== 'undefined') {
+      const r = Math.min(1, dt * 10); // ~0.3s to converge
+      let d = cs.lookYaw - player.yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
+      player.yaw += d * r;
+      player.pitch += (cs.lookPitch - player.pitch) * r;
+    }
+
+    // Internal clock for the GATE drop: held up during the turn pre-roll, then drops.
+    const td = t - ESCAPE_TURN_DUR;
+
+    // ── gate SLAMS down (td 0..SLAM_DUR): y from ceiling → floor, ease-out ──
     if (cs.escapeGate) {
-      const drop = Math.min(1, t / ESCAPE_SLAM_DUR);
+      const drop = Math.max(0, Math.min(1, td / ESCAPE_SLAM_DUR));
       const e = 1 - (1 - drop) * (1 - drop);
-      let y = WALL_H * (1 - e);
+      const y = WALL_H * (1 - e);
       cs.escapeShudder = Math.max(0, cs.escapeShudder - dt * 0.6); // decay any pound kick
       const jx = cs.escapeShudder ? (Math.random() - 0.5) * cs.escapeShudder : 0;
       const jz = cs.escapeShudder ? (Math.random() - 0.5) * cs.escapeShudder : 0;
       cs.escapeGate.position.set(cs.gateBaseX + jx, y, cs.gateBaseZ + jz);
     }
-    if (!cs.slamPlayed && t >= ESCAPE_SLAM_DUR) { cs.slamPlayed = true; cs.escapeShudder = 0.1; if (typeof playSlam === 'function') playSlam(0); }
+    if (!cs.slamPlayed && td >= ESCAPE_SLAM_DUR) { cs.slamPlayed = true; cs.escapeShudder = 0.1; console.log('[escape] gate SLAMMED'); if (typeof playSlam === 'function') playSlam(0); }
 
     // ── the chaser wall LUNGES into the sealed gate (slam→impact), then HOLDS ──
     const lungeStart = ESCAPE_SLAM_DUR - 0.06;
-    if (t >= lungeStart) {
-      const k = Math.min(1, (t - lungeStart) / ESCAPE_LUNGE_DUR);
+    if (td >= lungeStart) {
+      const k = Math.min(1, (td - lungeStart) / ESCAPE_LUNGE_DUR);
       const target = cs.sealS + ESCAPE_WALL_OVERSHOOT;
       cs.wallS = cs.wallLungeFrom + (target - cs.wallLungeFrom) * (k * k); // ease-in lunge
       if (!cs.impactPlayed && k >= 1) {
         cs.impactPlayed = true;
-        cs.escapeShudder = 0.2;
+        cs.escapeShudder = 0.2; cs.monsterGlow = 1;
+        console.log('[escape] monster IMPACT on the gate');
         if (typeof playSlam === 'function') playSlam(0); // heavy body impact on the gate
         if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
       }
@@ -3362,19 +3387,26 @@ function updateEscapeSequence(dt) {
       cs.poundTimer -= dt;
       if (cs.poundTimer <= 0) {
         cs.poundTimer = 0.8 + Math.random() * 0.5;
-        cs.escapeShudder = 0.14;
+        cs.escapeShudder = 0.14; cs.monsterGlow = 1;
         if (typeof playSlam === 'function') playSlam(0);
         if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
       }
     }
 
-    // ── position + WRITHE the wall at its (lunging/held) arc spot — frenzied ──
+    // ── position + WRITHE the wall at its (lunging/held) arc spot — frenzied + lit ──
     if (cs.wallGroup) {
       const w = chaseWorldAtArc(cs.wallS);
       cs.wallGroup.position.set(w.x, 0, w.z);
       if (w.dx || w.dz) cs.wallGroup.rotation.y = Math.atan2(w.dx, w.dz);
       cs.wallAnimT = (cs.wallAnimT || 0) + dt * 1.7; // limbs scramble faster against the gate
-      if (typeof animateChaserMesh === 'function') for (const b of cs.wallBlobs) animateChaserMesh(b, cs.wallAnimT);
+      if (typeof animateChaserMesh === 'function') for (const b of (cs.wallBlobs || [])) animateChaserMesh(b, cs.wallAnimT);
+      // Its flesh is dark — self-light it red (base glow + a flash on each impact) so the
+      // body reads against the gate, not just the eyes. Cheap, only during the cinematic.
+      cs.monsterGlow = Math.max(0, cs.monsterGlow - dt * 1.6);
+      const gr = 0.22 + cs.monsterGlow * 0.78;
+      for (const b of (cs.wallBlobs || [])) b.traverse(o => {
+        if (o.material && o.material.emissive && o.material.type === 'MeshStandardMaterial') o.material.emissive.setRGB(gr, gr * 0.07, gr * 0.07);
+      });
     }
 
     if (t >= ESCAPE_TOTAL) finishEscape();
@@ -3392,6 +3424,7 @@ function finishEscape() {
   const cs = chaseState;
   if (!cs || cs.escapeDone) return;
   cs.escapeDone = true;
+  console.log(`[escape] FINISHED — ${netIsClient() ? 'client waits for host game_start' : 'advancing the floor'}`);
   if (!netIsClient()) advanceFloor();
 }
 
@@ -6292,6 +6325,7 @@ document.addEventListener('wheel', e => {
 
 document.addEventListener('mousemove', e => {
   if (gameState !== 'playing' || document.pointerLockElement !== document.body) return;
+  if (chaseState && chaseState.escaping) return; // ESCAPE cinematic owns the camera (scripted turn to the gate)
   player.yaw -= e.movementX * MOUSE_SENS;
   player.pitch -= e.movementY * MOUSE_SENS;
   player.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, player.pitch));

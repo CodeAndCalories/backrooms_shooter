@@ -30,6 +30,33 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 18 ESCAPE — VISIBILITY FIX (June 17, UNPLAYED) — the cutscene ran but played
+  OFF-SCREEN behind the frozen player (they were facing the exit; the gate/monster were
+  ~2 units BEHIND them). Diagnosis: the "froze then advanced" symptom = the sequence ran
+  to completion (NOT the error-fallthrough — that would advance instantly with no freeze).
+  Fix (no mechanic change):**
+  - **Scripted camera turn:** `buildEscapeGate` now computes a `lookYaw`/`lookPitch` aimed
+    BACK at the gate; `updateEscapeSequence` lerps the camera there (~0.3s), and mouse-look
+    is LOCKED during the cinematic (`mousemove` bails on `chaseState.escaping`) so the
+    player spins to WATCH the slam instead of staring at the exit.
+  - **Turn pre-roll + clearer staging:** new `ESCAPE_TURN_DUR` 0.3s holds the gate up while
+    the camera turns, THEN it drops (so the full slam is seen). `ESCAPE_SEAL_BACK` 11→14 so
+    the gate seals ~5 units behind (a clear viewing distance, not in your face). `ESCAPE_TOTAL`
+    3.7→4.2 to fit the pre-roll.
+  - **Self-lit gate + monster:** the escape shutter now has a red **emissive** (no light) so
+    it reads in the dim corridor stretch facing away from the exit beacon; the chaser blob's
+    dark flesh is given a red emissive base + a flash on each impact (`monsterGlow`) so the
+    BODY reads against the gate, not just the eyes.
+  - **Diagnostic logging:** `[escape]` console logs at START / gate-built (with player+gate
+    positions + the turn angle + blob count) / SLAMMED / IMPACT / FINISHED — so a future
+    "didn't play" report can be read off the console (ran vs fell-through, and where).
+  - Headless: `test_autorun` §6 extended (camera aimed at the gate, scripted turn lerp,
+    mouse-lock, self-lit gate; robustness test reworked to throw inside the try). Full suite
+    green (21 tools); node --check clean.
+  - **Needs a browser + co-op session:** does the player now visibly spin to watch the gate
+    slam + the monster hit it (solo first)? Is the ~5-unit framing + the red-lit gate/monster
+    readable? Co-op: everyone sees their own turn + the party still advances together. Tune
+    `ESCAPE_TURN_DUR` / `ESCAPE_SEAL_BACK` / the camera-lerp rate for feel.
 - **FLOOR 18 HOTEL CHASE — SCRIPTED ESCAPE ENDING (June 17, UNPLAYED) — an in-engine
   "we made it" cinematic when you reach the exit, instead of just advancing. PROTOCOL
   ADDITION: `'escape_seq'` (host→all). Light budget 32 intact (escape gate is no-map
