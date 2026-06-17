@@ -478,7 +478,7 @@ const LEVEL_THEMES = [
   },
   {
     id: 17,
-    archetype: 'chase', // CHASE level: winding hotel corridor, run from an unkillable pursuer to the far exit
+    archetype: 'chase', // ON-RAILS AUTO-RUN: force-run the corridor, steer to dodge, stay ahead of the wall
     name: "Hotel Chase",
     subtitle: "Run for your life. Don't stop. Don't look back. The hallways go on forever.",
     // Vintage hotel: deep maroon patterned wallpaper, dark-red carpet, neon-RED light.
@@ -496,19 +496,18 @@ const LEVEL_THEMES = [
     darknessLevel: 0.5,
     // OBJECTIVE: REACH the far exit (no kills, no items — surviving the run wins).
     gate: 'reach', goalText: 'RUN — REACH THE EXIT',
-    // THE LEVEL IS THE ENEMY: no stamina drain (sprint forever), 1 unkillable chaser.
+    // ON-RAILS AUTO-RUN: forced forward, steer-only; no stamina; caught = OUT for the
+    // level (non-revivable). The threat is the advancing wall, not mobs — no waves here.
+    autoRun: true,
     noStamina: true,
-    chaserCount: 1,
+    noRevive: true,
     // REAL MUSIC FILE (Suno Pro, commercial-licensed). Streamed through ambientGain,
     // looped. musicLayer:true → the track plays OVER the procedural alarm/elevator bed
     // (keeps the chase urgency). If the file is missing, the bed plays alone.
     musicFile: 'assets/audio/hotel_chase.mp3',
     musicLayer: true,
-    musicCredit: 'Hotel Chase · Suno',
-    // A FEW weak, SLOW shootable mobs scattered as living obstacles in the path —
-    // shoot to clear the way, but stopping to fight lets the chaser close in.
-    mobs: { types: ['crawler', 'spider'], weights: [3, 1], danger: ['crawler'],
-            speedMult: 0.55, hpMult: 0.6, countMult: 0.45, waveBase: 2, waveCap: 4 }
+    musicCredit: 'Hotel Chase · Suno'
+    // NO mobs/waves on this floor — survival only; the advancing wall is the threat.
   },
   {
     id: 18,
@@ -1448,7 +1447,7 @@ function generateLevel(theme, w, h) {
       generateLinear(w, h);
       break;
     case 'chase':
-      generateChase(w, h, theme);
+      generateCorridorChase(theme); // on-rails auto-run corridor (ignores w/h; sizes itself)
       break;
     case 'chambers':
       generateChambers(w, h, theme);
@@ -1791,107 +1790,96 @@ function generateLinear(w, h) {
   }
 }
 
-// 'chase' archetype — Hotel Chase (Run For Your Life). A long WINDING corridor
-// route from spawn to a distant exit: horizontal LANES (LANE_H cells tall) stacked
-// vertically, each linked to the next by a 3-wide vertical CONNECTOR punched at a
-// SEEDED column — so the player serpentines, hitting sharp 90°/180° turns, while
-// the lane ends past the connectors are real DEAD-ENDS that punish wrong turns.
+// 'chase' archetype — Hotel Chase, REBUILT as an on-rails AUTO-RUN (Temple-Run +
+// backrooms). NOT a maze: ONE readable serpentine of long narrow corridors with
+// sharp turns, narrowing toward the end, with dodgeable obstacles and overshoot
+// dead-ends. The player is force-run forward (theme.autoRun) and only steers; the
+// threat is an advancing WALL (not a pathfinder — see chaseState in PART movement).
 //
-// FLOOD-FILL SAFETY (the whole point of a chase): a guaranteed-clear SPINE
-// (entry-vertical + bottom-row run + connector links, per lane) is reserved up
-// front and NEVER furnished, so a valid spawn→exit path always exists by
-// construction. Furniture (grid value 3 — collidable, rendered as low props, not
-// tall walls) is then scattered only on NON-spine lane cells, forcing the player
-// to weave. A final flood-fill from spawn seals any stray island (→ value 3) so
-// every remaining deck cell (value 1) stays reachable. Grid contract: 0 = wall,
-// 1 = walkable deck, 3 = furniture/obstacle (blocks movement + BFS, like a wall,
-// but the renderer draws a knee-high prop instead of a full wall block).
-// Deterministic via the seeded rng(); co-op machines build the identical maze.
-function generateChase(w, h, theme) {
-  const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
-  // TIGHTER (claustrophobic speed-run): narrower lanes, MORE lanes (more forced
-  // U-turns), SHORTER lanes (turns come sooner), DENSER furniture. The spine +
-  // island-seal still guarantee a clear spawn→exit path (verified by test_chase).
-  const LANE_H = 2;                                  // interior rows per lane (was 3 → narrower)
-  const NL = Math.min(9, Math.max(7, 3 + Math.round((h || 12) / 3))); // 7..9 lanes (was 5..7)
-  const LANE_LEN = Math.min(19, Math.max(12, (w || 12) + 3));         // shorter lanes (was +5)
-  const gw = LANE_LEN + 2;                           // + the two side border walls
-  const gh = 1 + NL * (LANE_H + 1);                  // top border + NL bands (lane + wall row)
+// CONSTRUCTION (deterministic, seeded rng(); every co-op machine builds identical):
+//   • RUNS horizontal corridors ("lanes") stacked vertically, each CHASE_BAND_H rows
+//     tall, separated by a 1-row wall. Lane i runs left→right (even) or right→left
+//     (odd); a vertical CONNECTOR at the turn end drops the track into the next lane
+//     → a sharp ~90°+90° turn. The last CHASE_NARROW_RUNS lanes are 1 row (narrower).
+//   • TRACK: chasePath is the centerline cell list spawn→exit (the auto-run "rail" the
+//     wall + progress projection use). Always carved open by construction → a valid
+//     spawn→exit route ALWAYS exists (flood-fill-safe; the connector cells are carved
+//     explicitly so even 1-row lanes link).
+//   • OBSTACLES (value 3, collidable debris): placed on the track row OR the dodge
+//     row, never BOTH in a column and never in ADJACENT columns, so at least one row
+//     is always open AND there's always a clear column to switch rows between them →
+//     forces L/R dodges without ever sealing the path. Density rises with lane index.
+//   • OVERSHOOT DEAD-ENDS: each turn leaves a short stub continuing PAST the turn (the
+//     "kept going straight = wrong turn" trap). Off-track → no progress there → the
+//     wall reaches you. Grid contract: 0 wall, 1 floor, 3 obstacle (blocks like a wall).
+let chasePath = [];          // track centerline cells [{x,y}, ...] spawn→exit (set here)
+let chaseExitCell = null;    // {x,y} the far exit cell (buildMazeScene mounts the door here)
+const CHASE_RUNS = 15;       // serpentine lanes (length / clean-run time knob)
+const CHASE_RUN_LEN = 15;    // nominal interior cells per lane
+const CHASE_BAND_H = 2;      // rows per (wide) lane → the vertical dodge room
+const CHASE_NARROW_RUNS = 3; // the last N lanes shrink to 1 row (narrower toward the end)
+const CHASE_OBST_MAX = 0.5;  // peak per-eligible-column obstacle probability (last lane)
+const CHASE_GATE_COL = 4;    // the start gate sits across this column (players spawn behind it)
 
-  // 1. Solid everywhere; carve lane interiors open below.
+function generateCorridorChase(theme) {
+  const PITCH = CHASE_BAND_H + 1;          // band height + 1 wall row
+  const gw = CHASE_RUN_LEN + 5;            // interior + turn/overshoot margins + 2 borders
+  const gh = 1 + CHASE_RUNS * PITCH;       // top border + RUNS bands
+  const rTop = (i) => 1 + i * PITCH;       // top (track) row of lane i
+  const rBot = (i) => rTop(i) + CHASE_BAND_H - 1; // bottom (dodge) row
+  const isNarrow = (i) => i >= CHASE_RUNS - CHASE_NARROW_RUNS;
+
+  // 1. Solid, then carve each lane's open rows (narrow lanes = top row only).
   mazeGrid = [];
   for (let y = 0; y < gh; y++) { mazeGrid[y] = []; for (let x = 0; x < gw; x++) mazeGrid[y][x] = 0; }
+  for (let i = 0; i < CHASE_RUNS; i++) {
+    const bot = isNarrow(i) ? rTop(i) : rBot(i);
+    for (let y = rTop(i); y <= bot; y++) for (let x = 1; x <= gw - 2; x++) mazeGrid[y][x] = 1;
+  }
 
-  // Per-lane interior row range. rTop(i)..rBot(i); the wall row BELOW lane i is
-  // wallRow(i) = rBot(i)+1 (= top border of the band below, or the bottom border).
-  const rTop = (i) => 1 + i * (LANE_H + 1);
-  const rBot = (i) => rTop(i) + LANE_H - 1;
-  for (let i = 0; i < NL; i++)
-    for (let y = rTop(i); y <= rBot(i); y++)
-      for (let x = 1; x <= gw - 2; x++) mazeGrid[y][x] = 1;
-
-  // 2. Connector columns: where each lane drops into the next. Seeded, kept off
-  // the very ends so the 3-wide opening fits and there's lane to run past it.
-  const conn = [];
-  for (let i = 0; i < NL - 1; i++) conn.push(ri(2, gw - 3));
-
-  // Entry/exit column of each lane along the spine. Lane 0 enters at the spawn
-  // corner (x=1); the last lane exits at the FAR end (opposite its entry) so the
-  // final stretch is long and the exit lands deep down the corridor.
-  const entryCol = (i) => (i === 0 ? 1 : conn[i - 1]);
-  const lastEntry = entryCol(NL - 1);
-  const exitCol = (i) => (i === NL - 1 ? (lastEntry < gw / 2 ? gw - 2 : 1) : conn[i]);
-
-  // 3. SPINE — reserve the guaranteed-clear through-path (anti-furniture set).
-  const spine = new Set();
-  const keep = (x, y) => { if (mazeGrid[y] && mazeGrid[y][x] === 1) spine.add(y * gw + x); };
-  for (let i = 0; i < NL; i++) {
-    const ec = entryCol(i), xc = exitCol(i), top = rTop(i), bot = rBot(i);
-    for (let y = top; y <= bot; y++) keep(ec, y);                 // entry vertical (down from the connector above)
-    const lo = Math.min(ec, xc), hi = Math.max(ec, xc);
-    for (let x = lo; x <= hi; x++) keep(x, bot);                  // run along the bottom row to the exit column
-    if (i < NL - 1) {                                             // open + reserve the connector to the next lane
-      const c = conn[i], wy = bot + 1;
-      for (let dx = -1; dx <= 1; dx++) { const nx = c + dx; if (nx >= 1 && nx <= gw - 2) mazeGrid[wy][nx] = 1; }
-      keep(c, wy);            // wall-row link cell
-      keep(c, rTop(i + 1));   // ...landing in the next lane's top row (its entry vertical continues down)
+  // 2. Track + connectors + overshoot dead-ends. turnCol alternates ends; lane 0
+  // starts at the spawn corner (x=1). The track runs along rTop(i).
+  chasePath = [];
+  const push = (x, y) => chasePath.push({ x, y });
+  let enterCol = 1;
+  for (let i = 0; i < CHASE_RUNS; i++) {
+    const tr = rTop(i);
+    const turnCol = (i % 2 === 0) ? gw - 4 : 3;   // leave a 2-cell overshoot margin past the turn
+    const dir = turnCol >= enterCol ? 1 : -1;
+    for (let x = enterCol; ; x += dir) { push(x, tr); if (x === turnCol) break; }
+    // OVERSHOOT dead-end: keep carving 2 cells PAST the turn (to the border) — open
+    // but OFF the track, so missing the turn runs you into a lethal dead-end.
+    for (let k = 1; k <= 2; k++) { const ox = turnCol + dir * k; if (ox >= 1 && ox <= gw - 2) mazeGrid[tr][ox] = 1; }
+    if (i < CHASE_RUNS - 1) {
+      const ntr = rTop(i + 1);
+      // vertical connector at turnCol (always carved → links even 1-row lanes)…
+      for (let y = tr + 1; y <= ntr; y++) { mazeGrid[y][turnCol] = 1; push(turnCol, y); }
+      // …2 cells wide for turn room (carve the inward-adjacent column down the gap).
+      const adj = turnCol - dir;
+      for (let y = tr; y <= ntr; y++) if (adj >= 1 && adj <= gw - 2) mazeGrid[y][adj] = 1;
+      enterCol = turnCol;
+    } else {
+      chaseExitCell = { x: turnCol, y: tr };
     }
   }
 
-  // 4. Furniture: scatter obstacles on NON-spine lane cells (never the spine, never
-  // walls/connectors). DENSER now (0.55) → the path stays a tight ~1-wide thread
-  // through walls of debris; the spine guarantees it's never fully blocked.
-  const P_FURNITURE = 0.55;
-  for (let i = 0; i < NL; i++) {
-    for (let y = rTop(i); y <= rBot(i); y++) {
-      for (let x = 1; x <= gw - 2; x++) {
-        if (mazeGrid[y][x] !== 1) continue;
-        if (spine.has(y * gw + x)) continue;
-        if (rng() < P_FURNITURE) mazeGrid[y][x] = 3;
+  // 3. Obstacles: dodgeable debris, rising density, never sealing the path (one row
+  // per column, ≥1 clear column between any two → always a clear column to switch).
+  for (let i = 0; i < CHASE_RUNS; i++) {
+    if (isNarrow(i)) continue;                       // 1-row lanes: no room for a dodgeable obstacle
+    const density = CHASE_OBST_MAX * (i / (CHASE_RUNS - 1)); // gentle start → dense end
+    const tr = rTop(i), br = rBot(i);
+    let lastObs = -2;
+    for (let x = CHASE_GATE_COL + 2; x <= gw - 3; x++) {
+      if (x - lastObs < 2) continue;                 // never adjacent columns → connectivity preserved
+      // keep ±2 around the lane's turn ends clear (readable entries/exits)
+      if (x <= 3 + 1 || x >= gw - 4 - 1) continue;
+      if (rng() < density) {
+        const row = rng() < 0.5 ? tr : br;           // block the track row OR the dodge row
+        mazeGrid[row][x] = 3;
+        lastObs = x;
       }
     }
-  }
-
-  // 5. Seal islands: flood from spawn over deck (1); any unreached deck cell is
-  // converted to furniture (3) so EVERY remaining deck cell is reachable — the
-  // invariant the connectivity test asserts. The spine guarantees the flood
-  // reaches the exit region; this only cleans up pockets furniture boxed off.
-  const seen = [];
-  for (let y = 0; y < gh; y++) seen.push(new Array(gw).fill(false));
-  if (mazeGrid[1][1] === 1) {
-    seen[1][1] = true;
-    const q = [[1, 1]];
-    for (let qi = 0; qi < q.length; qi++) {
-      const [x, y] = q[qi];
-      for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
-        const nx = x + dx, ny = y + dy;
-        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
-        if (mazeGrid[ny][nx] === 1 && !seen[ny][nx]) { seen[ny][nx] = true; q.push([nx, ny]); }
-      }
-    }
-  }
-  for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
-    if (mazeGrid[y][x] === 1 && !seen[y][x]) mazeGrid[y][x] = 3;
   }
 }
 
@@ -3167,7 +3155,11 @@ function buildMazeScene() {
   // placement far from spawn — see pickExitCell. Keep this BEFORE
   // spawnAmmoPickups: both consume the seeded rng() and the draw order must
   // be identical on every machine.
-  if (!theme.isBoss) {
+  if (theme.autoRun) {
+    // AUTO-RUN chase: the exit is the KNOWN far end of the track (no rng draw — the
+    // generator already placed it deterministically; co-op machines agree).
+    buildExitDoor(chaseExitCell.x, chaseExitCell.y, CELL * 1.2);
+  } else if (!theme.isBoss) {
     const { ex, ey } = pickExitCell(theme);
     buildExitDoor(ex, ey, CELL * 1.2); // glowing doorway set into the nearest wall
   } else {
@@ -3175,24 +3167,16 @@ function buildMazeScene() {
     exitMesh = null;
   }
 
-  // Ammo pickups — seeded rng(), so keep this call AFTER generation and at a
-  // fixed point in the build order (determinism per floor seed).
+  // Ammo / objective / consumable pickups — SKIPPED on auto-run floors (no guns,
+  // survival only). Elsewhere: seeded rng() at a fixed point in the build order.
   ammoPickupNextId = 0; // ids restart per floor, identically on every machine
-  spawnAmmoPickups();
-
-  // MP kill-gate: party kills needed to open the exit ≈ the mobs of the first
-  // two waves at this floor, via the per-theme spawn table (waveSizeFor is
-  // deterministic). Computed on every machine (same floor → same target);
-  // only enforced in co-op.
   floorKills = 0;
   killTarget = waveSizeFor(currentFloor, 1) + waveSizeFor(currentFloor, 2);
-
-  // Lore objective: on item-gate floors, seed N artifacts far from spawn (0
-  // world-rng draws — own prng). Resets the counters every floor either way.
-  spawnArtifacts(theme);
-
-  // Consumable pickups (almond water / bandages) — seeded, 0 world-rng draws.
-  spawnConsumables(theme);
+  if (!theme.autoRun) {
+    spawnAmmoPickups();
+    spawnArtifacts(theme);   // lore objective (item-gate floors); 0 world-rng draws
+    spawnConsumables(theme); // almond water / bandages; 0 world-rng draws
+  }
 
   // Place player. CO-OP: fan players out by slot so they don't spawn stacked
   // inside each other (solo = slot 0 = the canonical (1,1) cell, unaffected).
@@ -4596,11 +4580,10 @@ function advanceFloor() {
 
   if (theme.isBoss) {
     setTimeout(() => { if (gameState === 'playing') spawnBoss(); }, 1500);
-  } else {
+  } else if (!theme.autoRun) {
+    // AUTO-RUN chase has NO mobs/waves — the advancing wall (chaseState) is the
+    // only threat, and it's armed when the start gate opens (not here).
     spawnWave();
-    // CHASE floors: release the unkillable pursuer(s) shortly after the floor
-    // builds (each has its own spawn-grace head start — see spawnChaser).
-    if (theme.archetype === 'chase') setTimeout(() => { if (gameState === 'playing') spawnFloorChasers(); }, 1500);
   }
 
   updateHUD();
@@ -5412,9 +5395,8 @@ function startGame() {
   if (theme.isBoss) {
     setTimeout(() => { if (gameState === 'playing') spawnBoss(); }, 2000);
   } else {
-    setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
-    // CHASE floors: release the unkillable pursuer(s) (own spawn-grace head start).
-    if (theme.archetype === 'chase') setTimeout(() => { if (gameState === 'playing') spawnFloorChasers(); }, 1500);
+    if (!theme.autoRun) setTimeout(() => { if (gameState === 'playing') spawnWave(); }, 2000);
+    // AUTO-RUN chase: no waves/pursuer — the advancing wall (armed at gate-open) is it.
   }
 }
 

@@ -54,19 +54,25 @@ const pieces = [
   'function generateOpen',
   'function generateField',
   'function generateLinear',
-  'function generateChase',
+  'function generateCorridorChase',
   'function generateBossArena',
   'function generateLevel',
   'function pickExitCell',
 ].map(extract);
 
+// Drift-proof: inject the REAL chase globals + CHASE_* consts block (the slice from
+// `let chasePath` up to the generator) so generateCorridorChase resolves them.
+const chaseGlobals = src.slice(src.indexOf('let chasePath = []'), src.indexOf('function generateCorridorChase'));
+
 const api = new Function(`
   let mazeGrid = [];
   let poolRects = [];
   let rng = Math.random;
+  ${chaseGlobals}
   ${pieces.join('\n')}
   return { LEVEL_THEMES, mulberry32, generateLevel, generateBossArena, pickExitCell,
-           setRng: (f) => { rng = f; }, grid: () => mazeGrid, pools: () => poolRects };
+           setRng: (f) => { rng = f; }, grid: () => mazeGrid, pools: () => poolRects,
+           chaseExitCell: () => chaseExitCell, chasePath: () => chasePath };
 `)();
 
 const THEMES = api.LEVEL_THEMES;
@@ -84,7 +90,12 @@ function genFloor(floor, seedOverride) {
   }
   const size = Math.min(theme.mazeSize + Math.floor(floor / THEMES.length), 20);
   api.generateLevel(theme, size, size);
-  return { theme, grid: api.grid(), exit: api.pickExitCell(theme) };
+  // AUTO-RUN chase uses the deterministic track-end exit (chaseExitCell), not the
+  // seeded far-cell pick. Everyone else uses the real pickExitCell.
+  let exit;
+  if (theme.autoRun) { const ec = api.chaseExitCell(); exit = ec ? { ex: ec.x, ey: ec.y } : null; }
+  else exit = api.pickExitCell(theme);
+  return { theme, grid: api.grid(), exit };
 }
 
 // BFS over deck cells (value 1) from spawn — returns the distance grid
@@ -205,12 +216,15 @@ for (const theme of THEMES) {
     }
   }
   // Exit VARIETY: a single repeated cell across 300 seeds means the
-  // randomization is dead (the old fixed-corner bug this pass removes).
-  if (exitCells.size < 2) {
+  // randomization is dead (the old fixed-corner bug this pass removes). EXEMPT the
+  // auto-run chase: its layout is a FIXED on-rails track, so the exit is
+  // deterministically the same track-end cell every seed (by design).
+  if (!theme.autoRun && exitCells.size < 2) {
     varietyFails++;
     console.error(`FAIL theme ${theme.id} (${theme.name}): exit landed on ${exitCells.size} distinct cell(s) across ${SEEDS_PER_THEME} seeds`);
   }
-  console.log(`theme ${String(theme.id).padStart(2)} ${theme.name.padEnd(24)} exits: ${exitCells.size} distinct cells / ${SEEDS_PER_THEME} seeds`);
+  const varNote = theme.autoRun ? ' (fixed on-rails track — exit deterministic)' : '';
+  console.log(`theme ${String(theme.id).padStart(2)} ${theme.name.padEnd(24)} exits: ${exitCells.size} distinct cells / ${SEEDS_PER_THEME} seeds${varNote}`);
 }
 console.log(`Arbitrary seeds: ${seedRuns - seedFails}/${seedRuns} pass`);
 

@@ -1071,7 +1071,7 @@ function spawnDangerMob() {
 
 function updateAntiLinger(dt) {
   const theme = getTheme(currentFloor);
-  if (theme.isBoss) return; // Boss levels don't use linger
+  if (theme.isBoss || theme.autoRun) return; // boss + auto-run chase don't use linger (no mobs)
 
   floorTimer += dt;
 
