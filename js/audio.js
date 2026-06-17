@@ -1349,6 +1349,32 @@ function updateChaseAudio(distToExit) {
   hotelChaseAudio.elevGain.gain.setTargetAtTime(target, audioCtx.currentTime, 0.3);
 }
 
+// AUTO-RUN chase START GATE opening — a metallic shutter clack + a rising two-tone
+// alarm sweep + a sub whoomph. Fires once when the gate opens (the run begins).
+function playChaseGateOpen() {
+  playSound(() => {
+    const t = audioCtx.currentTime;
+    for (let i = 0; i < 2; i++) {
+      const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(180 + i * 40, t);
+      o.frequency.exponentialRampToValueAtTime(520 + i * 60, t + 0.5);
+      const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 600; bp.Q.value = 2;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.18, t + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+      o.connect(bp); bp.connect(g); g.connect(sfxGain); o.start(t); o.stop(t + 0.75);
+    }
+    const s = audioCtx.createOscillator(); s.type = 'sine';
+    s.frequency.setValueAtTime(80, t); s.frequency.exponentialRampToValueAtTime(38, t + 0.6);
+    const sg = audioCtx.createGain();
+    sg.gain.setValueAtTime(0.0001, t);
+    sg.gain.exponentialRampToValueAtTime(0.25, t + 0.04);
+    sg.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+    s.connect(sg); sg.connect(sfxGain); s.start(t); s.stop(t + 0.85);
+  });
+}
+
 /* ═══════════════════════════════════════════
    REAL MUSIC FILES (assets/audio/*.ogg|.mp3)
    DELIBERATE exception to the procedural-only rule (like the boss GLB/PNG assets —
@@ -1451,6 +1477,10 @@ function updateFloorMusic() {
   if (typeof hideMusicCredit === 'function') hideMusicCredit(); // clear any prior floor's credit
 
   const theme = getTheme(currentFloor);
+  // AUTO-RUN chase: stay SILENT through the start-gate phase. The alarm/elevator bed +
+  // music kick in only when the gate opens — main.js openChaseRun sets chaseRunStarted
+  // then re-calls updateFloorMusic (which now falls through to start them).
+  if (theme.autoRun && !(typeof chaseRunStarted !== 'undefined' && chaseRunStarted)) return;
   const startProcedural = proceduralMusicStarterFor();
   // Credit line (main.js UI) fires only when the file ACTUALLY starts — a missing
   // file falls back to procedural and shows no (wrong) credit.

@@ -6,6 +6,10 @@
    ═══════════════════════════════════════════ */
 const CELL = 4, WALL_H = 3.4;
 const GRAVITY = 22, JUMP_V = 8, MOVE_SPEED = 5.5, SPRINT_MULT = 1.65;
+// ON-RAILS AUTO-RUN (Hotel Chase, theme.autoRun). Forced-forward pace ≈ 1.7× sprint;
+// you only steer (mouse-look turns the run; A/D add a lateral dodge). See updatePlayer.
+const AUTORUN_SPEED = MOVE_SPEED * SPRINT_MULT * 1.7; // ≈ 15.4 u/s (the key pace knob)
+const AUTORUN_STRAFE_FRAC = 0.55;                      // A/D lateral dodge as a fraction of run speed
 const MOUSE_SENS = 0.0018;
 const MAX_HEALTH = 100, MAX_STAMINA = 100, STAMINA_DRAIN = 22, STAMINA_REGEN = 14;
 
@@ -2174,6 +2178,10 @@ function buildFlareViewmodel(g, M) {
 
 function updateGun(dt, isMoving, isSprinting) {
   if (!gunGroup) return;
+  // AUTO-RUN chase: guns are disabled (survival only) → hide the viewmodel entirely.
+  const hide = !!getTheme(currentFloor).autoRun;
+  if (gunGroup.visible === hide) gunGroup.visible = !hide;
+  if (hide) return;
 
   // Recoil recovery (gun-only, NOT camera)
   gunRecoil *= 0.82;
@@ -2881,6 +2889,117 @@ function playerSpawnCellFor(slot) {
 }
 
 /* ═══════════════════════════════════════════
+   CHASE — auto-run state, start gate, advancing wall
+   ═══════════════════════════════════════════
+   chaseState holds everything the on-rails chase needs at runtime, derived from the
+   generator's chasePath (the rail): the track as world points + cumulative arc length
+   (for projecting player progress + placing the wall), the start-gate hold/barriers,
+   and the advancing wall. Host-authoritative for shared values (gate progress + the
+   wall's track position), broadcast in the enemy snapshot; each machine projects its
+   OWN player locally and reacts. Off the chase floor chaseState is null (all no-ops).
+   No new lights; the gate + wall reuse the pinned no-map Standard material family.
+   (These runtime consts live HERE, not by the generator globals, so the generator's
+   sandbox tests don't drag in the AUTORUN_SPEED dependency.) */
+let chaseState = null;       // per-floor auto-run/gate/wall runtime (initChaseState); null off-chase
+let chaseRunStarted = false; // mirror flag audio.js reads (defer the alarm until the gate opens)
+const CHASE_GATE_HOLD = 2.0;        // seconds of (any-player) HOLD-E to open the start gate
+const CHASE_WALL_GRACE_DIST = 16;   // wall starts this far BEHIND the gate (head start), world units
+const CHASE_WALL_SPEED = AUTORUN_SPEED * 0.92; // the wall's fixed track pace (just below auto-run)
+function initChaseState(theme) {
+  chaseState = null;
+  chaseRunStarted = false;
+  if (!theme.autoRun || !chasePath || !chasePath.length) return;
+  // Track polyline in world space + cumulative arc length.
+  const worldPts = chasePath.map(p => ({ x: p.x * CELL + CELL / 2, z: p.y * CELL + CELL / 2 }));
+  const cum = [0];
+  for (let i = 1; i < worldPts.length; i++) {
+    const dx = worldPts[i].x - worldPts[i - 1].x, dz = worldPts[i].z - worldPts[i - 1].z;
+    cum[i] = cum[i - 1] + Math.hypot(dx, dz);
+  }
+  // Start-gate barriers across the spawn corridor (band-0 rows). The grid cells stay
+  // carved-open underneath (connectivity intact) — these AABBs only block while closed.
+  const gateBarriers = [];
+  const gx = CHASE_GATE_COL;
+  for (let ry = 1; ry <= CHASE_BAND_H; ry++) {
+    if (mazeGrid[ry] && mazeGrid[ry][gx] === 1)
+      gateBarriers.push({ minX: gx * CELL, maxX: gx * CELL + CELL, minZ: ry * CELL, maxZ: ry * CELL + CELL });
+  }
+  chaseState = {
+    worldPts, cum, total: cum[cum.length - 1],
+    gateOpen: false, gateProg: 0, runStarted: false,
+    wallS: -CHASE_WALL_GRACE_DIST,  // behind the gate → head start once it opens
+    wallTargetS: -CHASE_WALL_GRACE_DIST, // client lerp target (host broadcasts wallS)
+    myIdx: 0, myS: 0, caught: false,
+    gateBarriers, gateMesh: null, wallGroup: null
+  };
+  buildChaseGate(gx);
+}
+
+// Visual start gate — a red shutter across the corridor (pinned no-map Standard, no light).
+function buildChaseGate(gx) {
+  if (!chaseState) return;
+  const grp = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x3a0a0e, emissive: 0xff2630, emissiveIntensity: 0.55, roughness: 0.6, metalness: 0.3 });
+  const cx = gx * CELL + CELL / 2;
+  const z0 = 1 * CELL, z1 = (CHASE_BAND_H + 1) * CELL, cz = (z0 + z1) / 2, depth = (z1 - z0) * 0.98;
+  const slatH = WALL_H / 6;
+  const slatGeo = new THREE.BoxGeometry(0.45, slatH * 0.9, depth);
+  for (let k = 0; k < 6; k++) {
+    const bar = new THREE.Mesh(slatGeo, mat);
+    bar.position.set(cx, slatH * (k + 0.5), cz);
+    grp.add(bar);
+  }
+  scene.add(grp);
+  chaseState.gateMesh = grp;
+}
+
+function disposeChaseGroup(grp) {
+  if (!grp) return;
+  scene.remove(grp);
+  const mats = new Set();
+  grp.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) mats.add(o.material); });
+  mats.forEach(m => m.dispose());
+}
+
+// HOLD-E start gate. Host-authoritative: progress accumulates while ANY player holds
+// (a single player can open it), decays otherwise; opens at CHASE_GATE_HOLD. Clients
+// send their hold signal + read gateProg/open from the snapshot. Solo accumulates
+// locally. Runs on every machine; no-op off the chase floor or once open.
+function updateChaseGate(dt) {
+  if (!chaseState || chaseState.gateOpen) return;
+  const holding = !!keys['KeyE'] && gameState === 'playing' && !player.isDown;
+  if (netIsClient()) {
+    if (holding && typeof netSendChaseHold === 'function') netSendChaseHold();
+    return; // gateProg + the open event arrive via the host snapshot
+  }
+  const any = holding || ((typeof netAnyChaseHold === 'function') && netAnyChaseHold());
+  const rate = any ? (dt / CHASE_GATE_HOLD) : -(dt / (CHASE_GATE_HOLD * 0.6));
+  chaseState.gateProg = Math.max(0, Math.min(1, chaseState.gateProg + rate));
+  if (chaseState.gateProg >= 1) openChaseRun();
+}
+
+// The gate opens → the run begins on THIS machine: drop the barrier, spawn the wall,
+// kick in the alarm/music. Idempotent; called on host/solo (gateProg hit 1) and on
+// clients (snapshot go flipped). The whole party starts together.
+function openChaseRun() {
+  if (!chaseState || chaseState.gateOpen) return;
+  chaseState.gateOpen = true;
+  chaseState.runStarted = true;
+  chaseState.gateProg = 1;
+  chaseRunStarted = true;
+  if (chaseState.gateMesh) { disposeChaseGroup(chaseState.gateMesh); chaseState.gateMesh = null; }
+  spawnChaseWall();                                   // §3: the advancing wall of death
+  if (typeof updateFloorMusic === 'function') updateFloorMusic(); // alarm/music kick in now
+  if (typeof playChaseGateOpen === 'function') playChaseGateOpen();
+  player.noDamageTimer = 0;
+}
+
+// §3 fills these in (build + advance the wall, project player progress, caught).
+// Stubs keep §2 self-contained and the animate() wiring stable.
+function spawnChaseWall() {}
+function updateChaseWall(dt) {}
+
+/* ═══════════════════════════════════════════
    BUILD SCENE
    ═══════════════════════════════════════════ */
 function buildMazeScene() {
@@ -3151,6 +3270,11 @@ function buildMazeScene() {
   exitLight.position.set(0, -100, 0);
   scene.add(exitLight);
 
+  // Reset chase runtime every floor (the old wall/gate meshes were disposed by the
+  // teardown above); initChaseState repopulates it only on auto-run floors.
+  chaseState = null;
+  chaseRunStarted = false;
+
   // Exit zone (not on boss levels — boss must be killed first). Seeded random
   // placement far from spawn — see pickExitCell. Keep this BEFORE
   // spawnAmmoPickups: both consume the seeded rng() and the draw order must
@@ -3159,6 +3283,7 @@ function buildMazeScene() {
     // AUTO-RUN chase: the exit is the KNOWN far end of the track (no rng draw — the
     // generator already placed it deterministically; co-op machines agree).
     buildExitDoor(chaseExitCell.x, chaseExitCell.y, CELL * 1.2);
+    initChaseState(theme); // track polyline + start gate + (armed-on-open) wall
   } else if (!theme.isBoss) {
     const { ex, ey } = pickExitCell(theme);
     buildExitDoor(ex, ey, CELL * 1.2); // glowing doorway set into the nearest wall
@@ -4256,6 +4381,7 @@ function ammoWarnAndHud() {
 }
 
 function playerShoot() {
+  if (getTheme(currentFloor).autoRun) return; // guns disabled on the auto-run chase (survival only)
   if (player.isDown) return; // MP: downed players can't shoot
   if (player.isReloading || player.fireTimer > 0 || player.clipAmmo <= 0) return;
   const w = curWeapon();
@@ -4433,33 +4559,53 @@ const _tmpRight = new THREE.Vector3();
 const _tmpMoveDir = new THREE.Vector3();
 
 function updatePlayer(dt) {
+  const theme = getTheme(currentFloor);
   const forward = _tmpForward.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
   const right = _tmpRight.set(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
   const moveDir = _tmpMoveDir.set(0, 0, 0);
 
-  if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(forward);
-  if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
-  if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(right);
-  if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(right);
-  if (player.isDown) moveDir.set(0, 0, 0); // MP: downed = rooted (look only)
-
-  const isMoving = moveDir.length() > 0.01;
-  if (isMoving) moveDir.normalize();
-
-  // CHASE floors (Hotel Chase) override stamina: you can sprint the WHOLE way.
-  // Stamina is pinned full and never gates/drains — "run for your life" would be
-  // ruined by stamina management (see theme.noStamina).
-  const noStamina = !!getTheme(currentFloor).noStamina;
-  player.isSprinting = keys['ShiftLeft'] && isMoving && (noStamina || player.stamina > 0) && player.onGround;
   // Pools: wading below the water line slows you (per-theme theme.water.slow).
   const inWater = !!poolWater && floorHeightAt(player.pos.x, player.pos.z) < 0 &&
                   (player.pos.y - 1.6) < -poolWater.surfaceDrop + 0.05;
-  const speed = MOVE_SPEED * (player.isSprinting ? SPRINT_MULT : 1) * (player.isADS ? 0.6 : 1) *
-                (inWater ? poolWater.slow : 1);
 
-  if (noStamina) player.stamina = MAX_STAMINA;       // pinned full — no drain, no gate
-  else if (player.isSprinting) player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN * dt);
-  else player.stamina = Math.min(shopStats.maxHealth, player.stamina + STAMINA_REGEN * shopStats.staminaRegenMult * dt);
+  let isMoving, speed;
+  if (theme.autoRun) {
+    // ON-RAILS AUTO-RUN (Hotel Chase). MOUSE-LOOK STEERS THE RUN: velocity is along
+    // the camera's horizontal forward (-sin,-cos), so wherever you look you run —
+    // looking left curves the run left. Pitch is ignored (constant ground pace, look
+    // up/down freely). A/D add a lateral DODGE nudge; W/S do nothing. Rooted until the
+    // start gate opens (chaseState.runStarted) and while downed. Constant velocity →
+    // no head-bob/shake (accessibility + motion-sickness). moveDir is NOT normalized:
+    // forward stays full-pace and the strafe just adds a sideways component.
+    const running = !!(chaseState && chaseState.runStarted) && !player.isDown;
+    if (running) {
+      moveDir.copy(forward);
+      const strafe = ((keys['KeyD'] || keys['ArrowRight']) ? 1 : 0) - ((keys['KeyA'] || keys['ArrowLeft']) ? 1 : 0);
+      if (strafe) moveDir.addScaledVector(right, strafe * AUTORUN_STRAFE_FRAC);
+    }
+    isMoving = running;
+    speed = AUTORUN_SPEED;
+    player.isSprinting = false;
+    player.stamina = MAX_STAMINA; // no stamina management on the run
+  } else {
+    if (keys['KeyW'] || keys['ArrowUp']) moveDir.add(forward);
+    if (keys['KeyS'] || keys['ArrowDown']) moveDir.sub(forward);
+    if (keys['KeyA'] || keys['ArrowLeft']) moveDir.sub(right);
+    if (keys['KeyD'] || keys['ArrowRight']) moveDir.add(right);
+    if (player.isDown) moveDir.set(0, 0, 0); // MP: downed = rooted (look only)
+
+    isMoving = moveDir.length() > 0.01;
+    if (isMoving) moveDir.normalize();
+
+    const noStamina = !!theme.noStamina;
+    player.isSprinting = keys['ShiftLeft'] && isMoving && (noStamina || player.stamina > 0) && player.onGround;
+    speed = MOVE_SPEED * (player.isSprinting ? SPRINT_MULT : 1) * (player.isADS ? 0.6 : 1) *
+            (inWater ? poolWater.slow : 1);
+
+    if (noStamina) player.stamina = MAX_STAMINA;       // pinned full — no drain, no gate
+    else if (player.isSprinting) player.stamina = Math.max(0, player.stamina - STAMINA_DRAIN * dt);
+    else player.stamina = Math.min(shopStats.maxHealth, player.stamina + STAMINA_REGEN * shopStats.staminaRegenMult * dt);
+  }
 
   const newX = player.pos.x + moveDir.x * speed * dt;
   const newZ = player.pos.z + moveDir.z * speed * dt;
@@ -4468,6 +4614,14 @@ function updatePlayer(dt) {
   for (const w of mazeWalls) {
     if (newX + pRad > w.minX && newX - pRad < w.maxX && player.pos.z + pRad > w.minZ && player.pos.z - pRad < w.maxZ) canX = false;
     if (player.pos.x + pRad > w.minX && player.pos.x - pRad < w.maxX && newZ + pRad > w.minZ && newZ - pRad < w.maxZ) canZ = false;
+  }
+  // Chase START GATE: solid barriers across the corridor until the gate opens (the
+  // grid cells stay carved-open underneath so connectivity/flood-fill is unaffected).
+  if (chaseState && !chaseState.gateOpen) {
+    for (const w of chaseState.gateBarriers) {
+      if (newX + pRad > w.minX && newX - pRad < w.maxX && player.pos.z + pRad > w.minZ && player.pos.z - pRad < w.maxZ) canX = false;
+      if (player.pos.x + pRad > w.minX && player.pos.x - pRad < w.maxX && newZ + pRad > w.minZ && newZ - pRad < w.maxZ) canZ = false;
+    }
   }
   // Pools: the basin lip is a height step, not an AABB. You can always walk IN
   // (drop), but climbing OUT needs your feet above (deck - 0.55m) — i.e. a
@@ -4949,7 +5103,23 @@ function updateHUD() {
   //  • 'kills' : ELIMINATIONS n/m (solo AND co-op now — the kill gate applies to both).
   //  • boss / no gate: hidden (the boss HP bar carries the boss goal).
   const gate = theme.gate || 'kills';
-  if (!theme.isBoss && gate === 'reach') {
+  if (!theme.isBoss && gate === 'reach' && theme.autoRun && chaseState) {
+    // AUTO-RUN chase: before the gate opens → HOLD-E prompt + fill; during the run →
+    // "RUN!" urgency + distance-to-exit (the fill tracks progress along the rail).
+    hudSetStyle('goalHud', 'display', 'block');
+    if (!chaseState.gateOpen) {
+      const pct = Math.floor(chaseState.gateProg * 100);
+      hudSetText('goalHudText', `HOLD [E] TO OPEN THE GATE — ${pct}%`);
+      hudSetStyle('goalHudFill', 'width', pct + '%');
+      if (_goalHudOpen) { _goalHudOpen = false; hudEl('goalHud').classList.toggle('goal-open', false); }
+    } else {
+      const remain = Math.max(0, Math.ceil(chaseState.total - chaseState.myS));
+      const pct = chaseState.total > 0 ? Math.min(100, Math.floor(chaseState.myS / chaseState.total * 100)) : 0;
+      hudSetText('goalHudText', `RUN!  ${remain}m TO EXIT`);
+      hudSetStyle('goalHudFill', 'width', pct + '%');
+      if (!_goalHudOpen) { _goalHudOpen = true; hudEl('goalHud').classList.toggle('goal-open', true); }
+    }
+  } else if (!theme.isBoss && gate === 'reach') {
     // REACH gate: the exit is always open — the goal is to get TO it. Per-theme
     // flavor text (chase = "RUN — REACH THE EXIT"; Lights Out = "FIND THE EXIT").
     hudSetStyle('goalHud', 'display', 'block');
@@ -6057,6 +6227,8 @@ function animate() {
 
   if (gameState === 'playing') {
     updatePlayer(dt);
+    updateChaseGate(dt);   // auto-run start gate (HOLD-E); no-op off the chase floor
+    updateChaseWall(dt);   // advancing wall + own-player progress/caught (§3); no-op otherwise
     if (netIsClient()) {
       // MP CLIENT: the host owns ALL enemy/boss simulation. We only animate
       // the mirrored visuals built from its snapshots — no AI, no spawning,

@@ -971,6 +971,14 @@ function netBuildSnapshot() {
     snap.b = [Math.ceil(bossEntity.hp), Math.ceil(bossEntity.maxHp), bossEntity.currentPhase, netR2(bossEntity.pos.x), netR2(bossEntity.pos.z)];
     snap.p = bossProjectiles.map(pr => [netR2(pr.pos.x), netR2(pr.pos.z)]);
   }
+  // AUTO-RUN chase: host owns the start-gate progress + the advancing wall's track
+  // position; ride the existing snapshot (cosmetic-state only — caught is detected
+  // locally against the authoritative wallS). gp gate-progress, go gate-open,
+  // rs run-started, ws wall arc-length. (Protocol addition — both players on new build.)
+  if (typeof chaseState !== 'undefined' && chaseState) {
+    snap.cs = { gp: netR2(chaseState.gateProg), go: chaseState.gateOpen ? 1 : 0,
+                rs: chaseState.runStarted ? 1 : 0, ws: netR2(chaseState.wallS) };
+  }
   return snap;
 }
 
@@ -998,6 +1006,15 @@ onMessage('enemies', (snap) => {
   }
 
   netBossSnapshot(snap.b || null, snap.p || []);
+
+  // AUTO-RUN chase: mirror the host's gate progress + wall position. When the gate
+  // OPENS on the host (go→1) the client starts its own run (openChaseRun: drops the
+  // barrier, spawns the wall, kicks in the alarm) so the whole party runs together.
+  if (snap.cs && typeof chaseState !== 'undefined' && chaseState) {
+    chaseState.gateProg = snap.cs.gp;
+    if (typeof snap.cs.ws === 'number') chaseState.wallTargetS = snap.cs.ws;
+    if (snap.cs.go && !chaseState.gateOpen && typeof openChaseRun === 'function') openChaseRun();
+  }
 });
 
 // Spawn a VISUAL-ONLY mirror via the same buildMobModel seam real spawns use.
@@ -1507,6 +1524,29 @@ onMessage('down_state', (d) => {
   netSetAvatarDown(d.id, d.down);
   if (!d.down) { const av = netAvatars.get(d.id); if (av) av.reviveProg = 0; }
 });
+
+/* ── AUTO-RUN chase start gate (HOLD-E, host-authoritative) ──
+   The gate opens when ANY player holds E long enough (a single player suffices;
+   parallel holders don't speed it up — it's a time gate). Clients stream a freshness
+   signal (8Hz) while holding; the host accumulates progress (main.js updateChaseGate)
+   and broadcasts gate state in the snapshot. Solo accumulates locally (no messages). */
+let netChaseHoldT = 0;                  // client: send pacing
+const netChaseHoldPeers = new Map();    // host: peerId → fresh-until time
+function netSendChaseHold() {
+  const now = clock.getElapsedTime();
+  if (now - netChaseHoldT < 1 / 8) return;
+  netChaseHoldT = now;
+  sendToHost('chase_hold', {});
+}
+onMessage('chase_hold', (d, fromConn) => {
+  if (netState.role !== 'host') return;
+  netChaseHoldPeers.set(fromConn.peer, clock.getElapsedTime() + 0.4); // stays "fresh" 0.4s
+});
+function netAnyChaseHold() {
+  const now = clock.getElapsedTime();
+  for (const t of netChaseHoldPeers.values()) if (t > now) return true;
+  return false;
+}
 
 function netSetAvatarDown(id, down) {
   const av = netAvatars.get(id);
