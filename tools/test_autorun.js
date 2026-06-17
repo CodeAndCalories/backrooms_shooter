@@ -137,12 +137,15 @@ console.log('3. advancing wall (track projection + caught)');
 
   const wallApi = (env) => new Function('env', `
     with (env) {
+      const ESCAPE_TRIGGER_BACK = ${constNum('ESCAPE_TRIGGER_BACK')};
       function netIsClient(){ return netState.role === 'client'; }
       function animateChaserMesh(){}
       function mobVocalLocal(){ env.roars++; }
       function gameOver(){ env.gameovers++; }
       function netGoDown(){ env.downs++; }
       function playDamage(){}
+      function triggerEscape(){ if (chaseState && !chaseState.escaping) { chaseState.escaping = true; env.escapeTriggers = (env.escapeTriggers||0)+1; } }
+      function updateEscapeSequence(){ env.escapeTicks = (env.escapeTicks||0)+1; }
       ${extractFn(mainSrc, 'function chaseProjectProgress')}
       ${extractFn(mainSrc, 'function chaseWorldAtArc')}
       ${extractFn(mainSrc, 'function updateChaseWall')}
@@ -330,6 +333,134 @@ console.log('4. wall visual: no new lights');
   else fail('wall does not reuse the blob-mass');
   if (/MeshStandardMaterial/.test(buildWall)) ok('occluder slab uses the pinned no-map Standard family');
   else fail('slab material not Standard');
+}
+
+/* ── 6. ESCAPE ENDING — trigger, sequence phases, host-authoritative advance, robustness ── */
+console.log('6. escape ending (gate slam + monster impact)');
+{
+  const lightRe = /new THREE\.(PointLight|SpotLight|DirectionalLight|HemisphereLight)/;
+  const SLAM = constNum('ESCAPE_SLAM_DUR'), TOTAL = constNum('ESCAPE_TOTAL'), TRIG = constNum('ESCAPE_TRIGGER_BACK');
+
+  // sandbox the REAL escape functions over stubs (THREE/scene/audio/net + a fake track)
+  const esc = (env) => new Function('env', `
+    with (env) {
+      const CELL = 4, WALL_H = 3.4;
+      const CHASE_BAND_H = ${constNum('CHASE_BAND_H')};
+      const ESCAPE_SEAL_BACK = ${constNum('ESCAPE_SEAL_BACK')};
+      const ESCAPE_SLAM_DUR = ${SLAM}, ESCAPE_LUNGE_DUR = ${constNum('ESCAPE_LUNGE_DUR')};
+      const ESCAPE_WALL_OVERSHOOT = ${constNum('ESCAPE_WALL_OVERSHOOT')}, ESCAPE_TOTAL = ${TOTAL};
+      const meshLike = () => ({ position: { set() {} }, rotation: {}, add() {} });
+      const THREE = { Group: function(){ return meshLike(); }, Mesh: function(){ return meshLike(); },
+        BoxGeometry: function(){ return {}; }, MeshStandardMaterial: function(){ return {}; } };
+      const scene = { add() {} };
+      function netIsClient(){ return netState.role === 'client'; }
+      function netBroadcastEscape(){ env.broadcasts = (env.broadcasts||0)+1; }
+      function netRequestAdvance(){ env.requests = (env.requests||0)+1; }
+      function advanceFloor(){ env.advances = (env.advances||0)+1; }
+      function playSlam(){ env.slams = (env.slams||0)+1; }
+      function mobVocalLocal(){ env.roars = (env.roars||0)+1; }
+      function animateChaserMesh(){}
+      function chaseWorldAtArc(s){ return { x: s, z: 0, dx: 1, dz: 0 }; }
+      ${extractFn(mainSrc, 'function makeEscapeShutter')}
+      ${extractFn(mainSrc, 'function buildEscapeGate')}
+      ${extractFn(mainSrc, 'function triggerEscape')}
+      ${extractFn(mainSrc, 'function updateEscapeSequence')}
+      ${extractFn(mainSrc, 'function finishEscape')}
+      return { triggerEscape, updateEscapeSequence, finishEscape };
+    }
+  `)(env);
+  const mkCs = () => ({ total: 100, wallS: 88, escaping: false, escapeT: 0, escapeDone: false,
+    wallGroup: { position: { set() {} }, rotation: {} }, wallBlobs: [], poundTimer: 0, escapeShudder: 0 });
+
+  // SOLO: trigger → escaping + gate built; play to the end → exactly one advance.
+  {
+    const env = { netState: { role: 'solo' }, chaseState: mkCs() };
+    const api = esc(env);
+    api.triggerEscape();
+    const startedOk = env.chaseState.escaping && env.chaseState.escapeGate;
+    if (startedOk && !env.broadcasts && !env.requests) ok('solo: triggerEscape starts the cinematic (gate built), no net traffic');
+    else fail(`solo trigger off (escaping=${env.chaseState.escaping} gate=${!!env.chaseState.escapeGate})`);
+    for (let i = 0; i < Math.ceil(TOTAL / (1 / 60)) + 5; i++) api.updateEscapeSequence(1 / 60);
+    if (env.advances === 1) ok(`solo: auto-advances exactly once after ~${TOTAL}s`);
+    else fail(`solo advance count ${env.advances} (expected 1)`);
+    if (env.slams >= 2 && env.roars >= 1) ok(`solo: gate slam + monster impact play (slams=${env.slams}, roars=${env.roars})`);
+    else fail(`solo sounds off (slams=${env.slams} roars=${env.roars})`);
+    // keep ticking past the end → still exactly one advance (escapeDone guard; no soft-lock spam)
+    for (let i = 0; i < 120; i++) api.updateEscapeSequence(1 / 60);
+    if (env.advances === 1) ok('advance fires ONCE (escapeDone guard)'); else fail(`advance fired ${env.advances}×`);
+  }
+
+  // HOST: trigger broadcasts 'escape_seq'; advances at the end.
+  {
+    const env = { netState: { role: 'host', peers: [{}] }, chaseState: mkCs() };
+    const api = esc(env);
+    api.triggerEscape();
+    for (let i = 0; i < Math.ceil(TOTAL * 60) + 5; i++) api.updateEscapeSequence(1 / 60);
+    if (env.broadcasts === 1) ok("host: broadcasts 'escape_seq' once"); else fail(`host broadcasts ${env.broadcasts}`);
+    if (env.advances === 1) ok('host: owns the party advance (advanceFloor at the end)'); else fail(`host advances ${env.advances}`);
+  }
+
+  // CLIENT: trigger pings host (request) + plays locally, but NEVER self-advances (waits
+  // for the host's game_start) → no soft-lock, no desync.
+  {
+    const env = { netState: { role: 'client' }, chaseState: mkCs() };
+    const api = esc(env);
+    api.triggerEscape();
+    for (let i = 0; i < Math.ceil(TOTAL * 60) + 5; i++) api.updateEscapeSequence(1 / 60);
+    if (env.requests >= 1 && !env.advances && env.chaseState.escaping)
+      ok('client: requests host advance, plays the cinematic, NEVER self-advances (waits for game_start)');
+    else fail(`client path off (requests=${env.requests} advances=${env.advances || 0})`);
+  }
+
+  // IDEMPOTENT: a second trigger (e.g. host reach + a client exit_reached) is a no-op.
+  {
+    const env = { netState: { role: 'host', peers: [{}] }, chaseState: mkCs() };
+    const api = esc(env);
+    api.triggerEscape(); api.triggerEscape();
+    if (env.broadcasts === 1) ok('triggerEscape is idempotent (one broadcast even if called twice)');
+    else fail(`idempotency broken (broadcasts=${env.broadcasts})`);
+  }
+
+  // ROBUST: if the gate build throws, fall straight through to advance (never soft-lock).
+  {
+    const env = { netState: { role: 'solo' }, chaseState: null }; // null cs → buildEscapeGate throws
+    // give it a cs that makes buildEscapeGate throw: chaseWorldAtArc ok, but force via a getter
+    env.chaseState = mkCs();
+    Object.defineProperty(env.chaseState, 'total', { get() { throw new Error('boom'); } });
+    const api = esc(env);
+    api.triggerEscape();
+    if (env.advances === 1 && !env.chaseState.escaping) ok('build error → falls through to advanceFloor (no soft-lock)');
+    else fail(`fall-through broken (advances=${env.advances} escaping=${env.chaseState.escaping})`);
+  }
+
+  // No-lights + reuse-the-shutter-look invariants.
+  const shut = extractFn(mainSrc, 'function makeEscapeShutter');
+  const gate = extractFn(mainSrc, 'function buildEscapeGate');
+  if (!lightRe.test(shut) && !lightRe.test(gate)) ok('escape gate adds NO lights');
+  else fail('escape gate introduces a light');
+  if (/slat/i.test(shut) && /MeshStandardMaterial/.test(shut)) ok('escape gate reuses the shutter look (slats, no-map Standard)');
+  else fail('escape gate not a shutter');
+
+  // Trigger wiring: updateChaseWall fires triggerEscape at the end of the run.
+  const ucw = extractFn(mainSrc, 'function updateChaseWall');
+  if (/cs\.myS >= cs\.total - ESCAPE_TRIGGER_BACK/.test(ucw) && /triggerEscape\(\)/.test(ucw)) ok('updateChaseWall triggers the escape when the player reaches the end');
+  else fail('escape trigger not wired into updateChaseWall');
+  if (/if \(cs\.escaping\) \{ updateEscapeSequence/.test(ucw)) ok('escape owns the frame once running (separate from the normal chase path)');
+  else fail('escape path not separated in updateChaseWall');
+
+  // Movement + advance gating during the escape.
+  const up = extractFn(mainSrc, 'function updatePlayer');
+  if (/&& !chaseState\.escaping/.test(up)) ok('forced auto-run stops during the escape (player can look around)');
+  else fail('forced movement not gated on escaping');
+  if (/exitZone && !theme\.autoRun/.test(up)) ok('exit-proximity advance skipped on auto-run (escape owns the advance — no double-advance)');
+  else fail('exitZone advance not gated for auto-run');
+
+  // Net wiring: escape_seq handler + exit_reached routes to the escape on auto-run.
+  const netSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'net.js'), 'utf8');
+  if (/onMessage\('escape_seq'/.test(netSrc) && /triggerEscape\(\)/.test(netSrc)) ok("net: 'escape_seq' handler plays the cinematic on clients");
+  else fail("no 'escape_seq' handler");
+  if (/getTheme\(currentFloor\)\.autoRun && typeof triggerEscape/.test(netSrc)) ok("net: exit_reached routes to the escape on auto-run floors (host)");
+  else fail('exit_reached not routed to escape on auto-run');
 }
 
 console.log(fails === 0 ? '\nALL AUTO-RUN TESTS PASSED' : `\n${fails} FAILURE(S)`);

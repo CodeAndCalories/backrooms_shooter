@@ -1318,8 +1318,26 @@ function netRequestAdvance() {
 onMessage('exit_reached', () => {
   if (netState.role !== 'host' || gameState !== 'playing') return;
   if (!exitZone || !netExitGateOpen()) return; // host re-validates the gate
+  // AUTO-RUN chase: a client reached the end → play the scripted ESCAPE (host owns it +
+  // broadcasts 'escape_seq'); the advance happens at the cinematic's end (idempotent if
+  // the host already started it). Every other floor advances immediately, as before.
+  if (getTheme(currentFloor).autoRun && typeof triggerEscape === 'function') { triggerEscape(); return; }
   console.log('[net] a client reached the exit — advancing the party');
   advanceFloor();
+});
+
+/* ── ESCAPE ENDING (auto-run chase) ──
+   Host → all: play the scripted escape (gate slam + monster impact) in sync. The host
+   starts it when the FIRST player reaches the end (its own player, or a client via
+   'exit_reached'); clients run the same deterministic cinematic locally on receipt and
+   wait for the host's game_start to advance. COSMETIC sync only (the advance is the
+   host's authoritative game_start). PROTOCOL ADDITION → both players on the new build;
+   an old build logs it unhandled (misses the cinematic but the floor still advances). */
+function netBroadcastEscape() {
+  if (netState.role === 'host' && netState.peers.length > 0) sendToAll('escape_seq', {});
+}
+onMessage('escape_seq', () => {
+  if (netIsClient() && gameState === 'playing' && typeof triggerEscape === 'function') triggerEscape();
 });
 
 /* ── ammo pickup sync ── */

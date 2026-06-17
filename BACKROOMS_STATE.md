@@ -30,6 +30,49 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 18 HOTEL CHASE — SCRIPTED ESCAPE ENDING (June 17, UNPLAYED) — an in-engine
+  "we made it" cinematic when you reach the exit, instead of just advancing. PROTOCOL
+  ADDITION: `'escape_seq'` (host→all). Light budget 32 intact (escape gate is no-map
+  Standard / pinned, NO lights; reuses the shutter look + the chaser blob + `playSlam`);
+  seeded; co-op host-authoritative. Auto-run/steering/gate/wall mechanics untouched.**
+  - **THE MOMENT (`triggerEscape` → `updateEscapeSequence` → `finishEscape`, main.js):**
+    when the first player reaches the end of the run, a heavy **steel shutter SLAMS down**
+    behind them (~0.5s drop from the ceiling) sealing the corridor; the **chaser wall
+    LUNGES into the closed gate** (heavy `playSlam` impact + roar, limbs/eyes jammed
+    through the slats); a **~2-3s beat** with the monster pounding + roaring the other
+    side (gate shudders); then the floor **auto-advances**. Forced auto-run + the catch
+    are OFF during the cinematic (you can still mouse-look to watch the slam behind you);
+    nobody can be hit during it.
+  - **TRIGGER (your-call answer):** the **FIRST living player** to reach the end fires it
+    (host's own player, or a client via `exit_reached`). Each machine plays the same
+    deterministic cinematic locally; only the **host's single `advanceFloor` → game_start**
+    advances the party — caught/downed players are carried to the next floor + revived
+    there, exactly as the normal exit already does. The wall freezes during the beat, so a
+    teammate still in the corridor can't be caught while it plays.
+  - **CO-OP SYNC (`escape_seq`, net.js):** host → all "play the escape now" (cosmetic; the
+    advance is the host's authoritative game_start). `exit_reached` on an auto-run floor
+    now routes to `triggerEscape` (host starts + broadcasts) instead of advancing
+    immediately. A client also self-triggers on reaching the end (responsive + safe) and
+    pings the host. Idempotent (guarded by `chaseState.escaping`).
+  - **ROBUST / no soft-lock:** `triggerEscape` + `updateEscapeSequence` are try/caught — any
+    error falls straight through to `advanceFloor`; a hard `ESCAPE_TOTAL` (3.7s) backstop
+    always ends it; `escapeDone` guard fires the advance exactly once; clients never
+    self-advance (they wait for game_start, so a client error can't strand the run).
+  - **Reuse / cheap:** the seal gate is the same shutter look/materials as `buildChaseGate`
+    (`makeEscapeShutter`), the impactor is the existing wall blob (`chaseState.wallGroup`),
+    sounds are the existing `playSlam` + the chaser roar. No new lights, no new shader family.
+  - **Knobs (main.js):** `ESCAPE_TRIGGER_BACK` 9 (fires ~2 cells from the exit),
+    `ESCAPE_SEAL_BACK` 11 (gate drops just behind you), `ESCAPE_SLAM_DUR` 0.5,
+    `ESCAPE_LUNGE_DUR` 0.42, `ESCAPE_WALL_OVERSHOOT` 0.6, `ESCAPE_TOTAL` 3.7.
+  - Headless: `test_autorun` §6 (trigger wiring, solo/host/client paths, broadcast,
+    host-only advance, idempotency, build-error fall-through, escapeDone-once, no-lights,
+    movement/exit-advance gating, the net `escape_seq`/`exit_reached` routing). Full suite
+    green (21 tools); node --check clean; sim_levels 68/68 + 4800/4800.
+  - **Needs a browser + co-op session — playtest gate (FEEL):** Does the gate slam + monster
+    impact land as a satisfying "we made it" beat (timing, the shudder, eyes through the
+    slats, the roar/pounding)? Solo first. Co-op: do all players see it in sync, does the
+    party advance together, and is a teammate who reached late / got caught carried through
+    cleanly (no soft-lock, no double-advance)? Tune `ESCAPE_TOTAL` / `ESCAPE_SLAM_DUR` for feel.
 - **FLOOR 18 HOTEL CHASE — FEEL/ATMOSPHERE POLISH #2 (June 17, UNPLAYED) — visibility +
   red fog, leading lights, green EXIT signs, faster wall, hotel furniture, scarier roar.
   No protocol/mechanic change (auto-run/steering/gate/wall mechanics untouched); light

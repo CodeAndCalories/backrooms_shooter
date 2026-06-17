@@ -2920,6 +2920,13 @@ const CHASE_SIREN_MIN = 0.42;       // siren trough as a fraction of a light's b
 const CHASE_SIREN_MAX = 1.18;       // siren peak as a fraction of base (alarm-bright)
 const CHASE_LIGHT_MULT = 2.7;       // corridor light base brightness vs the theme nominal (bright, readable path; was 2.2)
 const CHASE_TURN_LIGHT_MULT = 1.55; // turn/exit beacons are brighter (telegraph the turn)
+// ESCAPE ENDING — the scripted "we made it" beat at the end of the run (see triggerEscape).
+const ESCAPE_TRIGGER_BACK = 9;      // arc-length before the exit at which the escape fires (player ~2 cells out)
+const ESCAPE_SEAL_BACK = 11;        // the seal shutter drops this far back → just BEHIND the player
+const ESCAPE_SLAM_DUR = 0.5;        // gate drops over this long (fast)
+const ESCAPE_LUNGE_DUR = 0.42;      // the chaser wall lunges into the closed gate over this long
+const ESCAPE_WALL_OVERSHOOT = 0.6;  // wall presses this far past the seal (jams its limbs/eyes through the slats)
+const ESCAPE_TOTAL = 3.7;           // total cinematic length, then auto-advance (also a soft-lock backstop)
 function initChaseState(theme) {
   chaseState = null;
   chaseRunStarted = false;
@@ -2945,7 +2952,11 @@ function initChaseState(theme) {
     wallS: -CHASE_WALL_GRACE_DIST,  // behind the gate → head start once it opens
     wallTargetS: -CHASE_WALL_GRACE_DIST, // client lerp target (host broadcasts wallS)
     myIdx: 0, myS: 0, caught: false, runGrace: 0,
-    gateBarriers, gateMesh: null, wallGroup: null
+    gateBarriers, gateMesh: null, wallGroup: null,
+    // ESCAPE ENDING state (set by triggerEscape):
+    escaping: false, escapeT: 0, escapeGate: null, escapeDone: false, escapeReqSent: false,
+    sealS: 0, wallLungeFrom: 0, gateBaseX: 0, gateBaseZ: 0, slamPlayed: false, impactPlayed: false,
+    poundTimer: 0, escapeShudder: 0
   };
   buildChaseGate(gx);
 }
@@ -3192,6 +3203,9 @@ function spawnChaseWall() {
 function updateChaseWall(dt) {
   const cs = chaseState;
   if (!cs || !cs.runStarted) return;
+  // ESCAPE ENDING owns the frame once it's running (its own gate-slam/lunge/beat,
+  // then it auto-advances). Fully separate from the normal chase path below.
+  if (cs.escaping) { updateEscapeSequence(dt); return; }
   // HEAD-START GRACE: for a beat after the gate opens, the wall is FROZEN and cannot
   // catch — a guaranteed "GO!" window so nobody can be hit during/right after the
   // gate-hold (covers the co-op case where a player is still at the gate when another
@@ -3207,6 +3221,15 @@ function updateChaseWall(dt) {
   }
 
   if (!player.isDown) chaseProjectProgress();
+
+  // ESCAPE TRIGGER — the moment the LOCAL player reaches the end of the run, play the
+  // scripted escape instead of catching/advancing. Reaching the end always BEATS a
+  // simultaneous catch (this is checked before the catch below). triggerEscape is
+  // idempotent + host-authoritative for the party advance (see its body).
+  if (!inGrace && cs.total > 0 && !cs.escaping && cs.myS >= cs.total - ESCAPE_TRIGGER_BACK) {
+    triggerEscape();
+    return; // escaping now → let updateEscapeSequence drive from next frame (skip catch)
+  }
 
   if (cs.wallGroup) {
     const w = chaseWorldAtArc(cs.wallS);
@@ -3233,6 +3256,143 @@ function updateChaseWall(dt) {
     if (netState.role === 'solo') gameOver();
     else if (typeof netGoDown === 'function') netGoDown();
   }
+}
+
+/* ═══════════════════════════════════════════
+   ESCAPE ENDING — the scripted "we made it" beat
+   ═══════════════════════════════════════════
+   When the first player reaches the end of the run, instead of just advancing we play
+   a short in-engine moment: a heavy SHUTTER slams down behind the player sealing the
+   corridor, the chaser wall LUNGES into it (heavy impact + roar, limbs/eyes against the
+   slats), a ~2-3s safe beat with the monster pounding the other side, then the floor
+   auto-advances. HOST-AUTHORITATIVE for the party advance; broadcast via 'escape_seq'
+   so everyone sees it in sync. ROBUST: every step is try/caught and there's a hard
+   ESCAPE_TOTAL backstop — any error falls straight through to advanceFloor, so the run
+   can never soft-lock. While escaping, forced auto-run movement + the catch are off, so
+   nobody can be hit during the cinematic (covers the co-op "still in the corridor" case);
+   caught/downed players are carried to the next floor by the normal advance, as before.
+
+   TRIGGER (the user asked which — answered): the FIRST living player to reach the end
+   fires it (host's own player, or a client via 'exit_reached'). Each machine plays the
+   cinematic locally; only the host's single advanceFloor → game_start advances the party. */
+function triggerEscape() {
+  const cs = chaseState;
+  if (!cs || cs.escaping) return; // idempotent
+  cs.escaping = true;
+  cs.escapeT = 0;
+  try {
+    buildEscapeGate(); // sets sealS / gateBase / wallLungeFrom and spawns the (raised) shutter
+  } catch (e) {
+    console.warn('[chase] escape build failed — falling through to advance', e);
+    cs.escaping = false;
+    if (!netIsClient()) advanceFloor();
+    return;
+  }
+  // Networking: the host tells everyone to play it (and owns the advance at the end);
+  // a client also pings the host in case the host hasn't reached the end yet.
+  if (netState.role === 'host') { if (typeof netBroadcastEscape === 'function') netBroadcastEscape(); }
+  else if (netIsClient()) { if (typeof netRequestAdvance === 'function') netRequestAdvance(); }
+}
+
+// A heavy roll-down shutter across the corridor at the seal point — same shutter look /
+// materials as the start gate (buildChaseGate), built spanning the corridor and STARTED
+// up in the ceiling (updateEscapeSequence drops it). No-map Standard (pinned), NO lights.
+function makeEscapeShutter(span) {
+  const g = new THREE.Group();
+  const H = WALL_H;
+  const steel = new THREE.MeshStandardMaterial({ color: 0x474d56, roughness: 0.5, metalness: 0.7 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.55, metalness: 0.6 });
+  const slats = 9, gap = 0.07, slatH = H / slats;
+  const slatGeo = new THREE.BoxGeometry(span + 0.4, slatH - gap, 0.4); // slats span local X (corridor width)
+  for (let k = 0; k < slats; k++) { const s = new THREE.Mesh(slatGeo, steel); s.position.set(0, slatH * (k + 0.5), 0); g.add(s); }
+  const railGeo = new THREE.BoxGeometry(0.4, H, 0.55);
+  for (const sx of [-(span / 2 + 0.2), span / 2 + 0.2]) { const r = new THREE.Mesh(railGeo, frameMat); r.position.set(sx, H / 2, 0); g.add(r); }
+  return g;
+}
+
+function buildEscapeGate() {
+  const cs = chaseState;
+  cs.sealS = Math.max(2, cs.total - ESCAPE_SEAL_BACK);
+  const w = chaseWorldAtArc(cs.sealS);
+  cs.gateBaseX = w.x; cs.gateBaseZ = w.z;
+  cs.wallLungeFrom = cs.wallS; // the wall lunges from wherever it is now into the gate
+  const g = makeEscapeShutter(CELL * CHASE_BAND_H); // span the corridor width
+  g.position.set(w.x, WALL_H, w.z);                 // starts UP in the ceiling → slams down
+  if (w.dx || w.dz) g.rotation.y = Math.atan2(w.dx, w.dz); // local +Z = track tangent → slats span the corridor, seals it
+  scene.add(g);
+  cs.escapeGate = g;
+}
+
+// Per-frame while escaping (all machines). Drives the gate slam, the wall lunge+impact,
+// the pounding beat, and (host/solo) the auto-advance at the end. Wrapped so any error
+// falls through to finishEscape → advance (never soft-locks).
+function updateEscapeSequence(dt) {
+  const cs = chaseState;
+  cs.escapeT += dt;
+  const t = cs.escapeT;
+  try {
+    // ── gate SLAMS down (0..SLAM_DUR): y from ceiling → floor, ease-out ──
+    if (cs.escapeGate) {
+      const drop = Math.min(1, t / ESCAPE_SLAM_DUR);
+      const e = 1 - (1 - drop) * (1 - drop);
+      let y = WALL_H * (1 - e);
+      cs.escapeShudder = Math.max(0, cs.escapeShudder - dt * 0.6); // decay any pound kick
+      const jx = cs.escapeShudder ? (Math.random() - 0.5) * cs.escapeShudder : 0;
+      const jz = cs.escapeShudder ? (Math.random() - 0.5) * cs.escapeShudder : 0;
+      cs.escapeGate.position.set(cs.gateBaseX + jx, y, cs.gateBaseZ + jz);
+    }
+    if (!cs.slamPlayed && t >= ESCAPE_SLAM_DUR) { cs.slamPlayed = true; cs.escapeShudder = 0.1; if (typeof playSlam === 'function') playSlam(0); }
+
+    // ── the chaser wall LUNGES into the sealed gate (slam→impact), then HOLDS ──
+    const lungeStart = ESCAPE_SLAM_DUR - 0.06;
+    if (t >= lungeStart) {
+      const k = Math.min(1, (t - lungeStart) / ESCAPE_LUNGE_DUR);
+      const target = cs.sealS + ESCAPE_WALL_OVERSHOOT;
+      cs.wallS = cs.wallLungeFrom + (target - cs.wallLungeFrom) * (k * k); // ease-in lunge
+      if (!cs.impactPlayed && k >= 1) {
+        cs.impactPlayed = true;
+        cs.escapeShudder = 0.2;
+        if (typeof playSlam === 'function') playSlam(0); // heavy body impact on the gate
+        if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
+      }
+    }
+
+    // ── the BEAT: it's stopped on the other side — periodic pounding + roar ──
+    if (cs.impactPlayed) {
+      cs.poundTimer -= dt;
+      if (cs.poundTimer <= 0) {
+        cs.poundTimer = 0.8 + Math.random() * 0.5;
+        cs.escapeShudder = 0.14;
+        if (typeof playSlam === 'function') playSlam(0);
+        if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
+      }
+    }
+
+    // ── position + WRITHE the wall at its (lunging/held) arc spot — frenzied ──
+    if (cs.wallGroup) {
+      const w = chaseWorldAtArc(cs.wallS);
+      cs.wallGroup.position.set(w.x, 0, w.z);
+      if (w.dx || w.dz) cs.wallGroup.rotation.y = Math.atan2(w.dx, w.dz);
+      cs.wallAnimT = (cs.wallAnimT || 0) + dt * 1.7; // limbs scramble faster against the gate
+      if (typeof animateChaserMesh === 'function') for (const b of cs.wallBlobs) animateChaserMesh(b, cs.wallAnimT);
+    }
+
+    if (t >= ESCAPE_TOTAL) finishEscape();
+  } catch (e) {
+    console.warn('[chase] escape sequence error — advancing', e);
+    finishEscape();
+  }
+}
+
+// End of the cinematic. HOST/SOLO advance the whole party (game_start carries everyone,
+// downed included, exactly as the normal exit does). CLIENTS stay frozen + safe and wait
+// for the host's game_start to rebuild them — they never self-advance (no desync, no
+// soft-lock). Fires exactly once.
+function finishEscape() {
+  const cs = chaseState;
+  if (!cs || cs.escapeDone) return;
+  cs.escapeDone = true;
+  if (!netIsClient()) advanceFloor();
 }
 
 /* ═══════════════════════════════════════════
@@ -4893,7 +5053,9 @@ function updatePlayer(dt) {
     // start gate opens (chaseState.runStarted) and while downed. Constant velocity →
     // no head-bob/shake (accessibility + motion-sickness). moveDir is NOT normalized:
     // forward stays full-pace and the strafe just adds a sideways component.
-    const running = !!(chaseState && chaseState.runStarted) && !player.isDown;
+    // Forced movement stops during the scripted escape (chaseState.escaping) so the
+    // moment can play — the player can still look around (mouse) to watch the slam.
+    const running = !!(chaseState && chaseState.runStarted) && !player.isDown && !chaseState.escaping;
     if (running) {
       moveDir.copy(forward);
       const strafe = ((keys['KeyD'] || keys['ArrowRight']) ? 1 : 0) - ((keys['KeyA'] || keys['ArrowLeft']) ? 1 : 0);
@@ -5001,7 +5163,9 @@ function updatePlayer(dt) {
   // Exit zone check — MP: gated on the party's combined kills (netExitGateOpen;
   // always open solo). ANY player can trigger the advance: a client asks the
   // host ('exit_reached'), the host executes + rebroadcasts game_start.
-  if (exitZone) {
+  // AUTO-RUN chase: the ESCAPE sequence (updateChaseWall → triggerEscape) owns reaching
+  // the end + the advance, so skip this proximity check there (no double-advance).
+  if (exitZone && !theme.autoRun) {
     const edx = player.pos.x - exitZone.x, edz = player.pos.z - exitZone.z;
     if (Math.sqrt(edx * edx + edz * edz) < exitZone.radius && netExitGateOpen()) {
       if (netIsClient()) netRequestAdvance();
