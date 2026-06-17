@@ -30,6 +30,45 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **CO-OP AVATARS → HUMANOID SOLDIER + WALK ANIM (June 17, UNPLAYED) — cosmetic
+  only, NO protocol change (avatars still sync via the existing `pos` stream):**
+  the remote-player avatars were hazmat primitives (torso/hood/two arm-stubs). They
+  are now an articulated **soldier/survivor figure** (`netAvatarBuild`, net.js):
+  head + **colored helmet** + dark visor, a two-box armored **vest** + dark chest-rig,
+  a **backpack + bedroll**, shoulder pads, and — the point — **TWO arms and TWO legs
+  built as PIVOT chains** (hip→upper-leg→knee→lower-leg+boot; shoulder→upper-arm→
+  elbow→lower-arm+glove, forearm carried forward for a "ready" look). Group origin
+  stays at the feet; -z is forward (visor + facing match the camera).
+  - **Per-slot COLOR kept:** the entire suit is ONE shared colored
+    `MeshStandardMaterial` (P1 yellow … P5 purple), so every limb is the player's
+    color (still distinguishable) AND the existing down-tint (`netSetAvatarDown`
+    retargets `av.bodyMat`) recolors the whole figure dark-red. Only the dark gear
+    material is separate. **NO new lights, NO new shader family** — untextured
+    Standard is the ammoPickupMat-pinned family (same as the chaser/pickups), the
+    label's SpriteMaterial is keepalive-pinned.
+  - **SIMPLE WALK ANIMATION (`netTickAvatarWalk`, sin-driven like the chaser, gated
+    on movement):** the per-frame avatar-smoothing loop feeds each avatar's on-screen
+    displacement to the tick. Stride **phase advances by distance travelled** (cadence
+    tracks real speed); a **swing amplitude eases in/out** (0→1 moving, →0 idle), so
+    a moving avatar swings legs (anti-phase) + arms (contralateral — arm L opposes
+    leg L) + a small knee bend, and a **standing OR downed avatar settles to a still
+    neutral pose** (no sliding statue). Cheap: a handful of `sin()` per remote avatar,
+    co-op only. Knobs: `NET_WALK_MIN_SPEED` 0.5, `NET_WALK_CADENCE` 2.6,
+    `NET_LEG_SWING` 0.55, `NET_ARM_SWING` 0.45, `NET_KNEE_BEND` 0.5, `NET_WALK_AMP_EASE` 0.12.
+  - **Kept:** facing (yaw lerp toward look/move dir), the camera-facing **name label**
+    above, and the **down-state tint**. Solo unaffected (no remote avatars).
+  - Headless: **`tools/test_avatar.js`** (new) — static build invariants (no lights,
+    one shared colored no-map suit material, two articulated legs + two arms with
+    hip/knee + shoulder/elbow pivots, helmet/visor/backpack, the `userData.rig` walk
+    stash, label kept, the smoothing-loop wiring) + the extracted `netTickAvatarWalk`
+    over a fake rig (moving→swing ramps + limbs swing, legs anti-phase, arm⟂leg
+    contralateral, knee≥0, idle→eases to neutral, down→never swings, determinism).
+    Full suite green (21 tools); node --check clean.
+  - **Needs a co-op session — playtest gate:** do the avatars read as soldiers (helmet
+    + pack + limbs) and stay color-distinct at distance? Does the walk look alive —
+    arms/legs swinging while a teammate runs, settling to still when they stop, no
+    jitter/sliding? Facing toward movement, label legible, down-tint covers the whole
+    figure? (Tune the `NET_WALK_*` knobs if the swing is too fast/slow or too big/small.)
 - **CO-OP SPAWN FAN-OUT (June 17, UNPLAYED) — players no longer spawn stacked:**
   all players used to build the floor and land on the SAME spawn cell (1,1), piled
   inside each other. **Fix (no protocol change):** `buildMazeScene` now places the

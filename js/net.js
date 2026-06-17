@@ -271,6 +271,14 @@ onMessage('room_full', () => {
 const NET_POS_HZ = 15;            // position send rate
 const NET_AVATAR_LERP = 0.1;      // remote avatar smoothing: ~10% of the gap per frame
 const NET_EYE_HEIGHT = 1.6;       // player.pos.y is EYE height; avatar group origin is at the feet
+// Remote-avatar walk animation (cosmetic, sin-driven like the chaser). The swing
+// is gated on the avatar's actual on-screen movement so a standing player is still.
+const NET_WALK_MIN_SPEED = 0.5;   // m/s below which the avatar reads as standing (idle, no swing)
+const NET_WALK_CADENCE = 2.6;     // stride-phase advance per metre travelled (rad/m) — cadence tracks real speed
+const NET_WALK_AMP_EASE = 0.12;   // how fast the swing eases in/out on start/stop (per frame)
+const NET_LEG_SWING = 0.55;       // max hip swing, radians
+const NET_KNEE_BEND = 0.5;        // max knee bend on the stride, radians
+const NET_ARM_SWING = 0.45;       // max shoulder swing (opposite the legs), radians
 // Hazmat suit color per slot: P1 yellow, P2 green, P3 red, P4 blue, P5 purple.
 const NET_PLAYER_COLORS = [0xf2d22e, 0x3fd964, 0xe8413a, 0x3f7be8, 0xa64ae8];
 const NET_NAME_KEY = 'brfps_name';
@@ -466,12 +474,14 @@ function netUpdate(dt) {
   for (const av of netAvatars.values()) {
     if (!av.group) continue;
     const g = av.group;
+    const px = g.position.x, pz = g.position.z;              // pre-lerp pos → walk-anim displacement
     g.position.x += (av.target.x - g.position.x) * NET_AVATAR_LERP;
     g.position.y += ((av.target.y - NET_EYE_HEIGHT) - g.position.y) * NET_AVATAR_LERP;
     g.position.z += (av.target.z - g.position.z) * NET_AVATAR_LERP;
     let dyaw = av.target.yaw - g.rotation.y;                  // shortest-arc yaw lerp
     dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
     g.rotation.y += dyaw * NET_AVATAR_LERP;
+    netTickAvatarWalk(av, g.position.x - px, g.position.z - pz, dt); // swing limbs while moving
   }
 }
 
@@ -508,45 +518,101 @@ function netAvatarUpdate(id, p) {
   if (!av.group && typeof scene !== 'undefined' && scene) netAvatarBuild(av);
 }
 
-// HAZMAT SUIT figure — body, hood, visor, backpack tank, arm stubs, all
-// primitives. One COLORED suit material per player (slot color; the down-tint
-// targets it) + one dark material for visor/tank. Deliberately NO PointLight
-// (fixed light budget) and no new shader families: untextured
-// MeshStandardMaterial is pinned by ammoPickupMat, the label's map+transparent
-// SpriteMaterial by the keepalives.
+// HUMANOID SOLDIER figure — head + helmet, torso/vest, a backpack + chest rig, and
+// TWO articulated arms and TWO legs (each a shoulder/hip PIVOT group → upper limb →
+// elbow/knee pivot → lower limb), so it reads as a person with limbs that can WALK,
+// not a capsule. The whole suit is ONE COLORED material (slot color; the down-tint
+// retargets it, and every limb stays the player's color → distinguishable) + one
+// dark material for visor/gloves/gear. Group origin is at the FEET (y=0). The arm/leg
+// pivots and their phases are stashed in group.userData.rig for netTickAvatarWalk.
+// Deliberately NO PointLight (fixed light budget) and no new shader families:
+// untextured MeshStandardMaterial is pinned by ammoPickupMat (same family as the
+// chaser/pickups), the label's map+transparent SpriteMaterial by the keepalives.
 function netAvatarBuild(av) {
   const slot = netSlotOf(av.id);
   const name = netNameOf(av.id);
   const color = NET_PLAYER_COLORS[slot % NET_PLAYER_COLORS.length];
 
   const group = new THREE.Group();
+  // -z is the look/forward direction at yaw 0 (matches the camera + the visor).
   const suitMat = new THREE.MeshStandardMaterial({
     color, emissive: color, emissiveIntensity: 0.28, roughness: 0.75
   });
   const darkMat = new THREE.MeshStandardMaterial({ color: 0x14181c, roughness: 0.25, metalness: 0.4 });
+  const mesh = (geo, mat) => new THREE.Mesh(geo, mat);
 
-  const legs = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.26, 0.55, 10), suitMat);
-  legs.position.y = 0.28;
-  group.add(legs);
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.33, 0.78, 10), suitMat);
-  torso.position.y = 0.93;
-  group.add(torso);
-  const hood = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), suitMat);
-  hood.position.y = 1.48;
-  hood.scale.set(1, 1.08, 1); // slightly tall — hood, not head
-  group.add(hood);
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.13, 0.06), darkMat);
-  visor.position.set(0, 1.48, -0.21); // -z = look direction at yaw 0, matching the camera
-  group.add(visor);
-  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.46, 8), darkMat);
-  tank.position.set(0, 1.02, 0.24); // small air tank on the back
-  group.add(tank);
-  const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.085, 0.6, 8), suitMat);
-  armL.position.set(-0.38, 0.95, 0); armL.rotation.z = 0.16;
-  group.add(armL);
-  const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.085, 0.6, 8), suitMat);
-  armR.position.set(0.38, 0.95, 0); armR.rotation.z = -0.16;
-  group.add(armR);
+  // ── TORSO / VEST (two stacked boxes — armored-vest silhouette) ──
+  const abdomen = mesh(new THREE.BoxGeometry(0.34, 0.30, 0.26), suitMat);
+  abdomen.position.y = 1.05; group.add(abdomen);
+  const chest = mesh(new THREE.BoxGeometry(0.46, 0.38, 0.30), suitMat);
+  chest.position.y = 1.34; group.add(chest);
+  const rig = mesh(new THREE.BoxGeometry(0.30, 0.22, 0.05), darkMat); // chest-rig pouches
+  rig.position.set(0, 1.32, -0.17); group.add(rig);
+
+  // ── BACKPACK + GEAR (on +z, the back) ──
+  const pack = mesh(new THREE.BoxGeometry(0.34, 0.42, 0.18), darkMat);
+  pack.position.set(0, 1.22, 0.24); group.add(pack);
+  const bedroll = mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.34, 8), suitMat);
+  bedroll.rotation.z = Math.PI / 2; bedroll.position.set(0, 1.45, 0.24); group.add(bedroll);
+
+  // ── HEAD + HELMET + VISOR ──
+  const neck = mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.10, 7), darkMat);
+  neck.position.y = 1.55; group.add(neck);
+  const head = mesh(new THREE.SphereGeometry(0.13, 12, 10), darkMat);
+  head.position.y = 1.64; group.add(head);
+  const helmet = mesh(new THREE.SphereGeometry(0.165, 12, 10), suitMat);
+  helmet.position.y = 1.67; helmet.scale.set(1, 0.92, 1.05); group.add(helmet); // colored helmet → ID
+  const brim = mesh(new THREE.BoxGeometry(0.30, 0.05, 0.12), darkMat);
+  brim.position.set(0, 1.64, -0.13); group.add(brim);
+  const visor = mesh(new THREE.BoxGeometry(0.21, 0.09, 0.05), darkMat);
+  visor.position.set(0, 1.60, -0.15); group.add(visor);
+
+  // ── LEG (hip pivot → upper leg → knee pivot → lower leg + boot). dir = -1 left / +1 right ──
+  function buildLeg(dir) {
+    const hip = new THREE.Group();
+    hip.position.set(dir * 0.13, 0.92, 0);
+    const upper = mesh(new THREE.CylinderGeometry(0.10, 0.085, 0.44, 8), suitMat);
+    upper.position.y = -0.22; hip.add(upper);
+    const knee = new THREE.Group();
+    knee.position.y = -0.44; hip.add(knee);
+    const lower = mesh(new THREE.CylinderGeometry(0.085, 0.07, 0.42, 8), suitMat);
+    lower.position.y = -0.21; knee.add(lower);
+    const boot = mesh(new THREE.BoxGeometry(0.16, 0.12, 0.30), darkMat);
+    boot.position.set(0, -0.42, -0.05); knee.add(boot); // toe points -z (forward)
+    group.add(hip);
+    return { pivot: hip, knee };
+  }
+  const legL = buildLeg(-1), legR = buildLeg(1);
+
+  // ── ARM (shoulder pivot, splayed out → upper arm → elbow pivot, bent forward → lower arm + glove) ──
+  function buildArm(dir) {
+    const pad = mesh(new THREE.SphereGeometry(0.11, 10, 8), suitMat); // shoulder pad
+    pad.position.set(dir * 0.30, 1.45, 0); group.add(pad);
+    const shoulder = new THREE.Group();
+    shoulder.position.set(dir * 0.30, 1.42, 0);
+    shoulder.rotation.z = dir * 0.14; // slight outward splay (rotation.x is the walk swing)
+    const upper = mesh(new THREE.CylinderGeometry(0.075, 0.07, 0.34, 8), suitMat);
+    upper.position.y = -0.17; shoulder.add(upper);
+    const elbow = new THREE.Group();
+    elbow.position.y = -0.34; elbow.rotation.x = -0.45; // forearm carried forward (soldier ready)
+    shoulder.add(elbow);
+    const lower = mesh(new THREE.CylinderGeometry(0.07, 0.06, 0.32, 8), suitMat);
+    lower.position.y = -0.16; elbow.add(lower);
+    const glove = mesh(new THREE.BoxGeometry(0.10, 0.10, 0.13), darkMat);
+    glove.position.y = -0.33; elbow.add(glove);
+    group.add(shoulder);
+    return { pivot: shoulder, elbow };
+  }
+  const armL = buildArm(-1), armR = buildArm(1);
+
+  // Walk rig: legs in anti-phase; each arm swings opposite its OWN-side leg
+  // (contralateral gait — arm L with leg R). netTickAvatarWalk drives rotation.x.
+  group.userData.rig = {
+    legs: [ { pivot: legL.pivot, knee: legL.knee, phase: 0 },
+            { pivot: legR.pivot, knee: legR.knee, phase: Math.PI } ],
+    arms: [ { pivot: armL.pivot, phase: Math.PI },
+            { pivot: armR.pivot, phase: 0 } ]
+  };
 
   const label = netMakeNameLabel(name, color);
   label.position.y = 2.05;
@@ -558,11 +624,36 @@ function netAvatarBuild(av) {
   av.group = group;
   av.builtSlot = slot;
   av.builtName = name;
+  av.walkPhase = 0; av.walkAmp = 0; // walk-animation state (per avatar)
   // Down/revive (Phase 4): keep refs for the dark-red "down" tint, and re-apply
   // it if this avatar was rebuilt (e.g. new floor) while its player is down.
   av.bodyMat = suitMat;
   av.baseColor = color;
   if (av.down) netSetAvatarDown(av.id, true);
+}
+
+// SIMPLE WALK ANIMATION (cosmetic): swing the arms/legs while the avatar is
+// actually moving on screen, so remote players look alive instead of sliding.
+// dx/dz = this frame's horizontal displacement of the avatar group (from the
+// smoothing lerp). Cheap: a few sin() per avatar, only in co-op. Idle (or down) →
+// the amplitude eases to 0 → limbs settle to neutral (a still standing figure).
+function netTickAvatarWalk(av, dx, dz, dt) {
+  const r = av.group && av.group.userData && av.group.userData.rig;
+  if (!r) return;
+  const step = Math.hypot(dx, dz);
+  const speed = dt > 0 ? step / dt : 0;
+  const moving = !av.down && speed > NET_WALK_MIN_SPEED;
+  av.walkPhase = (av.walkPhase || 0) + step * NET_WALK_CADENCE; // advance by distance → cadence ∝ speed
+  const targetAmp = moving ? 1 : 0;
+  av.walkAmp = (av.walkAmp || 0) + (targetAmp - (av.walkAmp || 0)) * NET_WALK_AMP_EASE; // ease in/out
+  const amp = av.walkAmp, ph = av.walkPhase;
+  for (const L of r.legs) {
+    L.pivot.rotation.x = Math.sin(ph + L.phase) * NET_LEG_SWING * amp;
+    L.knee.rotation.x = (0.5 - 0.5 * Math.cos(ph + L.phase)) * NET_KNEE_BEND * amp; // bend ≥0 on the stride
+  }
+  for (const A of r.arms) {
+    A.pivot.rotation.x = Math.sin(ph + A.phase) * NET_ARM_SWING * amp;
+  }
 }
 
 // Camera-facing name tag, readable at distance: big canvas text with a black

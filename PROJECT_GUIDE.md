@@ -82,6 +82,7 @@ suite (all must stay green):
 | `tools/test_devcheats.js` | `?dev=1` playtest cheats: god toggle + `damagePlayer` no-op, infinite-ammo clip top-up, repeatable give-cash, kill-all (spares the unkillable chaser, host/solo only), the `DEV_MODE` gating, and the `#hudCheats` + named level-select wiring. |
 | `tools/test_audio.js` | Audio pass: mob-vocal concurrency cap (4 idle + 2 event reserve, frees on voice end) via the real `vocalSlot`; every `playMobVocal` type×kind synth branch runs without throwing + routes through `sfxGain` (real `_vNoise`/`_vTone` over a fake Web Audio graph); per-theme ambient beds exist + are rebuilt per floor; the vocal trigger + `mob_vocal` broadcast/handler wiring; balloon-pop + growl improvements. |
 | `tools/test_music.js` | Real-music-file loader: extracts `startFileMusic`/`stopFileMusic` and drives every branch over a fake Audio/Web-Audio graph — present file wired+played+looped through `ambientGain`; missing/error/stall → procedural `onFail`; `.ogg→.mp3` candidate fallthrough; floor-change aborts a stale load; `stopFileMusic` tears down. Plus `updateFloorMusic` wiring + `assets/audio/` exists. |
+| `tools/test_avatar.js` | Co-op humanoid soldier avatars: static `netAvatarBuild` invariants (NO new lights, ONE shared colored no-map Standard suit material + one dark gear material, TWO articulated legs + TWO arms via hip/knee + shoulder/elbow pivot groups, helmet/visor/backpack, the `group.userData.rig` walk stash, slot color + name label kept, the smoothing-loop wiring) + the extracted `netTickAvatarWalk` over a fake rig (moving → swing amp ramps + limbs swing, legs anti-phase, arm⟂own-side-leg contralateral, knee bend ≥ 0, idle → eases to neutral still pose, downed → never swings, determinism). |
 | `tools/test_spawn.js` | Co-op spawn fan-out: extracts the real `SPAWN_FANOUT_OFFSETS`/`spawnOpenCells`/`playerSpawnCellFor` and proves slot 0 → canonical (1,1) (solo unaffected), every slot's cell is open floor (value 1, never wall/pool/furniture) across 400 hazard grids × 5 slots, distinct cells while candidates last + graceful clamp-to-last when the spawn corner is tight, determinism, near-first offset ordering, and the `buildMazeScene` wiring (local `netMySlot()` → cell-centered spawn). |
 | `tools/test_chase.js` | Hotel Chase (floor 17, 'chase' archetype): `generateChase` spawn→exit path always exists + every deck cell reachable (furniture never seals it) + furniture present + no pools + determinism (600 seeds); `chaserNextWaypoint` BFS reaches the player from spawn over 200 seeds (never stuck) with valid single-step waypoints; theme/gate/noStamina/chaser-type/wire-index/unkillable-hit/stamina-override/`netExitGateOpen('reach')` invariants. Prints ASCII maps. |
 
@@ -162,6 +163,13 @@ fn)` registers handlers; `sendToAll`/`sendToHost`/`sendTo` send. `netState` (rol
 solo/host/client, peers). Lobby (host/join/roster/ready/start), the 15Hz `pos` stream +
 remote-avatar smoothing, the host **enemy snapshot** broadcast + client mirror rebuild,
 combat resolution relays, the down/revive system, and all pickup/objective/event syncs.
+**Remote avatars** (`netAvatarBuild`) are procedural-primitive HUMANOID soldier figures
+(head/helmet/visor, vest, backpack, TWO articulated arms + TWO legs as hip/knee +
+shoulder/elbow pivot groups), one shared per-slot-colored no-map Standard material
+(ammoPickupMat-pinned family; the down-tint retargets it) + one dark gear material, NO
+lights. `netTickAvatarWalk` (driven from the smoothing loop's per-frame displacement)
+does the cosmetic sin-driven WALK swing, gated on movement (idle/down = still) — no
+protocol change (purely visual, off the existing `pos` stream).
 `netExitGateOpen()`, `netActivePlayerCount()`, `netAllPlayers()`/`netNearestOf()` (used by
 host AI targeting). **All protocol message types listed in §2.1.**
 
