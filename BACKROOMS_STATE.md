@@ -4,7 +4,7 @@
 BACKROOMS_STATE.md") to resume with full context. UPDATE THIS at the end of every
 session: what changed, what's validated vs unplayed, what's next.
 
-**Last updated:** June 16, 2026
+**Last updated:** June 17, 2026
 
 ---
 
@@ -30,6 +30,26 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **CO-OP SPAWN FAN-OUT (June 17, UNPLAYED) — players no longer spawn stacked:**
+  all players used to build the floor and land on the SAME spawn cell (1,1), piled
+  inside each other. **Fix (no protocol change):** `buildMazeScene` now places the
+  player by SLOT — `playerSpawnCellFor(netMySlot())`. Each machine computes the
+  spawn from its OWN slot + the identical seeded grid, so the ordered open-cell list
+  (and thus every slot's cell) matches everywhere with NO host authority / message.
+  The corner spawn (1,1) is walls at x=0/z=0, so candidates fan out into the open
+  +x/+z quadrant (`SPAWN_FANOUT_OFFSETS`, ordered by ring distance → players land as
+  close together as possible while DISTINCT). Only value-1 dry open floor qualifies
+  (never wall/pool/furniture); if the maze is too tight to give each slot its own
+  cell, higher slots **clamp onto the last open candidate** (never a wall, never a
+  crash). **Solo = slot 0 = the canonical (1,1) cell → unaffected.** Headless:
+  **`tools/test_spawn.js`** (new) extracts the real helpers and proves slot-0-at-(1,1),
+  every cell open-floor across 400 hazard grids × 5 slots, distinct-while-candidates-
+  last + graceful 2-cell clamp, determinism, near-first offset ordering, and the
+  buildMazeScene wiring. Full suite green (20 tools); node --check clean.
+  - **Needs a co-op session — playtest gate:** host + 2-4 clients enter a floor →
+    confirm players spawn BESIDE each other (≈1 cell apart) on open floor, not
+    stacked, and not clipped into a wall; check a tight-spawn floor (e.g. a maze
+    'rooms' floor) still places everyone on valid floor. Solo spawn unchanged.
 - **PRE-CO-OP HOST-HEALTH CHECK — PASSED (June 16):** the old host-lag bug
   (CELL load-order exception loop) is still gone AND no recent batch introduced a
   new host-only problem. (1) `test_loadorder` green — no pre-main file reads a

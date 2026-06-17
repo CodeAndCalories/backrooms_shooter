@@ -2850,6 +2850,49 @@ function disposeMobVisual(mesh) {
 }
 
 /* ═══════════════════════════════════════════
+   CO-OP SPAWN FAN-OUT
+   ═══════════════════════════════════════════
+   In co-op every player builds the (identical, seeded) floor independently and
+   used to land on the SAME spawn cell (1,1) → everyone stacked inside each other.
+   Spread them out by SLOT: each machine computes this from its own grid + own
+   slot, no protocol/host-authority needed (the grid is identical everywhere, so
+   the ordered open-cell list — and thus each slot's cell — is the same on every
+   machine). Solo is slot 0 and always gets the canonical spawn cell, so it's
+   unaffected.
+
+   The spawn corner (1,1) is a corner (walls at x=0 / z=0), so candidates fan out
+   into the open +x/+z quadrant, ordered by ring distance so players land as close
+   together as possible while still on DISTINCT open floor. Only value-1 (dry open
+   floor) cells qualify — never a wall (0), pool basin (2), or furniture (3). If
+   the maze is too tight near spawn to give every slot its own cell, higher slots
+   CLAMP onto the last open candidate (acceptable per "clamp to walkable cells");
+   the base spawn cell is always valid (generators force mazeGrid[1][1] = 1). */
+const SPAWN_FANOUT_OFFSETS = [
+  [0, 0],                                              // ring 0 — host/solo spawn
+  [1, 0], [0, 1], [1, 1],                              // ring 1
+  [2, 0], [0, 2], [2, 1], [1, 2], [2, 2],              // ring 2
+  [3, 0], [0, 3], [3, 1], [1, 3], [3, 2], [2, 3], [3, 3] // ring 3
+];
+// Ordered list of walkable spawn candidates near the (1,1) corner.
+function spawnOpenCells() {
+  const baseX = 1, baseY = 1;
+  const open = [];
+  for (const [dx, dy] of SPAWN_FANOUT_OFFSETS) {
+    const cx = baseX + dx, cy = baseY + dy;
+    const row = mazeGrid[cy];
+    if (row && row[cx] === 1) open.push([cx, cy]);
+  }
+  if (open.length === 0) open.push([baseX, baseY]); // grid degenerate — fall back to spawn
+  return open;
+}
+// The [cellX, cellY] this player slot spawns on. Pure function of the grid + slot.
+function playerSpawnCellFor(slot) {
+  const open = spawnOpenCells();
+  const idx = Math.max(0, Math.min(slot | 0, open.length - 1)); // clamp to last open
+  return open[idx];
+}
+
+/* ═══════════════════════════════════════════
    BUILD SCENE
    ═══════════════════════════════════════════ */
 function buildMazeScene() {
@@ -3151,8 +3194,12 @@ function buildMazeScene() {
   // Consumable pickups (almond water / bandages) — seeded, 0 world-rng draws.
   spawnConsumables(theme);
 
-  // Place player
-  player.pos.set(1 * CELL + CELL / 2, 1.6, 1 * CELL + CELL / 2);
+  // Place player. CO-OP: fan players out by slot so they don't spawn stacked
+  // inside each other (solo = slot 0 = the canonical (1,1) cell, unaffected).
+  // Each machine computes its own slot's cell from the identical seeded grid.
+  const mySlot = (typeof netMySlot === 'function') ? netMySlot() : 0;
+  const [scx, scy] = playerSpawnCellFor(mySlot);
+  player.pos.set(scx * CELL + CELL / 2, 1.6, scy * CELL + CELL / 2);
   player.vel.set(0, 0, 0);
   player.onGround = true;
 
