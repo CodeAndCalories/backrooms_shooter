@@ -803,6 +803,58 @@ function ambCrackle() { // lobby: fluorescent flicker tick
   const g = audioCtx.createGain(); g.gain.value = 0.03;
   src.connect(bp); bp.connect(g); g.connect(ambientGain); src.start(t);
 }
+function ambWind() { // suburbs / greenhouse: a swelling filtered-noise gust
+  const t = audioCtx.currentTime, sr = audioCtx.sampleRate, dur = 2.0 + Math.random() * 2.0;
+  const len = Math.floor(sr * dur), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 480 + Math.random() * 400; bp.Q.value = 0.6;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.03, t + dur * 0.4);    // swell in
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);   // ...and away
+  src.connect(bp); bp.connect(g); g.connect(ambientGain); src.start(t);
+}
+function ambCreak() { // wood / structural creak (suburbs, last door)
+  const t = audioCtx.currentTime, dur = 0.6 + Math.random() * 0.6;
+  const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+  const base = 120 + Math.random() * 120;
+  o.frequency.setValueAtTime(base, t); o.frequency.linearRampToValueAtTime(base * (0.7 + Math.random() * 0.5), t + dur);
+  const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = base * 2; bp.Q.value = 6;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.02, t + 0.08); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  const lfo = audioCtx.createOscillator(); lfo.frequency.value = 18 + Math.random() * 14; // tremor → "groan"
+  const lfoG = audioCtx.createGain(); lfoG.gain.value = 8; lfo.connect(lfoG); lfoG.connect(o.detune); lfo.start(t); lfo.stop(t + dur);
+  o.connect(bp); bp.connect(g); g.connect(ambientGain); o.start(t); o.stop(t + dur + 0.02);
+}
+function ambWhisper() { // faint, far, disembodied whisper (archive, lights out)
+  const t = audioCtx.currentTime, sr = audioCtx.sampleRate, dur = 0.7 + Math.random() * 0.5;
+  const len = Math.floor(sr * dur), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) { const tt = i / sr; d[i] = (Math.random() * 2 - 1) * Math.sin(Math.PI * tt / dur); } // swell window
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1500 + Math.random() * 600; bp.Q.value = 4;
+  const g = audioCtx.createGain(); g.gain.value = 0.018;
+  const delay = audioCtx.createDelay(); delay.delayTime.value = 0.18; const fb = audioCtx.createGain(); fb.gain.value = 0.3;
+  delay.connect(fb); fb.connect(delay); // a little tail so it feels distant
+  src.connect(bp); bp.connect(g); g.connect(ambientGain); g.connect(delay); delay.connect(ambientGain); src.start(t);
+}
+function ambRustle() { // paper / leaves crinkle (archive, greenhouse)
+  const t = audioCtx.currentTime, sr = audioCtx.sampleRate, dur = 0.25 + Math.random() * 0.25;
+  const len = Math.floor(sr * dur), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() < 0.35 ? (Math.random() * 2 - 1) : 0) * Math.exp(-i / (sr * 0.12)); // sparse → rustling
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const hp = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2500;
+  const g = audioCtx.createGain(); g.gain.value = 0.03;
+  src.connect(hp); hp.connect(g); g.connect(ambientGain); src.start(t);
+}
+function ambThud() { // distant muffled low impact / settling (habitable, bus, lights out)
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); o.type = 'sine';
+  o.frequency.setValueAtTime(80 + Math.random() * 40, t); o.frequency.exponentialRampToValueAtTime(28, t + 0.25);
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+  const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 200;
+  o.connect(lp); lp.connect(g); g.connect(ambientGain); o.start(t); o.stop(t + 0.4);
+}
 
 function startAmbient() {
   if (!audioCtx) return;
@@ -880,7 +932,48 @@ function startAmbient() {
   } else if (theme.id === 0) {        // Lobby: classic fluorescent buzz + flicker crackle
     startHum(0.02, true);
     loop(5000, 0.5, ambCrackle);
-  } else {                            // GENERIC quiet room-tone hum
+  } else if (theme.id === 1) {        // Habitable Zone: lived-in liminal — soft hum + distant settling
+    drone(48, 'sine', 0.018, 110);
+    noiseDrone(0.006, 'lowpass', 260);
+    loop(8000, 0.5, ambThud);
+  } else if (theme.id === 7) {        // The Suburbs: wind (swelling) + faint house creaks
+    const windG = noiseDrone(0.012, 'lowpass', 600);
+    const lfo = audioCtx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.15 + Math.random() * 0.1;
+    const lfoAmt = audioCtx.createGain(); lfoAmt.gain.value = 0.008; lfo.connect(lfoAmt); lfoAmt.connect(windG.gain); lfo.start(); extra.oscs.push(lfo);
+    loop(6000, 0.55, ambWind);
+    loop(11000, 0.4, ambCreak);
+  } else if (theme.id === 8) {        // The Crypt: low cavernous drone + distant drips + stone shifts
+    drone(30, 'sine', 0.05, 80);
+    drone(46, 'sawtooth', 0.012, 120);
+    loop(2600, 0.7, () => ambDrip(true));   // slow, low, echoing
+    loop(9000, 0.45, ambGroan);             // groan reads as grinding stone
+  } else if (theme.id === 11) {       // Greenhouse: insect drone + dripping + leaf rustle
+    drone(70, 'sine', 0.014, 150);                  // humid low hum
+    noiseDrone(0.008, 'bandpass', 5000, 8);         // high insect shimmer
+    loop(3500, 0.6, () => ambDrip(false));          // condensation drips (brighter)
+    loop(6000, 0.55, ambRustle);
+  } else if (theme.id === 12) {       // The Archive: HVAC + paper rustle + faint whispers
+    noiseDrone(0.013, 'bandpass', 500, 0.7);
+    drone(60, 'sawtooth', 0.01, 180);
+    loop(5000, 0.55, ambRustle);
+    loop(9000, 0.4, ambWhisper);
+  } else if (theme.id === 15) {       // The Endless Bus: diesel engine drone + road hum
+    drone(70, 'sawtooth', 0.028, 160);
+    drone(35, 'sine', 0.04, 90);                    // sub rumble
+    noiseDrone(0.02, 'lowpass', 300);               // tire/road hiss
+    loop(5000, 0.4, ambThud);                       // occasional bump/pothole
+  } else if (theme.id === 18) {       // Lights Out: oppressive sub-bass VOID + sparse dread
+    drone(24, 'sine', 0.06, 60);                    // deep void tone (felt more than heard)
+    drone(31, 'sine', 0.03, 70);                    // close beat → oppressive throb
+    noiseDrone(0.004, 'lowpass', 120);
+    loop(11000, 0.5, ambWhisper);                   // sparse, unidentifiable...
+    loop(15000, 0.4, ambThud);                      // ...silence broken by occasional dread
+  } else if (theme.id === 19) {       // The Last Door: heavy final-boss dread
+    drone(28, 'sine', 0.05, 70);
+    drone(41, 'sawtooth', 0.02, 110);
+    loop(8000, 0.5, ambGroan);
+    loop(13000, 0.4, ambCreak);
+  } else {                            // GENERIC quiet room-tone hum (boss floors 4/9/14, etc.)
     startHum(0.014, false);
   }
 }
@@ -1328,6 +1421,16 @@ function stopFileMusic() {
   fileMusic = null;
 }
 
+// Stop EVERY floor-audio source — the file track + all procedural music/beds. Used
+// on game-over / quit-to-menu so nothing bleeds into those screens (a fresh floor
+// entry already stops everything inside updateFloorMusic before starting the next).
+function stopAllFloorAudio() {
+  stopFileMusic();
+  stopLevelFunMusic();
+  stopHotelChaseAmbience();
+  stopAmbient();
+}
+
 // The procedural music starter for the CURRENT floor (null = floor has no music).
 // Used both as the default track and as the file-load fallback.
 function proceduralMusicStarterFor() {
@@ -1354,14 +1457,20 @@ function updateFloorMusic() {
   const onStart = () => { if (typeof showMusicCredit === 'function') showMusicCredit(theme); };
 
   if (theme.musicFile) {
+    // Two-or-more candidates → pick a RANDOM one to play (variety, e.g. Level Fun's
+    // two Suno takes); the rest stay as load fallbacks. A single path is used as-is.
+    // Per-machine choice — co-op players may hear different takes, like the procedural
+    // ambience (music isn't synced state).
+    let mf = theme.musicFile;
+    if (Array.isArray(mf) && mf.length > 1) mf = mf.slice().sort(() => Math.random() - 0.5);
     if (theme.musicLayer && startProcedural) {
       // LAYER: the procedural bed plays UNDER the file (Hotel Chase = alarm +
       // elevator + the music track together). Bed is already up → no fallback needed.
       startProcedural();
-      startFileMusic(theme.musicFile, null, onStart);
+      startFileMusic(mf, null, onStart);
     } else {
       // REPLACE: the file IS the track; fall back to the procedural track if missing.
-      startFileMusic(theme.musicFile, () => { if (startProcedural) startProcedural(); }, onStart);
+      startFileMusic(mf, () => { if (startProcedural) startProcedural(); }, onStart);
     }
   } else if (startProcedural) {
     startProcedural();

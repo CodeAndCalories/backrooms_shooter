@@ -210,9 +210,10 @@ const LEVEL_THEMES = [
     // STAT VARIANT: numerous-but-weak — the party swells, each guest is soft.
     mobs: { types: ['partygoer'], weights: [1], danger: ['partygoer'],
             speedMult: 1.0, hpMult: 0.7, countMult: 1.5, waveBase: 4, waveCap: 12 },
-    // REAL MUSIC FILE (Suno Pro). REPLACES the procedural Level Fun music when present
-    // (no musicLayer); falls back to the procedural music box if the file is missing.
-    musicFile: 'assets/audio/level_fun.ogg',
+    // REAL MUSIC FILE (Suno Pro, .mp3). Two takes exist → a random one plays each
+    // visit (the other is the load fallback). REPLACES the procedural music box (no
+    // musicLayer); falls back to procedural if BOTH files are missing.
+    musicFile: ['assets/audio/level_fun_1.mp3', 'assets/audio/level_fun_2.mp3'],
     musicCredit: 'Level Fun · Suno'
   },
   {
@@ -720,6 +721,12 @@ function handleDevCheatKey(code) {
    level-select can gate replays. Floor 0 (Level 1) is always unlocked; floor i
    unlocks once floor i-1 has been beaten. Wholly separate from PART 1's dev tools.
    ═══════════════════════════════════════════ */
+// ⚠ PLAYTEST OVERRIDE (TEMPORARY): when true, EVERY floor is unlocked + clickable
+// in the PLAYER level-select (the normal menu, no ?dev=1 needed) so we can jump to
+// any floor on the live build. Flip back to `false` after the playtest to restore
+// the normal unlock-progression gating. (localStorage progress is still recorded
+// underneath — only the GATE check is bypassed.)
+const ALL_UNLOCKED = true;
 const PROGRESS_KEY = 'backrooms_beaten_floors';
 function loadBeatenFloors() {
   try {
@@ -733,8 +740,9 @@ function markFloorBeaten(i) {
   beatenFloors.add(i);
   try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...beatenFloors])); } catch (e) {}
 }
-// Floor 0 is always playable; any other floor needs the previous one beaten.
-function isFloorUnlocked(i) { return i === 0 || beatenFloors.has(i - 1); }
+// Floor 0 is always playable; any other floor needs the previous one beaten —
+// UNLESS the ALL_UNLOCKED playtest override is on (then every floor is unlocked).
+function isFloorUnlocked(i) { return ALL_UNLOCKED || i === 0 || beatenFloors.has(i - 1); }
 let keys = {}, mouseDown = false, rightMouseDown = false;
 let mazeWalls = [], mazeGrid = [];
 // 'pools' archetype state (see generatePools/buildPoolsGeometry). mazeGrid cell
@@ -5452,7 +5460,7 @@ function resumeGame() {
 
 function gameOver() {
   gameState = 'gameover';
-  stopLevelFunMusic(); // don't let the Level Fun loop bleed into the game-over screen
+  stopAllFloorAudio(); // kill the music file + every procedural bed (no bleed into the game-over screen)
   document.getElementById('hud').style.display = 'none';
   showMenuOverlay('gameOverMenu'); // hides start/pause/victory + closes the shop
   document.getElementById('bossHpContainer').style.opacity = '0';
@@ -5477,10 +5485,7 @@ function showVictory() {
   if (gameState === 'won') return; // idempotent (boss death + a relayed 'run_won' could race)
   gameState = 'won';
   // Silence the floor audio for a clean ending.
-  if (typeof stopLevelFunMusic === 'function') stopLevelFunMusic();
-  if (typeof stopHotelChaseAmbience === 'function') stopHotelChaseAmbience();
-  if (typeof stopFileMusic === 'function') stopFileMusic();
-  if (typeof stopAmbient === 'function') stopAmbient();
+  if (typeof stopAllFloorAudio === 'function') stopAllFloorAudio();
   if (typeof playVictorySting === 'function') playVictorySting();
   markFloorBeaten(currentFloor); // the capstone counts as cleared (local progression)
 
@@ -5498,7 +5503,7 @@ function showVictory() {
 
 function quitToMenu() {
   gameState = 'menu';
-  stopLevelFunMusic(); // stop Level Fun loop when bailing to the menu
+  stopAllFloorAudio(); // kill the music file + every procedural bed when bailing to the menu
   document.getElementById('hud').style.display = 'none';
   buildPlayerLevelSelect(); // PART 2: refresh unlocks earned this run
   showMenuOverlay('startMenu'); // the ONLY visible overlay now (hides pause/gameover/victory)

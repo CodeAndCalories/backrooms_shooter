@@ -172,12 +172,14 @@ console.log('8. wiring');
 {
   if (!/function stopFileMusic\(/.test(audioSrc) || !/function startFileMusic\(/.test(audioSrc)) fail('loader fns missing from audio.js'); else ok('startFileMusic/stopFileMusic present');
   const ufm = extractFn(audioSrc, 'function updateFloorMusic');
-  if (!/startFileMusic\(theme\.musicFile/.test(ufm)) fail('updateFloorMusic does not use theme.musicFile'); else ok('updateFloorMusic uses theme.musicFile');
+  if (!/theme\.musicFile/.test(ufm)) fail('updateFloorMusic does not use theme.musicFile'); else ok('updateFloorMusic uses theme.musicFile');
   if (!/startProcedural/.test(ufm)) fail('updateFloorMusic lacks a procedural fallback'); else ok('procedural fallback wired into updateFloorMusic');
+  // multi-candidate → random pick (the played file is `mf`, a randomized copy)
+  if (!/Array\.isArray\(mf\)[\s\S]{0,80}sort\(/.test(ufm)) fail('no random pick among multiple candidates'); else ok('random pick among multiple files (Level Fun two takes)');
   // LAYER vs REPLACE: musicLayer starts the procedural bed THEN the file (no fallback);
   // otherwise the file replaces it with a procedural fallback.
-  if (!/theme\.musicLayer/.test(ufm) || !/startFileMusic\(theme\.musicFile, null/.test(ufm)) fail('musicLayer (layered) path not wired'); else ok('musicLayer → procedural bed + file together (Hotel Chase)');
-  if (!/startFileMusic\(theme\.musicFile, \(\) => \{ if \(startProcedural\) startProcedural\(\); \}/.test(ufm)) fail('replace path (file + procedural fallback) not wired'); else ok('default → file REPLACES procedural (fallback if missing)');
+  if (!/theme\.musicLayer/.test(ufm) || !/startFileMusic\(mf, null/.test(ufm)) fail('musicLayer (layered) path not wired'); else ok('musicLayer → procedural bed + file together (Hotel Chase)');
+  if (!/startFileMusic\(mf, \(\) => \{ if \(startProcedural\) startProcedural\(\); \}/.test(ufm)) fail('replace path (file + procedural fallback) not wired'); else ok('default → file REPLACES procedural (fallback if missing)');
   // credit hook fires from onStart (real playback only)
   if (!/onStart[\s\S]{0,80}showMusicCredit/.test(ufm)) fail('credit not driven by onStart'); else ok('credit shown via onStart (only on real playback)');
 
@@ -187,9 +189,9 @@ console.log('8. wiring');
   if (!/musicLayer:\s*true/.test(t17)) fail('Hotel Chase not layered'); else ok('Hotel Chase musicLayer:true (music OVER the alarm)');
   if (!/musicCredit:/.test(t17)) fail('Hotel Chase has no musicCredit'); else ok('Hotel Chase has a credit');
 
-  // theme 5 (Level Fun): .ogg, replace, credited
-  const t5 = (mainSrc.match(/id:\s*5,[\s\S]*?mobs:\s*\{[\s\S]*?\}[\s\S]{0,200}?\}/) || [])[0];
-  if (!/musicFile:\s*'assets\/audio\/level_fun\.ogg'/.test(t5)) fail('Level Fun musicFile not assets/audio/level_fun.ogg'); else ok('Level Fun → assets/audio/level_fun.ogg');
+  // theme 5 (Level Fun): two .mp3 takes, replace, credited
+  const t5 = (mainSrc.match(/id:\s*5,[\s\S]*?mobs:\s*\{[\s\S]*?\}[\s\S]{0,300}?\}/) || [])[0];
+  if (!/musicFile:\s*\[[^\]]*level_fun_1\.mp3[^\]]*level_fun_2\.mp3[^\]]*\]/.test(t5)) fail('Level Fun musicFile not the two .mp3 takes'); else ok('Level Fun → [level_fun_1.mp3, level_fun_2.mp3] (.mp3, two takes)');
   if (/musicLayer:/.test(t5)) fail('Level Fun should REPLACE (no musicLayer)'); else ok('Level Fun replaces procedural (no musicLayer)');
   if (!/musicCredit:/.test(t5)) fail('Level Fun has no musicCredit'); else ok('Level Fun has a credit');
 
@@ -202,6 +204,13 @@ console.log('8. wiring');
 
   // startFileMusic exposes the onStart param
   if (!/function startFileMusic\(paths, onFail, onStart\)/.test(audioSrc)) fail('startFileMusic missing the onStart param'); else ok('startFileMusic(paths, onFail, onStart)');
+
+  // RESTART STOPS: music (+ all beds) switched off on game-over / quit-to-menu
+  if (!/function stopAllFloorAudio/.test(audioSrc)) fail('stopAllFloorAudio missing'); else ok('stopAllFloorAudio (stops file + all procedural beds)');
+  const go = extractFn(mainSrc, 'function gameOver');
+  const q2m = extractFn(mainSrc, 'function quitToMenu');
+  if (!/stopAllFloorAudio\(\)/.test(go)) fail('gameOver does not stop all floor audio'); else ok('game-over → music off (no bleed)');
+  if (!/stopAllFloorAudio\(\)/.test(q2m)) fail('quitToMenu does not stop all floor audio'); else ok('quit-to-menu → music off');
 
   // the drop folder exists in the repo (so Vercel serves it)
   if (!fs.existsSync(path.join(__dirname, '..', 'assets', 'audio', 'README.md'))) fail('assets/audio/ folder (README) missing'); else ok('assets/audio/ exists in the repo');

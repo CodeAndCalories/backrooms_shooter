@@ -30,6 +30,64 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **PRE-CO-OP HOST-HEALTH CHECK — PASSED (June 16):** the old host-lag bug
+  (CELL load-order exception loop) is still gone AND no recent batch introduced a
+  new host-only problem. (1) `test_loadorder` green — no pre-main file reads a
+  later-file global at top level (chaser/scanner/audio/finale code all clean). (2)
+  Static audit: chaser blob anim is per-frame but cheap on host AND client; the
+  `mob_vocal`/`scan_fx`/`run_won` broadcasts are event-driven (not per-frame-per-mob),
+  boss scaling is once-at-spawn. (3) **Live repro harness `tools/diag/repro_floors.js`
+  ran 3 headless Chromes over the REAL PeerJS broker** on normal floor 0, Hotel Chase
+  (17, chaser), Lights Out (18, scanner), AND a DUO on floor 17:
+  **ZERO uncaught exceptions in every phase**; **PROG stable 13→13 everywhere**;
+  **host fps ≈ client fps** (2.9 vs 2.7 — the old bug was host ~0 / client normal +
+  1100 exceptions, so parity = healthy). updateEnemies 0.11ms/frame on the chaser
+  floor (blob anim incl.), updateScanDots 0.027ms with live dots, netUpdate 0.035ms.
+  The low absolute fps (~3) is the headless SwiftShader software renderer (equal
+  across solo too), not a game issue. The duo also re-confirmed **co-op floor
+  propagation** (host picked 17 → client loaded 17). Only console noise: 2 benign
+  resource-404s/page (favicon-class) + the not-yet-present audio files 404→graceful
+  procedural fallback.
+- **MUSIC FILE FIXES (June 16):** Level Fun `musicFile` now points at the actual
+  files **`['assets/audio/level_fun_1.mp3','assets/audio/level_fun_2.mp3']`** (.mp3,
+  two Suno takes) — `updateFloorMusic` picks one at RANDOM per visit (the other is
+  the load fallback; per-machine, like the procedural ambience). **Restart now
+  switches the music off:** new `stopAllFloorAudio()` (file track + every procedural
+  bed) is called from `gameOver` + `quitToMenu` (previously only the Level Fun loop
+  was stopped, so the file track / ambient bed bled into those screens). **Confirmed
+  in the live harness:** missing files 404 → graceful procedural fallback, no crash;
+  once the real files are dropped into `assets/audio/` the loader streams + loops them
+  (verified loader path). NOTE: requested path was `level_fun.mp3` but the real files
+  are `_1`/`_2`, so both are wired (a single `level_fun.mp3` would 404→procedural).
+  `test_music` extended (random-pick, two-take path, restart-stops). Full suite green.
+- **8 NEW PER-THEME AMBIENT BEDS + ALL-UNLOCKED PLAYTEST FLAG (June 16, UNPLAYED):**
+  - **Ambient beds** (audio.js `startAmbient`, through `ambientGain`, started/stopped
+    per floor, subtle/cheap/capped) for the floors that were on the generic hum:
+    **Habitable Zone** (soft low hum + distant settling thuds) · **The Suburbs**
+    (swelling wind + faint house creaks) · **The Crypt** (deep cavernous drone +
+    slow echoing drips + stone-grind groans) · **Greenhouse** (humid hum + high
+    insect shimmer + condensation drips + leaf rustle) · **The Archive** (HVAC bed +
+    paper rustle + faint disembodied whispers) · **Endless Bus** (diesel engine drone
+    + sub rumble + tire/road hiss + occasional bump) · **Lights Out** (oppressive
+    24/31Hz sub-bass VOID with a slow beat + sparse whispers/thuds — silence broken
+    by dread) · **The Last Door** (heavy 28/41Hz dread drone + groans + structural
+    creaks). 5 new one-shot textures (`ambWind`/`ambCreak`/`ambWhisper`/`ambRustle`/
+    `ambThud`); reuse `ambDrip`/`ambGroan`. Gains 0.004-0.06, loop intervals
+    2.6-15s @ ≤0.7 prob, all torn down via `stopAmbient`. Audio-only (no lights).
+    Boss floors 4/9/14 keep the generic hum (have the boss roar). Headless: `test_audio`
+    extended (all 13 bed ids + the new helpers + no-THREE invariant).
+  - **⚠ ALL_UNLOCKED playtest flag (main.js, top of PART 2 progression):**
+    `const ALL_UNLOCKED = true;` makes `isFloorUnlocked()` return true for EVERY floor,
+    so all 20 are clickable in the PLAYER level-select (normal menu, NO `?dev=1`).
+    localStorage progress is still recorded underneath — only the gate check is
+    bypassed. **REVERT after the playtest: flip `ALL_UNLOCKED` to `false`.**
+  - **CO-OP confirmed:** the host's chosen floor already propagates — host picks (now
+    any) floor → `startGame` sets `currentFloor` → `netOnHostStart` broadcasts
+    `game_start {floor, seed}` → the client's `netTryStart` sets `selectedStartFloor =
+    d.floor` and calls `startGame` (same seed via `seedFloor`). The client NEVER checks
+    `isFloorUnlocked` on this path, so host-picks-14 → everyone loads 14 regardless of
+    the flag. (test_finale: ALL_UNLOCKED unlocks all; flipping to false restores gating.)
+  - Full suite green (19 tools); node --check clean.
 - **REAL MUSIC FILES wired for 2 floors (June 16, UNPLAYED) — Suno Pro,
   commercial-licensed; the procedural loader from the earlier batch now drives them:**
   - **Hotel Chase (floor 18):** `musicFile: 'assets/audio/hotel_chase.mp3'` (single

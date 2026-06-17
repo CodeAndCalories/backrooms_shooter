@@ -116,5 +116,26 @@ console.log('5. level-select picks up floors 19 + 20 automatically');
   if (!t19 || !t19.isFinale) fail('getTheme(19) does not resolve to the finale'); else ok('getTheme(19) → The Last Door (finale)');
 }
 
+/* ── 6. ALL_UNLOCKED playtest override ── */
+console.log('6. ALL_UNLOCKED player-select override');
+{
+  // run the REAL isFloorUnlocked under both flag states (beatenFloors empty).
+  const mk = (flag) => new Function(`
+    const ALL_UNLOCKED = ${flag};
+    const beatenFloors = new Set();
+    ${extract(mainSrc, 'function isFloorUnlocked')}
+    return isFloorUnlocked;
+  `)();
+  const onAll = mk(true), gated = mk(false);
+  // flag ON: every floor 0..19 unlocked (no progress needed)
+  let allOk = true; for (let i = 0; i < 20; i++) if (!onAll(i)) allOk = false;
+  if (!allOk) fail('ALL_UNLOCKED=true did not unlock every floor'); else ok('ALL_UNLOCKED=true → all 20 floors clickable in the player menu');
+  // flag OFF (after the playtest): gating restored — only floor 0 with no progress
+  if (gated(0) && !gated(1) && !gated(14)) ok('ALL_UNLOCKED=false → progression gating restored (only floor 0 with no progress)');
+  else fail('flipping ALL_UNLOCKED=false should restore unlock gating');
+  // the flag actually exists in source, defaulting ON for the playtest
+  if (!/const ALL_UNLOCKED = true;/.test(mainSrc)) fail('ALL_UNLOCKED flag not present/ON in source'); else ok('ALL_UNLOCKED flag present (=true for the playtest; flip to false to revert)');
+}
+
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL FINALE CHECKS PASSED');
 process.exit(fails ? 1 : 0);

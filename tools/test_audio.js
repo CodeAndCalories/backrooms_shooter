@@ -119,13 +119,27 @@ console.log('3. per-theme ambient beds (startAmbient)');
   const sa = extractFn(audioSrc, 'function startAmbient');
   const beds = [
     ['Lobby buzz (id 0)', /theme\.id === 0/],
+    ['Habitable Zone (id 1)', /theme\.id === 1/],
     ['Pipe Dreams clanks (id 2)', /theme\.id === 2/],
     ['Electrical hum+zap (id 6)', /theme\.id === 6/],
+    ['The Suburbs wind (id 7)', /theme\.id === 7/],
+    ['The Crypt drips+drone (id 8)', /theme\.id === 8/],
     ['Hospital air+beeps (id 10)', /theme\.id === 10/],
+    ['Greenhouse insects (id 11)', /theme\.id === 11/],
+    ['The Archive whispers (id 12)', /theme\.id === 12/],
     ['Freezer rumble+groan (id 13)', /theme\.id === 13/],
+    ['Endless Bus engine (id 15)', /theme\.id === 15/],
+    ['Lights Out void (id 18)', /theme\.id === 18/],
+    ['The Last Door dread (id 19)', /theme\.id === 19/],
     ['Pools water bed', /theme\.water/]
   ];
   for (const [label, re] of beds) { if (!re.test(sa)) fail(`ambient bed missing: ${label}`); else ok(`bed: ${label}`); }
+  // the new one-shot textures the beds rely on
+  for (const fn of ['ambWind', 'ambCreak', 'ambWhisper', 'ambRustle', 'ambThud']) {
+    if (!new RegExp('function ' + fn + '\\(').test(audioSrc)) fail(`one-shot ${fn} missing`); else ok(`one-shot: ${fn}`);
+  }
+  // beds add NO lights (ambient is audio-only) and are torn down per floor
+  if (/new THREE\./.test(sa)) fail('startAmbient touches THREE (should be audio-only)'); else ok('beds are audio-only (no THREE/lights)');
   if (!/theme\.id === 5 \|\| theme\.archetype === 'chase'/.test(sa)) fail('startAmbient should skip Level Fun + chase (dedicated audio)'); else ok('skips floors with dedicated audio (Level Fun / chase)');
   if (!/else \{\s*\/\/ GENERIC|GENERIC quiet/.test(sa) && !/startHum\(0\.014/.test(sa)) fail('no generic room-tone fallback'); else ok('generic quiet room-tone fallback for other floors');
   if (!/function stopAmbient/.test(audioSrc)) fail('stopAmbient missing (teardown)'); else ok('stopAmbient teardown present');
