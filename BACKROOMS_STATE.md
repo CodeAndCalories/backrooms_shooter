@@ -30,6 +30,53 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 18 HOTEL CHASE — PLAYTEST POLISH PASS (June 17, UNPLAYED) — gate clarity,
+  damage-timing bug, siren lighting, path readability. No protocol/mechanic change
+  (auto-run/steering/wall untouched); intensity-only lights, seeded, co-op safe.**
+  - **GATE CLARITY:** `buildChaseGate` rebuilt from a plain red shutter into an obvious
+    industrial **roll-up shutter** — dark **steel frame** (side posts + lintel, color
+    distinct from the maroon walls), corrugated slats with gaps, a lock housing + handle,
+    and a **pulsing glowing LOCKED lamp** that recolors **red→green** as the hold fills.
+    Plus a **world-space "HOLD [E]" prompt sprite** floating at the gate (billboard,
+    Sprite+map pinned family), pulsing; removed on open. The lamp/prompt pulse is driven
+    in `updateChaseGate`. The top-bar HUD prompt stays too. No lights.
+  - **BUG FIXED — damage during gate-hold:** the chaser could threaten before the run
+    truly began (esp. co-op: a player still at the gate when another opened it). Added
+    **`CHASE_RUN_GRACE` (1.8s)** — when the gate opens the wall is **FROZEN and CANNOT
+    catch** for that beat (a guaranteed "GO!" head start). Catch is also still hard-gated
+    on `runStarted` (no wall at all during the hold). `test_autorun` proves: overlapping
+    the wall during grace does NOT catch + the wall is frozen, then catches after.
+  - **SIREN LIGHTING:** ceiling lights now **pulse like an alarm** — a slow
+    dim→bright→dim cycle (`CHASE_SIREN_PERIOD` 1.5s, trough 0.42→peak 1.18 of base; NOT a
+    seizure strobe) that **travels down the corridor** (phase = position along the track →
+    a wave sweeping toward the exit = both atmosphere AND a directional cue). Intensity-
+    only on existing lights (new `siren`/`phase` fields on `flickerTimers`, driven in
+    `updateLights`); **zero new lights, no shader churn**. Scares are skipped on auto-run
+    floors so LIGHTS-OUT can't fight the siren.
+  - **PATH READABILITY:** light placement is now **corridor-aware** on auto-run floors —
+    instead of the generic grid sample (dark stretches), lights **walk `chasePath`** every
+    ~N cells forming a **trail that bends at the turns** (follow-the-lights). **Turn cells
+    + the exit get brighter beacons** (`CHASE_TURN_LIGHT_MULT`), base brightness lifted
+    (`CHASE_LIGHT_MULT` 2.2), and theme darkness eased (`darknessLevel` 0.5→0.35,
+    `ambientIntensity` 0.05→0.11) so the floor isn't uniformly dim. Still ≤ budget (the
+    pad-fill keeps the point-light count fixed at 32).
+  - **OBSTACLES now visible + earlier:** the value-3 barricades got a warm **amber
+    emissive** (self-glow against the red corridor; still no-map Standard → pinned family)
+    + are **chunkier** (taller bases), and density has a **floor** (`CHASE_OBST_MIN` 0.2,
+    obstacles from **lane 1**, lane 0/gate kept clear) so they're not just clustered at
+    the end. `test_chase` proves lane-0-clear + obstacles in lanes 1–3 on 200/200 seeds.
+  - **Knobs added:** `CHASE_RUN_GRACE` 1.8, `CHASE_SIREN_PERIOD` 1.5 / `_MIN` 0.42 /
+    `_MAX` 1.18, `CHASE_LIGHT_MULT` 2.2, `CHASE_TURN_LIGHT_MULT` 1.5, `CHASE_OBST_MIN` 0.2;
+    `CHASE_WALL_GRACE_DIST` 16→8 (the time-grace now provides the head start). All main.js.
+  - Headless: `test_autorun` + `test_chase` extended (run-grace, gate/siren/corridor-light
+    wiring + no-new-lights, obstacle lane-0-clear/early). Full suite green (21 tools);
+    node --check clean; sim_levels 68/68 + 4800/4800.
+  - **Needs a browser/co-op session — playtest gate:** Does the gate now obviously read as
+    an openable shutter (lamp pulse, world prompt, red→green fill)? Zero hits during the
+    hold + the head-start beat (solo AND the co-op still-at-gate case)? Siren pulse feel
+    right (1.5s, not too fast/dim) and the traveling wave help you read the next turn? Is
+    the path clearly lit/followable now, turns telegraphed? Obstacles visible + dodgeable
+    at speed from lane 1? PROG flat across entry (no shader churn from any of this).
 - **FLOOR 18 "HOTEL CHASE" REBUILT → ON-RAILS AUTO-RUN (June 17, UNPLAYED) — the
   serpentine-maze/BFS-pursuit version is GONE; replaced by a Temple-Run-style auto-run.
   Shipped in 4 commits (generator → movement+gate → wall → docs). PROTOCOL ADDITION

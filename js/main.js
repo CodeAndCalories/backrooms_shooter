@@ -490,14 +490,14 @@ const LEVEL_THEMES = [
     floorColor: '#3a1216', floorColor2: '#290c10',
     ceilColor: '#4a1c22',
     fogColor: 0x140204, fogNear: 1, fogFar: 20,
-    lightColor: 0xff2630, lightIntensity: 0.62,   // blaring neon RED corridor lights
-    ambientColor: 0x3a0a0c, ambientIntensity: 0.05,
+    lightColor: 0xff2630, lightIntensity: 0.62,   // blaring neon RED corridor lights (siren-pulsed)
+    ambientColor: 0x3a0a0c, ambientIntensity: 0.11, // lifted so siren troughs stay readable (was 0.05)
     bgColor: 0x0e0203,
     mazeSize: 12,
     floorType: 'carpet',
     decorations: 'hotel',
     enemyTint: 0.5,
-    darknessLevel: 0.5,
+    darknessLevel: 0.35,                          // less dim — it's a fast action floor (was 0.5)
     // OBJECTIVE: REACH the far exit (no kills, no items — surviving the run wins).
     gate: 'reach', goalText: 'RUN — REACH THE EXIT',
     // ON-RAILS AUTO-RUN: forced forward, steer-only; no stamina; caught = OUT for the
@@ -1823,6 +1823,7 @@ const CHASE_RUN_LEN = 15;    // nominal interior cells per lane
 const CHASE_BAND_H = 2;      // rows per (wide) lane → the vertical dodge room
 const CHASE_NARROW_RUNS = 3; // the last N lanes shrink to 1 row (narrower toward the end)
 const CHASE_OBST_MAX = 0.5;  // peak per-eligible-column obstacle probability (last lane)
+const CHASE_OBST_MIN = 0.2;  // baseline so obstacles appear EARLY (from lane 1), not just late
 const CHASE_GATE_COL = 4;    // the start gate sits across this column (players spawn behind it)
 
 function generateCorridorChase(theme) {
@@ -1871,7 +1872,9 @@ function generateCorridorChase(theme) {
   // per column, ≥1 clear column between any two → always a clear column to switch).
   for (let i = 0; i < CHASE_RUNS; i++) {
     if (isNarrow(i)) continue;                       // 1-row lanes: no room for a dodgeable obstacle
-    const density = CHASE_OBST_MAX * (i / (CHASE_RUNS - 1)); // gentle start → dense end
+    if (i === 0) continue;                           // keep the gate lane clear (fair start)
+    // baseline + ramp → obstacles show up from lane 1 and densify toward the end
+    const density = CHASE_OBST_MIN + (CHASE_OBST_MAX - CHASE_OBST_MIN) * (i / (CHASE_RUNS - 1));
     const tr = rTop(i), br = rBot(i);
     let lastObs = -2;
     for (let x = CHASE_GATE_COL + 2; x <= gw - 3; x++) {
@@ -2903,9 +2906,17 @@ function playerSpawnCellFor(slot) {
 let chaseState = null;       // per-floor auto-run/gate/wall runtime (initChaseState); null off-chase
 let chaseRunStarted = false; // mirror flag audio.js reads (defer the alarm until the gate opens)
 const CHASE_GATE_HOLD = 2.0;        // seconds of (any-player) HOLD-E to open the start gate
-const CHASE_WALL_GRACE_DIST = 16;   // wall starts this far BEHIND the gate (head start), world units
+const CHASE_WALL_GRACE_DIST = 8;    // wall starts this far BEHIND the gate (head start), world units
 const CHASE_WALL_SPEED = AUTORUN_SPEED * 0.92; // the wall's fixed track pace (just below auto-run)
 const CHASE_CATCH_GAP = 2.0;        // caught when your track progress is within this of the wall (its reach)
+const CHASE_RUN_GRACE = 1.8;        // post-open head-start: wall FROZEN + cannot catch (zero threat until everyone's moving)
+// SIREN lighting (intensity-only, no new lights): a slow rhythmic dim→bright→dim alarm
+// pulse that travels down the corridor (also the directional cue toward the next turn).
+const CHASE_SIREN_PERIOD = 1.5;     // seconds per dim→bright→dim cycle (slow, NOT a seizure strobe)
+const CHASE_SIREN_MIN = 0.42;       // siren trough as a fraction of a light's base (stays readable)
+const CHASE_SIREN_MAX = 1.18;       // siren peak as a fraction of base (alarm-bright)
+const CHASE_LIGHT_MULT = 2.2;       // corridor light base brightness vs the theme nominal (a well-lit path)
+const CHASE_TURN_LIGHT_MULT = 1.5;  // turn/exit beacons are brighter (telegraph the turn)
 function initChaseState(theme) {
   chaseState = null;
   chaseRunStarted = false;
@@ -2930,28 +2941,75 @@ function initChaseState(theme) {
     gateOpen: false, gateProg: 0, runStarted: false,
     wallS: -CHASE_WALL_GRACE_DIST,  // behind the gate → head start once it opens
     wallTargetS: -CHASE_WALL_GRACE_DIST, // client lerp target (host broadcasts wallS)
-    myIdx: 0, myS: 0, caught: false,
+    myIdx: 0, myS: 0, caught: false, runGrace: 0,
     gateBarriers, gateMesh: null, wallGroup: null
   };
   buildChaseGate(gx);
 }
 
-// Visual start gate — a red shutter across the corridor (pinned no-map Standard, no light).
+// Visual start gate — an industrial ROLL-UP SHUTTER: a STEEL frame (clearly distinct
+// from the maroon corridor walls) + corrugated slats with gaps + a lock housing/handle
+// + a PULSING glowing "LOCKED" lamp that draws the eye and recolors red→green as it
+// opens. Plus a world-space "HOLD [E]" prompt floating at the gate. All materials are
+// no-map Standard / Sprite+map → already-pinned families; NO lights.
 function buildChaseGate(gx) {
   if (!chaseState) return;
   const grp = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0x3a0a0e, emissive: 0xff2630, emissiveIntensity: 0.55, roughness: 0.6, metalness: 0.3 });
   const cx = gx * CELL + CELL / 2;
-  const z0 = 1 * CELL, z1 = (CHASE_BAND_H + 1) * CELL, cz = (z0 + z1) / 2, depth = (z1 - z0) * 0.98;
-  const slatH = WALL_H / 6;
-  const slatGeo = new THREE.BoxGeometry(0.45, slatH * 0.9, depth);
-  for (let k = 0; k < 6; k++) {
-    const bar = new THREE.Mesh(slatGeo, mat);
-    bar.position.set(cx, slatH * (k + 0.5), cz);
-    grp.add(bar);
+  const z0 = 1 * CELL, z1 = (CHASE_BAND_H + 1) * CELL, cz = (z0 + z1) / 2, span = z1 - z0; // ~8u
+  const H = WALL_H;
+
+  const steel = new THREE.MeshStandardMaterial({ color: 0x474d56, roughness: 0.5, metalness: 0.7 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x20242b, roughness: 0.55, metalness: 0.6 });
+  const glowMat = new THREE.MeshStandardMaterial({ color: 0x401015, emissive: 0xff2222, emissiveIntensity: 1.0, roughness: 0.5 });
+
+  // Frame: side posts + top lintel (heavy dark steel border).
+  const postGeo = new THREE.BoxGeometry(0.55, H, 0.5);
+  const pL = new THREE.Mesh(postGeo, frameMat); pL.position.set(cx, H / 2, z0 + 0.25); grp.add(pL);
+  const pR = new THREE.Mesh(postGeo, frameMat); pR.position.set(cx, H / 2, z1 - 0.25); grp.add(pR);
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.5, span + 0.5), frameMat);
+  lintel.position.set(cx, H - 0.25, cz); grp.add(lintel);
+
+  // Corrugated roll-up slats (visible gaps → reads as a shutter you can roll up, not a wall).
+  const slats = 9, gap = 0.07, slatH = (H - 0.5) / slats;
+  const slatGeo = new THREE.BoxGeometry(0.42, slatH - gap, span - 0.25);
+  for (let k = 0; k < slats; k++) {
+    const s = new THREE.Mesh(slatGeo, steel);
+    s.position.set(cx, slatH * (k + 0.5), cz);
+    grp.add(s);
   }
+
+  // Lock housing + handle + the glowing LOCKED lamp (on the side the player approaches, -X).
+  const lockBox = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.7, 0.7), frameMat);
+  lockBox.position.set(cx - 0.1, H * 0.42, cz); grp.add(lockBox);
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.14, 1.3), steel);
+  handle.position.set(cx - 0.3, H * 0.42, cz); grp.add(handle);
+  const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), glowMat);
+  lamp.position.set(cx - 0.34, H * 0.62, cz); grp.add(lamp);
+
   scene.add(grp);
   chaseState.gateMesh = grp;
+  chaseState.gateGlowMat = glowMat; // pulsed + recolored by progress (updateChaseGate)
+
+  // World-space "HOLD [E]" prompt floating just above the gate, facing the player.
+  chaseState.gatePrompt = buildGatePromptSprite(cx, H + 0.7, cz);
+  if (chaseState.gatePrompt) scene.add(chaseState.gatePrompt);
+}
+
+// Billboard text prompt at the gate (Sprite + map + transparent → keepalive-pinned family).
+function buildGatePromptSprite(x, y, z) {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.font = 'bold 70px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 14; ctx.strokeStyle = '#000'; ctx.strokeText('HOLD [E]', 256, 64);
+  ctx.fillStyle = '#ffd23a'; ctx.fillText('HOLD [E]', 256, 64);
+  const tex = new THREE.CanvasTexture(cv);
+  if (typeof texMarkSRGB === 'function') texMarkSRGB(tex);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const sp = new THREE.Sprite(mat);
+  sp.position.set(x, y, z); sp.scale.set(3.4, 0.85, 1); sp.renderOrder = 998;
+  return sp;
 }
 
 function disposeChaseGroup(grp) {
@@ -2968,6 +3026,17 @@ function disposeChaseGroup(grp) {
 // locally. Runs on every machine; no-op off the chase floor or once open.
 function updateChaseGate(dt) {
   if (!chaseState || chaseState.gateOpen) return;
+  // Draw attention to the gate: pulse the LOCKED lamp + the prompt, and recolor the
+  // lamp red(locked)→green(opening) by hold progress (clear "this opens" feedback).
+  const tnow = (typeof clock !== 'undefined' && clock) ? clock.getElapsedTime() : 0;
+  if (chaseState.gateGlowMat) {
+    const pulse = 0.65 + 0.35 * Math.sin(tnow * 5);
+    const p = chaseState.gateProg;
+    chaseState.gateGlowMat.emissiveIntensity = (0.6 + p * 0.6) * pulse;
+    chaseState.gateGlowMat.emissive.setRGB(1 - p, 0.13 + 0.77 * p, 0.13); // red → green
+  }
+  if (chaseState.gatePrompt) chaseState.gatePrompt.material.opacity = 0.7 + 0.3 * Math.sin(tnow * 4);
+
   const holding = !!keys['KeyE'] && gameState === 'playing' && !player.isDown;
   if (netIsClient()) {
     if (holding && typeof netSendChaseHold === 'function') netSendChaseHold();
@@ -2987,8 +3056,15 @@ function openChaseRun() {
   chaseState.gateOpen = true;
   chaseState.runStarted = true;
   chaseState.gateProg = 1;
+  chaseState.runGrace = CHASE_RUN_GRACE; // head-start beat: wall frozen + cannot catch
   chaseRunStarted = true;
   if (chaseState.gateMesh) { disposeChaseGroup(chaseState.gateMesh); chaseState.gateMesh = null; }
+  if (chaseState.gatePrompt) { // the world-space HOLD-E prompt
+    scene.remove(chaseState.gatePrompt);
+    if (chaseState.gatePrompt.material.map) chaseState.gatePrompt.material.map.dispose();
+    chaseState.gatePrompt.material.dispose();
+    chaseState.gatePrompt = null;
+  }
   spawnChaseWall();                                   // §3: the advancing wall of death
   if (typeof updateFloorMusic === 'function') updateFloorMusic(); // alarm/music kick in now
   if (typeof playChaseGateOpen === 'function') playChaseGateOpen();
@@ -3067,10 +3143,19 @@ function spawnChaseWall() {
 function updateChaseWall(dt) {
   const cs = chaseState;
   if (!cs || !cs.runStarted) return;
-  // Wall track position: host/solo advance at the FIXED pace; clients smooth toward
-  // the host's broadcast value (snapshot cs.ws → wallTargetS).
-  if (netIsClient()) cs.wallS += (cs.wallTargetS - cs.wallS) * Math.min(1, dt * 8);
-  else cs.wallS += CHASE_WALL_SPEED * dt;
+  // HEAD-START GRACE: for a beat after the gate opens, the wall is FROZEN and cannot
+  // catch — a guaranteed "GO!" window so nobody can be hit during/right after the
+  // gate-hold (covers the co-op case where a player is still at the gate when another
+  // opens it). Wall still animates + roars (atmosphere); it just can't advance/catch.
+  const inGrace = cs.runGrace > 0;
+  if (inGrace) {
+    cs.runGrace -= dt;
+  } else if (netIsClient()) {
+    // host-authoritative wall position: clients smooth toward the broadcast value
+    cs.wallS += (cs.wallTargetS - cs.wallS) * Math.min(1, dt * 8);
+  } else {
+    cs.wallS += CHASE_WALL_SPEED * dt; // host/solo advance at the FIXED pace
+  }
 
   if (!player.isDown) chaseProjectProgress();
 
@@ -3089,9 +3174,10 @@ function updateChaseWall(dt) {
     if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
   }
 
-  // CAUGHT — your progress fell to the wall's reach. Solo → game over; co-op → DOWN
+  // CAUGHT — your progress fell to the wall's reach. Suppressed during the head-start
+  // grace (zero threat until the run has truly begun). Solo → game over; co-op → DOWN
   // (non-revivable this floor, theme.noRevive → out/spectating; all-down = wipe).
-  if (!player.isDown && !cs.caught && cs.myS - cs.wallS <= CHASE_CATCH_GAP) {
+  if (!inGrace && !player.isDown && !cs.caught && cs.myS - cs.wallS <= CHASE_CATCH_GAP) {
     cs.caught = true;
     playDamage();
     if (netState.role === 'solo') gameOver();
@@ -3259,13 +3345,15 @@ function buildMazeScene() {
   const fixtureMatrices = [];
 
   // Place one ceiling PointLight + record its fixture instance at the given floor cell.
-  const placeCeilingLight = (lx, ly) => {
+  // baseMult scales the base intensity; siren tags it for the chase alarm pulse (with a
+  // phase 0..1 = position along the corridor, so the pulse travels toward the exit).
+  const placeCeilingLight = (lx, ly, baseMult = 1, siren = false, phase = 0) => {
     if (lights.length >= CEILING_LIGHT_BUDGET) return; // hard cap — the budget is FIXED
     const key = ly + ',' + lx;
     if (litCells.has(key)) return;     // avoid stacking two lights on one snapped cell
     litCells.add(key);
 
-    const pl = new THREE.PointLight(theme.lightColor, theme.lightIntensity * darkMult, CELL * 5);
+    const pl = new THREE.PointLight(theme.lightColor, theme.lightIntensity * darkMult * baseMult, CELL * 5);
     pl.position.set(lx * CELL + CELL / 2, WALL_H - 0.2, ly * CELL + CELL / 2);
     scene.add(pl);
     lights.push(pl);
@@ -3274,7 +3362,7 @@ function buildMazeScene() {
     m.setPosition(lx * CELL + CELL / 2, WALL_H - 0.03, ly * CELL + CELL / 2);
     fixtureMatrices.push(m);
 
-    flickerTimers.push({ light: pl, base: pl.intensity, timer: Math.random() * 5, nextFlicker: 1 + Math.random() * 5 });
+    flickerTimers.push({ light: pl, base: pl.intensity, timer: Math.random() * 5, nextFlicker: 1 + Math.random() * 5, siren, phase });
   };
 
   if (theme.archetype === 'linear') {
@@ -3297,6 +3385,27 @@ function buildMazeScene() {
       }
       if (ly !== -1) placeCeilingLight(lx, ly);
     }
+  } else if (theme.autoRun && chasePath && chasePath.length) {
+    // CORRIDOR-AWARE (auto-run chase): light the TRACK itself so the path reads at speed.
+    // Walk chasePath dropping a ceiling light every `step` cells → a continuous TRAIL of
+    // red lights that BENDS at the turns (the directional cue — follow the lights). Turn
+    // cells get a brighter beacon (telegraph), and the exit gets the brightest. All
+    // siren-pulsed (updateLights), with a phase = position along the corridor so the
+    // alarm wave travels toward the exit. ≤ budget; the pad-fill keeps the count fixed.
+    const path = chasePath, n = path.length;
+    const isTurn = (i) => i > 0 && i < n - 1 &&
+      ((path[i].x - path[i - 1].x) !== (path[i + 1].x - path[i].x) ||
+       (path[i].y - path[i - 1].y) !== (path[i + 1].y - path[i].y));
+    const step = Math.max(1, Math.ceil(n / (CEILING_LIGHT_BUDGET - 1))); // reserve 1 for the exit beacon
+    for (let i = 0; i < n; i += step) {
+      // snap to a nearby turn within this window so turns reliably get a beacon
+      let j = i;
+      for (let k = 0; k < step && i + k < n; k++) if (isTurn(i + k)) { j = i + k; break; }
+      const turn = isTurn(j);
+      placeCeilingLight(path[j].x, path[j].y, CHASE_LIGHT_MULT * (turn ? CHASE_TURN_LIGHT_MULT : 1), true, j / n);
+    }
+    const last = path[n - 1];
+    placeCeilingLight(last.x, last.y, CHASE_LIGHT_MULT * CHASE_TURN_LIGHT_MULT, true, 1); // exit beacon
   } else {
     // Inflate the spacing on oversized late-loop floors so the sample grid can
     // never exceed the fixed ceiling-light budget (instead of letting the hard
@@ -3524,7 +3633,15 @@ function addDecorations(theme, gw, gh) {
     const prng = mulberry32((floorSeed ^ 0x40DEED) >>> 0);
     const TONES = [0x4a3526, 0x39281c, 0x52403a, 0x2c2622]; // wood / dark wood / dust / shadow
     const unitBox = new THREE.BoxGeometry(1, 1, 1);
-    const furMats = TONES.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.92, metalness: 0.04 }));
+    // Auto-run obstacles must be SEEN + dodged at speed → give the barricades a warm
+    // AMBER emissive so they self-glow against the red corridor (still no-map Standard →
+    // the pinned ammoPickupMat family; no new shader program). Off-chase floors (if any
+    // reuse 'hotel') keep the plain dark wood.
+    const obstacleGlow = !!theme.autoRun;
+    const furMats = TONES.map(c => new THREE.MeshStandardMaterial({
+      color: c, roughness: 0.92, metalness: 0.04,
+      emissive: obstacleGlow ? 0x5a2e0a : 0x000000, emissiveIntensity: obstacleGlow ? 0.5 : 0
+    }));
     const toneMatrices = TONES.map(() => []);
 
     for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
@@ -3534,9 +3651,9 @@ function addDecorations(theme, gw, gh) {
       // the chaser BFS + the connectivity guarantee — value 3 is impassable).
       mazeWalls.push({ minX: x * CELL, maxX: x * CELL + CELL, minZ: y * CELL, maxZ: y * CELL + CELL });
       // A pile: a wide low base + a smaller offset piece on top (reads as stacked
-      // furniture / a barricade). Position/scale/rotation jittered per cell.
-      const baseH = 0.9 + prng() * 0.6;
-      const bw = CELL * (0.78 + prng() * 0.14), bd = CELL * (0.78 + prng() * 0.14);
+      // furniture / a barricade). On auto-run, chunkier so it's an obvious dodge.
+      const baseH = (obstacleGlow ? 1.3 : 0.9) + prng() * 0.6;
+      const bw = CELL * (0.82 + prng() * 0.14), bd = CELL * (0.82 + prng() * 0.14);
       const ry1 = (prng() - 0.5) * 0.5;
       const m1 = new THREE.Matrix4().compose(
         new THREE.Vector3(cx + (prng() - 0.5) * 0.4, baseH / 2, cz + (prng() - 0.5) * 0.4),
@@ -5315,7 +5432,15 @@ function updateLights(dt) {
   // drives their intensity directly every frame — skip the normal flicker so
   // the two don't fight (its stray setTimeouts get overwritten next frame).
   if (!scareOwnsLights()) {
+    const sirenT = clock.getElapsedTime() * (Math.PI * 2 / CHASE_SIREN_PERIOD);
     for (const f of flickerTimers) {
+      if (f.siren) {
+        // SIREN alarm pulse — rhythmic dim→bright→dim, intensity-only. The phase offset
+        // (position along the corridor) makes the pulse TRAVEL toward the exit.
+        const w = 0.5 + 0.5 * Math.sin(sirenT - f.phase * Math.PI * 2);
+        f.light.intensity = f.base * (CHASE_SIREN_MIN + (CHASE_SIREN_MAX - CHASE_SIREN_MIN) * w);
+        continue;
+      }
       f.timer -= dt;
       if (f.timer <= 0) {
         f.timer = f.nextFlicker;
@@ -5372,7 +5497,7 @@ function placeScareTriggers(theme) {
   scaresFiredThisFloor = 0;
   scareMaxThisFloor = 0;
   scareLightsOut = null; scarePulse = 0; scareAmbientDim = null;
-  if (theme.isBoss) return; // no scares during a boss
+  if (theme.isBoss || theme.autoRun) return; // no scares during a boss or the auto-run chase (siren owns the lights)
 
   const sp = mulberry32((floorSeed ^ 0x5CA3E5) >>> 0); // dedicated stream
   // gather walkable floor cells reasonably far from the spawn cell (1,1-ish)

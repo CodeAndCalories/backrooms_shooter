@@ -167,6 +167,23 @@ console.log('3. obstacles: present, never seal a column, never adjacent columns'
   else fail(`${bothRows} columns blocked both rows`);
   if (!adjacent) ok('NO two adjacent columns both carry an obstacle (always a clear switch column)');
   else fail(`${adjacent} adjacent obstacle-column pairs`);
+
+  // Polish: lane 0 (the gate lane) stays CLEAR for a fair start; obstacles appear EARLY
+  // (lane 1+) thanks to CHASE_OBST_MIN — not just clustered at the end.
+  let lane0Dirty = 0, earlyEmpty = 0;
+  for (let s = 1; s <= 200; s++) {
+    const { grid } = genChase(s);
+    const gw = grid[0].length;
+    const countLane = (i) => { let c = 0; for (let x = 1; x < gw - 1; x++) { if (grid[rTop(i)][x] === 3) c++; if (grid[rBot(i)] && grid[rBot(i)][x] === 3) c++; } return c; };
+    if (countLane(0) > 0) lane0Dirty++;
+    // obstacles should show up within the first few wide lanes (1..3), not only late
+    let early = 0; for (let i = 1; i <= 3 && !isNarrow(i); i++) early += countLane(i);
+    if (early === 0) earlyEmpty++;
+  }
+  if (!lane0Dirty) ok('lane 0 (gate lane) is always clear — a fair start');
+  else fail(`${lane0Dirty} seeds put obstacles in lane 0`);
+  if (earlyEmpty < 20) ok(`obstacles appear EARLY (lanes 1–3) on ${200 - earlyEmpty}/200 seeds`);
+  else fail(`obstacles too sparse early (${earlyEmpty}/200 seeds empty in lanes 1–3)`);
 }
 
 /* ── 4. overshoot dead-ends + narrowing ── */

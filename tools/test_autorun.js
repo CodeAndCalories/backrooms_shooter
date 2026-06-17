@@ -222,6 +222,63 @@ console.log('3. advancing wall (track projection + caught)');
     if (caughtCo.chaseState.caught && caughtCo.downs === 1) ok('wall reaches you (co-op) → DOWN (non-revivable)');
     else fail(`co-op catch failed (down=${caughtCo.downs})`);
   }
+
+  // RUN-GRACE (bug fix): during the post-open head-start, the wall is FROZEN and CANNOT
+  // catch even when overlapping the player → zero threat until the run truly begins.
+  {
+    const g = { player: { pos: { x: pts[2].x, z: pts[2].z }, isDown: false },
+      chaseState: mkState({ wallS: cum[2], runGrace: 1.5 }), netState: { role: 'solo' },
+      CHASE_WALL_SPEED: WALL_SPEED, CHASE_CATCH_GAP: CATCH, roars: 0, gameovers: 0, downs: 0 };
+    const api = wallApi(g);
+    const w0 = g.chaseState.wallS;
+    api.tick(0.1);
+    if (!g.chaseState.caught && g.gameovers === 0) ok('run-grace: overlapping the wall does NOT catch (zero threat post-open)');
+    else fail('run-grace failed — caught during the head-start window');
+    if (Math.abs(g.chaseState.wallS - w0) < 1e-9) ok('run-grace: wall is FROZEN (no advance) during the head start');
+    else fail(`wall advanced during grace (${(g.chaseState.wallS - w0).toFixed(3)})`);
+    // after the grace elapses it resumes catching
+    g.chaseState.runGrace = 0;
+    api.tick(1 / 60);
+    if (g.chaseState.caught) ok('after grace elapses, the wall catches normally');
+    else fail('wall never catches after grace');
+  }
+}
+
+/* ── 5. POLISH: gate visual, siren lighting, corridor-aware placement (no new lights) ── */
+console.log('5. polish wiring (gate / siren / corridor lights)');
+{
+  const lightRe = /new THREE\.(PointLight|SpotLight|DirectionalLight|HemisphereLight)/;
+  // GATE: clearly a shutter (frame + slats + lock lamp) distinct from walls; no lights;
+  // a world-space HOLD-E prompt sprite; recolors red→green by progress.
+  const gate = extractFn(mainSrc, 'function buildChaseGate');
+  if (/slat/i.test(gate) && /frameMat/.test(gate) && /lamp/i.test(gate)) ok('gate reads as a shutter (frame + slats + lock lamp)');
+  else fail('gate not rebuilt as a shutter');
+  if (!lightRe.test(gate)) ok('gate adds NO lights');
+  else fail('gate introduces a light');
+  if (/buildGatePromptSprite/.test(gate) && /Sprite/.test(extractFn(mainSrc, 'function buildGatePromptSprite'))) ok('world-space HOLD-E prompt sprite at the gate');
+  else fail('no world-space gate prompt');
+  const gateUpd = extractFn(mainSrc, 'function updateChaseGate');
+  if (/gateGlowMat/.test(gateUpd) && /emissive\.setRGB/.test(gateUpd)) ok('lock lamp pulses + recolors red→green by progress');
+  else fail('gate glow pulse/recolor missing');
+
+  // SIREN: intensity-only pulse on existing lights (no new lights), traveling phase.
+  const ul = extractFn(mainSrc, 'function updateLights');
+  if (/f\.siren/.test(ul) && /CHASE_SIREN_MIN/.test(ul) && /f\.phase/.test(ul)) ok('siren pulse drives existing lights (intensity-only, traveling phase)');
+  else fail('siren pulse not wired into updateLights');
+  if (!lightRe.test(ul)) ok('updateLights creates no lights (intensity-only)');
+  else fail('updateLights creates a light');
+  // period in the 1–2s range (slow, not a seizure strobe)
+  const per = parseFloat(mainSrc.match(/CHASE_SIREN_PERIOD = ([\d.]+)/)[1]);
+  if (per >= 1 && per <= 2) ok(`siren period ${per}s (slow strobe, 1–2s)`);
+  else fail(`siren period ${per}s out of the 1–2s range`);
+
+  // CORRIDOR-AWARE placement: lights walk chasePath; placeCeilingLight respects the budget.
+  const bms = mainSrc.slice(mainSrc.indexOf('function buildMazeScene'));
+  if (/theme\.autoRun && chasePath && chasePath\.length/.test(bms) && /placeCeilingLight\(path\[j\]\.x, path\[j\]\.y/.test(bms))
+    ok('corridor-aware placement: lights walk the track (trail bends at turns)');
+  else fail('no corridor-aware light placement for auto-run');
+  if (/lights\.length >= CEILING_LIGHT_BUDGET\) return;/.test(bms)) ok('placeCeilingLight still respects CEILING_LIGHT_BUDGET (count fixed)');
+  else fail('budget cap missing');
 }
 
 /* ── 4. the wall adds NO lights (budget intact) ── */
