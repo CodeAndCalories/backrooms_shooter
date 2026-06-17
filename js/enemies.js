@@ -204,7 +204,7 @@ const MOB_TYPES = {
   // sprint (depth scaling does NOT apply — the whole level is built around its constant
   // pace). Big scale/reach, heavy melee. hp is irrelevant (it can't be hurt) but kept
   // nonzero so the snapshot/HUD math never divides by zero.
-  chaser:         { speed: 8.0, health: 9999, damage: 34, color: 0x551015, scale: 2.0,  height: 4.0,  attackRange: 2.4, attackCooldown: 1.1, name: 'The Chaser' }
+  chaser:         { speed: 8.0, health: 9999, damage: 34, color: 0x551015, scale: 1.5,  height: 4.0,  attackRange: 2.4, attackCooldown: 1.1, name: 'The Chaser' }
 };
 
 /* ═══════════════════════════════════════════
@@ -248,10 +248,9 @@ const MODEL_DEFS = {
   spider:         { url: 'models/backrooms_aranea_membri_rigged_blender_3.01.glb', height: 1.4, faceOffset: Math.PI },
   // partygoer → human-sized. Grounded, auto-scaled to ~1.8m. faceOffset 0: this model
   // already faces +Z, so no 180° flip (Math.PI would turn its back to the player).
-  partygoer:      { url: 'models/partygoer_from_backrooms.glb', height: 1.8, faceOffset: 0 },
-  // chaser → the skinstealer again (SAME url → deduped in preload, no extra asset/load),
-  // built TALLER (3.0m) and red-tinted in instanceMobModel. faceOffset matches stalker.
-  chaser:         { url: 'models/escape_the_backrooms_skinstealer.glb', height: 3.0, faceOffset: 0 }
+  partygoer:      { url: 'models/partygoer_from_backrooms.glb', height: 1.8, faceOffset: 0 }
+  // NOTE: the chaser has NO model entry — it's a fully procedural creature
+  // (buildChaserMonster), so nothing to preload.
 };
 const modelCache = {}; // url -> { scene, rigged } on success, or null on failure
 
@@ -327,18 +326,12 @@ function instanceMobModel(type) {
   // any map-less material dark so it matches the intended near-black look. Other
   // models (skinstealer) and sprites are untouched.
   const isBacteria = (type === 'crawler' || type === 'danger_crawler');
-  // THE CHASER reuses the skinstealer model but multiplies its base color toward
-  // blood-red so it reads as a distinct menace under the floor's red lighting. A
-  // COLOR tint (not emissive) survives setMobFlash, which only drives emissive.
-  const isChaser = (type === 'chaser');
   inner.traverse(o => {
     if (o.isMesh && o.material) {
       o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
-      const mats = Array.isArray(o.material) ? o.material : [o.material];
       if (isBacteria) {
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
         mats.forEach(m => { if (!m.map && m.color) m.color.setHex(0x0a0a0a); });
-      } else if (isChaser) {
-        mats.forEach(m => { if (m.color) m.color.multiplyScalar(0.9).lerp(new THREE.Color(0x661014), 0.55); });
       }
     }
   });
@@ -397,10 +390,10 @@ function buildMobModel(type, scale) {
   if (type === 'partygoer') {
     return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE);
   }
-  // SLOT 6 — THE CHASER (Hotel Chase). Skinstealer model, red-tinted + tall.
-  // Wire-figure fallback (a tall looming figure) if the GLB failed to load.
+  // SLOT 6 — THE CHASER (Hotel Chase). A fully PROCEDURAL writhing mass of limbs
+  // (no model file) — distinct from every normal mob. animateChaserMesh writhes it.
   if (type === 'chaser') {
-    return instanceMobModel(type) || buildWiremonster(WIRE_VISUAL_SCALE * 1.4);
+    return buildChaserMonster(scale);
   }
   // Everything else unchanged: original sprite.
   return buildSpriteMob(type, scale);
@@ -471,6 +464,80 @@ function buildWiremonster(scale) {
 
   group.scale.setScalar(scale);
   return group;
+}
+
+/* ═══════════════════════════════════════════
+   THE CHASER (Hotel Chase) — a fully PROCEDURAL horror: a lumpy central MASS with
+   MANY arms/legs scrambling out of it, plus a cluster of glowing eyes. No model
+   file, distinct from every normal mob. Built as an isGroup so it rides the
+   existing mob update/teardown; UNKILLABLE so the death-squash path never runs
+   (we're free with scale/structure). Shared flesh material (emissive driven by
+   setMobFlash) + a shared unlit eye material. Limbs are pivot groups stored in
+   userData.chaserLimbs; animateChaserMesh writhes them every frame.
+   ═══════════════════════════════════════════ */
+function buildChaserMonster(scale) {
+  const group = new THREE.Group();
+  // Dark blood-red flesh. emissive stays 0 at rest; setMobFlash pulses it red when shot.
+  const flesh = new THREE.MeshStandardMaterial({ color: 0x4a0a10, emissive: 0x000000, roughness: 0.8, metalness: 0.05 });
+  // Unlit eyes: MeshBasic has no .emissive, so setMobFlash skips it (drives .color instead).
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffcf3a });
+  const BODY_Y = 0.78; // the mass hovers/crawls low; limbs splay down to the floor
+
+  // ── central mass: a few overlapping faceted lumps (irregular, not a clean ball) ──
+  const lumpGeo = new THREE.IcosahedronGeometry(0.42, 1);
+  const lumpGeoB = new THREE.IcosahedronGeometry(0.3, 1);
+  const core = new THREE.Mesh(lumpGeo, flesh); core.position.y = BODY_Y; group.add(core);
+  const l1 = new THREE.Mesh(lumpGeoB, flesh); l1.position.set(0.26, BODY_Y + 0.16, 0.1); group.add(l1);
+  const l2 = new THREE.Mesh(lumpGeoB, flesh); l2.position.set(-0.22, BODY_Y - 0.12, -0.12); group.add(l2);
+
+  // ── many limbs radiating out + down (a spider/crab scramble) ──
+  // A cylinder is centered on its own Y; offset children so each segment extends
+  // DOWN from its joint, then bend at a "knee/elbow" group.
+  const upperGeo = new THREE.CylinderGeometry(0.05, 0.075, 0.55, 5);
+  const lowerGeo = new THREE.CylinderGeometry(0.028, 0.05, 0.55, 5);
+  const limbs = [];
+  const N = 11; // odd count → asymmetric, unsettling
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2 + (i % 2) * 0.35;
+    const splay = 0.7 + (i % 3) * 0.22; // some reach out, some claw down
+    const pivot = new THREE.Group();
+    pivot.position.set(Math.cos(a) * 0.4, BODY_Y + Math.sin(i * 1.7) * 0.16, Math.sin(a) * 0.4);
+    pivot.rotation.y = -a;
+    pivot.rotation.z = -splay;
+    group.add(pivot);
+    const upper = new THREE.Mesh(upperGeo, flesh); upper.position.y = -0.275; pivot.add(upper);
+    const knee = new THREE.Group(); knee.position.y = -0.55; knee.rotation.z = 0.95; pivot.add(knee);
+    const lower = new THREE.Mesh(lowerGeo, flesh); lower.position.y = -0.275; knee.add(lower);
+    limbs.push({ pivot, knee, phase: i * 0.9, baseZ: pivot.rotation.z, baseX: 0, kneeBase: knee.rotation.z });
+  }
+
+  // ── eyes: a creepy off-center cluster on the front of the mass ──
+  const eyeGeo = new THREE.SphereGeometry(0.05, 6, 5);
+  let firstEye = null;
+  for (let i = 0; i < 6; i++) {
+    const e = new THREE.Mesh(eyeGeo, eyeMat);
+    e.position.set((Math.random() - 0.5) * 0.5, BODY_Y + (Math.random() - 0.3) * 0.42, 0.34 + Math.random() * 0.1);
+    group.add(e);
+    if (!firstEye) firstEye = e;
+  }
+
+  group.userData.chaserLimbs = limbs;
+  group.userData.core = firstEye; // setMobFlash whitens the eyes (shared eyeMat .color)
+  group.scale.setScalar(scale);
+  return group;
+}
+
+// Per-frame writhe: oscillate each limb's splay + knee-bend (fast = frantic
+// scramble). Called for the chaser from updateEnemies (host) AND netClientUpdate
+// (client mirror), so it animates on every machine. Cheap (≈11 limbs).
+function animateChaserMesh(mesh, t) {
+  const limbs = mesh && mesh.userData && mesh.userData.chaserLimbs;
+  if (!limbs) return;
+  for (const L of limbs) {
+    L.pivot.rotation.z = L.baseZ + Math.sin(t * 9 + L.phase) * 0.42;
+    L.pivot.rotation.x = Math.sin(t * 7 + L.phase * 1.3) * 0.3;
+    L.knee.rotation.z = L.kneeBase + Math.sin(t * 11 + L.phase) * 0.5;
+  }
 }
 
 // Hit-flash that works for both Group (3D) and Sprite (default) mobs
@@ -1048,7 +1115,10 @@ const ROAM_SPEED_MULT = 0.5;     // roamers wander at half speed
 /* ── THE CHASER (Hotel Chase, floor 17) tuning — all SELF-CONTAINED literals
    (no main.js globals at top level; world speed is derived inside spawnChaser
    where MOVE_SPEED/SPRINT_MULT exist — see the load-order war story). */
-const CHASER_SPRINT_FRAC = 0.9;  // fixed speed = this × the player's full sprint speed
+const CHASER_SPRINT_FRAC = 0.95; // fixed speed = this × the player's full sprint speed.
+                                 // 0.95 (was 0.9): a CLEAN run barely escapes; any fumble
+                                 // (obstacle / sharp turn / stopping to shoot) = caught. The
+                                 // tighter maze + this near-sprint pace is the knife-edge.
 const CHASER_REPATH = 0.3;       // seconds between BFS waypoint recomputes (per chaser)
 const CHASER_GRACE = 3.0;        // head-start: stands still & harmless this long after spawn
 const CHASER_WP_REACH_CELLS = 0.45; // distance (in CELLs) at which a waypoint is "reached"
@@ -1428,6 +1498,11 @@ function updateEnemies(dt) {
         const faceX = (e.state === 'hunt') ? dx : moveX;
         const faceZ = (e.state === 'hunt') ? dz : moveZ;
         e.mesh.rotation.y = Math.atan2(faceX, faceZ) + (e.mesh.userData.faceOffset || 0);
+      }
+      // THE CHASER (procedural mass): writhe its limbs + orient the mass toward you.
+      if (e.isChaser) {
+        animateChaserMesh(e.mesh, clock.getElapsedTime());
+        e.mesh.rotation.y = Math.atan2(dx, dz);
       }
     }
 

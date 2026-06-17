@@ -1039,6 +1039,12 @@ function netClientUpdate(dt) {
         const near = netNearestOf(ppl, m.mesh.position.x, m.mesh.position.z);
         m.mesh.rotation.y = Math.atan2(near.x - m.mesh.position.x, near.z - m.mesh.position.z) + (m.mesh.userData.faceOffset || 0);
       }
+      // THE CHASER mirror: writhe its limbs + face the nearest player (matches host).
+      if (m.type === 'chaser' && typeof animateChaserMesh === 'function') {
+        animateChaserMesh(m.mesh, t);
+        const near = netNearestOf(ppl, m.mesh.position.x, m.mesh.position.z);
+        m.mesh.rotation.y = Math.atan2(near.x - m.mesh.position.x, near.z - m.mesh.position.z);
+      }
     } else {
       let yPos = (m.scale * 2.5) / 2;
       if (m.type === 'phantom') yPos += Math.sin(Date.now() * 0.003 + m.mesh.position.x) * 0.4;

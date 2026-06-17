@@ -18,6 +18,8 @@ const fs = require('fs');
 const path = require('path');
 const audioSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'audio.js'), 'utf8');
 const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'js', 'main.js'), 'utf8');
+const htmlSrc = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'css', 'style.css'), 'utf8');
 
 function sliceBalanced(s, from) {
   const open = s[from], close = open === '{' ? '}' : ']';
@@ -79,8 +81,8 @@ function makeApi() {
 console.log('1. present file');
 {
   const a = makeApi();
-  let failed = 0;
-  a.startFileMusic('assets/audio/x.ogg', () => failed++);
+  let failed = 0, started = 0;
+  a.startFileMusic('assets/audio/x.ogg', () => failed++, () => started++);
   a.created[0].fire('canplay');
   const fm = a.getFileMusic();
   if (!fm) fail('no fileMusic after a successful load'); else ok('fileMusic set on success');
@@ -89,17 +91,19 @@ console.log('1. present file');
   if (!fm || fm.srcNode._to !== a.ambientGain) fail('source not connected to ambientGain'); else ok('routed through ambientGain (volume sliders apply)');
   if (!fm || !fm.audio.played) fail('audio.play() not called'); else ok('playback started');
   if (!a.created[0].loop) fail('loop not enabled'); else ok('loops');
+  if (started !== 1) fail('onStart (credit hook) not fired on success'); else ok('onStart fired once on real playback (drives the credit)');
 }
 
 /* ── 2. missing file → graceful fallback, no crash ── */
 console.log('2. missing file → procedural fallback');
 {
   const a = makeApi();
-  let failed = 0;
-  a.startFileMusic('assets/audio/missing.ogg', () => failed++);
+  let failed = 0, started = 0;
+  a.startFileMusic('assets/audio/missing.ogg', () => failed++, () => started++);
   a.created[0].fire('error');
   if (failed !== 1) fail('onFail (procedural) not called on a missing file'); else ok('missing file → onFail() once');
   if (a.getFileMusic()) fail('fileMusic set despite the file being missing'); else ok('no file track left active');
+  if (started) fail('onStart fired on a missing file (would show a wrong credit)'); else ok('onStart NOT fired on miss (no false credit)');
 }
 
 /* ── 3. [.ogg, .mp3] candidates: ogg fails → mp3 wins ── */
@@ -163,16 +167,42 @@ console.log('7. stopFileMusic cleanup');
   if (!fm.srcNode._disc) fail('source node not disconnected on stop'); else ok('source disconnected');
 }
 
-/* ── 8. wiring: updateFloorMusic + theme 17 + folder ── */
+/* ── 8. wiring: updateFloorMusic (layer vs replace) + themes + credit + folder ── */
 console.log('8. wiring');
 {
   if (!/function stopFileMusic\(/.test(audioSrc) || !/function startFileMusic\(/.test(audioSrc)) fail('loader fns missing from audio.js'); else ok('startFileMusic/stopFileMusic present');
-  // updateFloorMusic must prefer a file and fall back to procedural
   const ufm = extractFn(audioSrc, 'function updateFloorMusic');
   if (!/startFileMusic\(theme\.musicFile/.test(ufm)) fail('updateFloorMusic does not use theme.musicFile'); else ok('updateFloorMusic uses theme.musicFile');
   if (!/startProcedural/.test(ufm)) fail('updateFloorMusic lacks a procedural fallback'); else ok('procedural fallback wired into updateFloorMusic');
-  // theme 17 (Hotel Chase) points at assets/audio/
-  if (!/musicFile:\s*\[[^\]]*assets\/audio\/hotel_chase/.test(mainSrc)) fail('theme 17 musicFile not pointing at assets/audio/hotel_chase'); else ok('Hotel Chase wired to assets/audio/hotel_chase.{ogg,mp3}');
+  // LAYER vs REPLACE: musicLayer starts the procedural bed THEN the file (no fallback);
+  // otherwise the file replaces it with a procedural fallback.
+  if (!/theme\.musicLayer/.test(ufm) || !/startFileMusic\(theme\.musicFile, null/.test(ufm)) fail('musicLayer (layered) path not wired'); else ok('musicLayer → procedural bed + file together (Hotel Chase)');
+  if (!/startFileMusic\(theme\.musicFile, \(\) => \{ if \(startProcedural\) startProcedural\(\); \}/.test(ufm)) fail('replace path (file + procedural fallback) not wired'); else ok('default → file REPLACES procedural (fallback if missing)');
+  // credit hook fires from onStart (real playback only)
+  if (!/onStart[\s\S]{0,80}showMusicCredit/.test(ufm)) fail('credit not driven by onStart'); else ok('credit shown via onStart (only on real playback)');
+
+  // theme 17 (Hotel Chase): single .mp3, layered, credited
+  const t17 = (mainSrc.match(/id:\s*17,[\s\S]*?mobs:\s*\{[\s\S]*?\}\s*\}/) || [])[0];
+  if (!/musicFile:\s*'assets\/audio\/hotel_chase\.mp3'/.test(t17)) fail('Hotel Chase musicFile not assets/audio/hotel_chase.mp3'); else ok('Hotel Chase → assets/audio/hotel_chase.mp3 (single .mp3)');
+  if (!/musicLayer:\s*true/.test(t17)) fail('Hotel Chase not layered'); else ok('Hotel Chase musicLayer:true (music OVER the alarm)');
+  if (!/musicCredit:/.test(t17)) fail('Hotel Chase has no musicCredit'); else ok('Hotel Chase has a credit');
+
+  // theme 5 (Level Fun): .ogg, replace, credited
+  const t5 = (mainSrc.match(/id:\s*5,[\s\S]*?mobs:\s*\{[\s\S]*?\}[\s\S]{0,200}?\}/) || [])[0];
+  if (!/musicFile:\s*'assets\/audio\/level_fun\.ogg'/.test(t5)) fail('Level Fun musicFile not assets/audio/level_fun.ogg'); else ok('Level Fun → assets/audio/level_fun.ogg');
+  if (/musicLayer:/.test(t5)) fail('Level Fun should REPLACE (no musicLayer)'); else ok('Level Fun replaces procedural (no musicLayer)');
+  if (!/musicCredit:/.test(t5)) fail('Level Fun has no musicCredit'); else ok('Level Fun has a credit');
+
+  // credit UI (main.js + html + css)
+  if (!/function showMusicCredit/.test(mainSrc) || !/function hideMusicCredit/.test(mainSrc)) fail('credit show/hide fns missing'); else ok('showMusicCredit/hideMusicCredit present');
+  if (!/setTimeout\([^,]+,\s*4000\)/.test(mainSrc)) fail('credit does not auto-hide ~4s'); else ok('credit auto-hides after ~4s');
+  if (!/hideMusicCredit/.test(ufm)) fail('updateFloorMusic does not clear a stale credit on floor entry'); else ok('prior-floor credit cleared on entry');
+  if (!/id="musicCredit"/.test(htmlSrc)) fail('#musicCredit element missing'); else ok('#musicCredit element present');
+  if (!/#musicCredit\{[^}]*transition:\s*opacity/.test(cssSrc)) fail('#musicCredit has no fade transition'); else ok('#musicCredit fades (CSS opacity transition)');
+
+  // startFileMusic exposes the onStart param
+  if (!/function startFileMusic\(paths, onFail, onStart\)/.test(audioSrc)) fail('startFileMusic missing the onStart param'); else ok('startFileMusic(paths, onFail, onStart)');
+
   // the drop folder exists in the repo (so Vercel serves it)
   if (!fs.existsSync(path.join(__dirname, '..', 'assets', 'audio', 'README.md'))) fail('assets/audio/ folder (README) missing'); else ok('assets/audio/ exists in the repo');
 }

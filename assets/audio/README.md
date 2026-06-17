@@ -28,12 +28,21 @@ So you can commit this folder empty and the game still runs — the file just
 
 ## Currently wired
 
-| Floor (display) | Theme | Expected file(s) | Fallback if absent |
-|---|---|---|---|
-| Floor 18 — Hotel Chase | id 17, `chase` | `hotel_chase.ogg` (or `.mp3`) | procedural alarm + dread drone + elevator-near-exit |
+| Floor (display) | Theme | Expected file | Mode | Fallback if absent |
+|---|---|---|---|---|
+| Floor 6 — Level Fun =) | id 5, `rooms` | `level_fun.ogg` | **replace** | procedural music box |
+| Floor 18 — Hotel Chase | id 17, `chase` | `hotel_chase.mp3` | **layer** (music OVER the alarm/elevator bed) | procedural alarm + dread drone + elevator-near-exit |
 
-To add another floor: set `musicFile` on its theme and drop the file here with a
-matching name.
+- **replace** = the file IS the floor's music (procedural plays only if the file is missing).
+- **layer** (`theme.musicLayer: true`) = the procedural bed + the file play TOGETHER
+  (Hotel Chase keeps its alarm urgency under the music). Both route through `ambientGain`,
+  so the Ambient slider balances the mix.
+
+A `theme.musicCredit` string shows a small **"♪ MUSIC: …"** line for ~4s on floor
+entry (only once the file *actually* plays — a missing file shows no credit).
+
+To add another floor: set `musicFile` (+ optional `musicLayer` / `musicCredit`) on its
+theme and drop the file here with a matching name.
 
 ## Format / size guidance (LOAD WEIGHT)
 

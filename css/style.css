@@ -104,6 +104,10 @@ canvas#gameCanvas{display:block;position:fixed;top:0;left:0;width:100%;height:10
 .floor-announce .fa-level{font-size:3.2em;color:#d4c36a;text-shadow:0 0 40px rgba(212,195,106,0.6);letter-spacing:10px;text-transform:uppercase;opacity:0;}
 .floor-announce .fa-name{font-size:1.3em;color:#8a7f55;letter-spacing:6px;margin-top:8px;opacity:0;}
 .floor-announce .fa-subtitle{font-size:0.85em;color:#665e3a;letter-spacing:3px;margin-top:5px;opacity:0;}
+/* Music credit — small, non-intrusive, bottom-center; fades via the opacity transition */
+#musicCredit{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);z-index:500;pointer-events:none;
+  font-family:'Courier New',monospace;font-size:0.72em;letter-spacing:3px;text-transform:uppercase;
+  color:#d4c36a;text-shadow:0 0 10px rgba(212,195,106,0.45);opacity:0;transition:opacity 0.8s ease;}
 
 /* ── HUD ── */
 #hud{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:100;display:none;}

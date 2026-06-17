@@ -209,7 +209,11 @@ const LEVEL_THEMES = [
     // SIGNATURE: partygoers ONLY (anti-linger included — more guests keep arriving).
     // STAT VARIANT: numerous-but-weak — the party swells, each guest is soft.
     mobs: { types: ['partygoer'], weights: [1], danger: ['partygoer'],
-            speedMult: 1.0, hpMult: 0.7, countMult: 1.5, waveBase: 4, waveCap: 12 }
+            speedMult: 1.0, hpMult: 0.7, countMult: 1.5, waveBase: 4, waveCap: 12 },
+    // REAL MUSIC FILE (Suno Pro). REPLACES the procedural Level Fun music when present
+    // (no musicLayer); falls back to the procedural music box if the file is missing.
+    musicFile: 'assets/audio/level_fun.ogg',
+    musicCredit: 'Level Fun · Suno'
   },
   {
     id: 6,
@@ -494,10 +498,12 @@ const LEVEL_THEMES = [
     // THE LEVEL IS THE ENEMY: no stamina drain (sprint forever), 1 unkillable chaser.
     noStamina: true,
     chaserCount: 1,
-    // REAL MUSIC FILE (opt-in; see audio.js startFileMusic + assets/audio/README.md).
-    // Streamed through ambientGain, looped. Tries .ogg then .mp3; if NEITHER is
-    // present it gracefully falls back to the procedural alarm/elevator ambience.
-    musicFile: ['assets/audio/hotel_chase.ogg', 'assets/audio/hotel_chase.mp3'],
+    // REAL MUSIC FILE (Suno Pro, commercial-licensed). Streamed through ambientGain,
+    // looped. musicLayer:true → the track plays OVER the procedural alarm/elevator bed
+    // (keeps the chase urgency). If the file is missing, the bed plays alone.
+    musicFile: 'assets/audio/hotel_chase.mp3',
+    musicLayer: true,
+    musicCredit: 'Hotel Chase · Suno',
     // A FEW weak, SLOW shootable mobs scattered as living obstacles in the path —
     // shoot to clear the way, but stopping to fight lets the chaser close in.
     mobs: { types: ['crawler', 'spider'], weights: [3, 1], danger: ['crawler'],
@@ -1795,9 +1801,12 @@ function generateLinear(w, h) {
 // Deterministic via the seeded rng(); co-op machines build the identical maze.
 function generateChase(w, h, theme) {
   const ri = (lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
-  const LANE_H = 3;                                  // interior rows per lane
-  const NL = Math.min(7, Math.max(5, 3 + Math.round((h || 12) / 4))); // 5..7 lanes
-  const LANE_LEN = Math.min(21, Math.max(13, (w || 12) + 5));         // interior columns
+  // TIGHTER (claustrophobic speed-run): narrower lanes, MORE lanes (more forced
+  // U-turns), SHORTER lanes (turns come sooner), DENSER furniture. The spine +
+  // island-seal still guarantee a clear spawn→exit path (verified by test_chase).
+  const LANE_H = 2;                                  // interior rows per lane (was 3 → narrower)
+  const NL = Math.min(9, Math.max(7, 3 + Math.round((h || 12) / 3))); // 7..9 lanes (was 5..7)
+  const LANE_LEN = Math.min(19, Math.max(12, (w || 12) + 3));         // shorter lanes (was +5)
   const gw = LANE_LEN + 2;                           // + the two side border walls
   const gh = 1 + NL * (LANE_H + 1);                  // top border + NL bands (lane + wall row)
 
@@ -1842,8 +1851,9 @@ function generateChase(w, h, theme) {
   }
 
   // 4. Furniture: scatter obstacles on NON-spine lane cells (never the spine, never
-  // walls/connectors). Probability tuned for a furnished-but-passable corridor.
-  const P_FURNITURE = 0.42;
+  // walls/connectors). DENSER now (0.55) → the path stays a tight ~1-wide thread
+  // through walls of debris; the spine guarantees it's never fully blocked.
+  const P_FURNITURE = 0.55;
   for (let i = 0; i < NL; i++) {
     for (let y = rTop(i); y <= rBot(i); y++) {
       for (let x = 1; x <= gw - 2; x++) {
@@ -4542,6 +4552,26 @@ function advanceFloor() {
   showFloorAnnounce();
 }
 
+/* ── MUSIC CREDIT — a small, non-intrusive line shown for ~4s (then fades) when a
+   floor's real music FILE actually starts. Driven from updateFloorMusic's onStart
+   (audio.js), so it only appears when the file truly plays (not on a procedural
+   fallback). hideMusicCredit clears any lingering credit on the next floor entry. */
+let _musicCreditTO = null;
+function showMusicCredit(theme) {
+  const el = document.getElementById('musicCredit');
+  if (!el) return;
+  if (!theme || !theme.musicCredit) { el.style.opacity = '0'; return; }
+  el.textContent = '♪ MUSIC: ' + theme.musicCredit;
+  el.style.opacity = '1';
+  if (_musicCreditTO) clearTimeout(_musicCreditTO);
+  _musicCreditTO = setTimeout(() => { el.style.opacity = '0'; }, 4000); // CSS transition fades it
+}
+function hideMusicCredit() {
+  const el = document.getElementById('musicCredit');
+  if (el) el.style.opacity = '0';
+  if (_musicCreditTO) { clearTimeout(_musicCreditTO); _musicCreditTO = null; }
+}
+
 function showFloorAnnounce() {
   const theme = getTheme(currentFloor);
   const el = document.getElementById('floorAnnounce');
@@ -4688,6 +4718,20 @@ function updateMinimap(dt) {
 
   const cellW = w / gw, cellH = h / gh;
 
+  // HEADING-UP minimap: center on the player and rotate the whole map by the
+  // player's yaw so FORWARD is ALWAYS up (strafe always perpendicular). EVERY
+  // element below (grid, basins, exit, artifacts, enemies, boss, teammates) is
+  // drawn in the same world→canvas space (pos/CELL*cell), so they all rotate
+  // together and stay perfectly aligned; the player is then drawn fixed at the
+  // center pointing up. rot == yaw: forward (-sin yaw, -cos yaw) → screen-up.
+  const cx = w / 2, cy = h / 2;
+  const pcx = player.pos.x / CELL * cellW;
+  const pcy = player.pos.z / CELL * cellH;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(player.yaw);
+  ctx.translate(-pcx, -pcy);
+
   // Draw maze cells (fog mode: unrevealed cells are near-black voids)
   const fog = minimapMode === 'fog';
   for (let y = 0; y < gh; y++) {
@@ -4802,24 +4846,19 @@ function updateMinimap(dt) {
     }
   }
 
-  // Player
-  const px = player.pos.x / CELL * cellW;
-  const pz = player.pos.z / CELL * cellH;
+  ctx.restore(); // end heading-up transform (player marker below is screen-fixed)
+
+  // Player — fixed at the CENTER, ALWAYS pointing up. The rotated map above puts
+  // the world's "forward" toward the top, so this fixed arrow reads as the
+  // player's heading; moving forward slides the world downward past it.
   ctx.beginPath();
-  ctx.arc(px, pz, 3, 0, Math.PI * 2);
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,255,80,0.9)';
   ctx.fill();
-
-  // Player direction
-  const dirLen = 8;
-  // Match the world-space forward vector used in updatePlayer:
-  // forward = (-sin(yaw), -cos(yaw)) in (x, z), and the minimap maps world x->x, z->y directly.
-  const dx2 = px - Math.sin(player.yaw) * dirLen;
-  const dz2 = pz - Math.cos(player.yaw) * dirLen;
   ctx.beginPath();
-  ctx.moveTo(px, pz);
-  ctx.lineTo(dx2, dz2);
-  ctx.strokeStyle = 'rgba(0,255,80,0.5)';
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx, cy - 8); // straight up = forward
+  ctx.strokeStyle = 'rgba(0,255,80,0.6)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
 

@@ -226,8 +226,23 @@ console.log('3. integration (theme / chaser type / unkillable / stamina / gate)'
   const grace = parseFloat(constVal(enemSrc, 'CHASER_GRACE'));
   const repath = parseFloat(constVal(enemSrc, 'CHASER_REPATH'));
   if (!(frac > 0 && frac < 1)) fail('CHASER_SPRINT_FRAC not in (0,1)'); else ok(`chaser speed = ${frac}× sprint (escapable on a clean run)`);
+  // near-sprint knife-edge: 0.95+ so a clean run BARELY escapes, any fumble = caught
+  if (!(frac >= 0.95)) fail(`CHASER_SPRINT_FRAC ${frac} too slow for the tight maze (want >= 0.95)`); else ok('chaser is near-sprint (>= 0.95×) — fumble = caught');
   if (!(grace > 0)) fail('CHASER_GRACE must be > 0'); else ok(`spawn-grace head start = ${grace}s`);
   if (!(repath > 0)) fail('CHASER_REPATH must be > 0'); else ok('BFS repath interval positive');
+
+  // PROCEDURAL chaser model (no model file, no lights) + writhing animation
+  if (!/function buildChaserMonster/.test(enemSrc)) fail('buildChaserMonster missing'); else ok('chaser is a procedural creature (buildChaserMonster)');
+  const cm = extract(enemSrc, 'function buildChaserMonster');
+  if (/new THREE\.PointLight|new THREE\.SpotLight/.test(cm)) fail('chaser model adds a light!'); else ok('chaser model adds ZERO lights (emissive/unlit only)');
+  if (!/chaserLimbs/.test(cm)) fail('chaser has no limbs array'); else ok('chaser has many limbs (userData.chaserLimbs)');
+  if (!/userData\.core/.test(cm)) fail('chaser missing userData.core (setMobFlash target)'); else ok('chaser exposes userData.core (hit-flash compatible)');
+  if (!/function animateChaserMesh/.test(enemSrc)) fail('animateChaserMesh missing'); else ok('animateChaserMesh writhes the limbs');
+  if (/MODEL_DEFS[\s\S]{0,400}chaser:/.test(enemSrc)) fail('chaser still has a MODEL_DEFS entry (should be fully procedural)'); else ok('no MODEL_DEFS.chaser (no model file to load)');
+  if (!/if \(type === 'chaser'\) \{\s*return buildChaserMonster/.test(enemSrc)) fail('buildMobModel does not build the procedural chaser'); else ok('buildMobModel routes chaser → buildChaserMonster');
+  // animated on BOTH host (updateEnemies) and client mirror (netClientUpdate)
+  if (!/e\.isChaser\) \{\s*animateChaserMesh/.test(enemSrc)) fail('host does not animate the chaser'); else ok('host animates the chaser (updateEnemies)');
+  if (!/animateChaserMesh\(m\.mesh/.test(netSrc)) fail('client mirror does not animate the chaser'); else ok('client mirror animates the chaser (netClientUpdate)');
 
   // spawnChaser derives speed at RUNTIME from main.js globals (load-order safety):
   // it must NOT read MOVE_SPEED/SPRINT_MULT at file top level.

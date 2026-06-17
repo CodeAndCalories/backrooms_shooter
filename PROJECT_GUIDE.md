@@ -75,6 +75,7 @@ suite (all must stay green):
 | `tools/test_ai.js` | `isOpenCell`, `steerAround` (clear pass-through vs rounds-a-wall), roam/hunt threshold constants, danger-always-hunts. |
 | `tools/test_sanity.js` | Consumable placement determinism + 0 world draws + constraints, sanity drain math + Poolrooms safe-zone guard, tuning constants, no-new-lights. |
 | `tools/test_loadorder.js` | Executes the REAL top-level code of audio/net/enemies in index.html load order (browser stubs, deliberately NO main.js globals): no load-time throw, no TDZ casualties, plus a static no-top-level-main.js-global-reads scan. Catches the bug class the extraction sandboxes mask. |
+| `tools/test_minimap.js` | Heading-up minimap: reproduces the `translate(center)→rotate(yaw)→translate(-playerCanvas)` transform and proves forward→up / strafe→right / back→down / left→left + perpendicularity at every facing, the player-at-center invariant, and the single-save/restore wiring (all elements rotate together). |
 | `tools/test_overlays.js` | Menu-overlay visibility: the real `showMenuOverlay` shows exactly ONE of start/pause/gameover/victory at a time (or none in gameplay) + always force-closes the shop; CSS hides pause/gameover/victory by default (victory opaque); every state transition routes through the helper; dev/player level-selects are mutually exclusive. Guards the stacked-overlay class of bug. |
 | `tools/test_finale.js` | Floor 20 "The Last Door" capstone: theme config (toughest boss, `isFinale`, reused `boss_amalgam` sprite, bigger arena), the real `bossHpFor` on floor 19 (solo unchanged + per-player + loop scaling), boss-death→`winRun` branch, the victory screen + `gameState='won'` + buttons, the `run_won` co-op broadcast, and level-select auto-pickup of floors 19+20. |
 | `tools/test_scanner.js` | Lights Out (floor 18): the constraint-critical "dots add NO point lights" check (no PointLight/SpotLight in the dot source) + InstancedMesh/no-map/emissive material + per-instance-scale fade; drives the REAL `doScanPulse` over a grid (wall+floor dots, LOS-gated monster reveal, slot-color routing, determinism); theme/darkness/flashlight/input/co-op-relay wiring. |
@@ -134,7 +135,10 @@ triggered by the AI via main.js `mobVocalLocal`/`hostMobVocal` (distance/pan fro
 camera). **Real music files** (`startFileMusic`/`stopFileMusic`):
 floors with `theme.musicFile` stream an `assets/audio/*.ogg|.mp3` through `ambientGain`
 (looped), with a graceful fallback to the procedural track if the file is absent — see
-§3.4. `updateFloorMusic` picks file-vs-procedural per floor (`proceduralMusicStarterFor`).
+§3.4. `updateFloorMusic` picks file-vs-procedural per floor (`proceduralMusicStarterFor`);
+`theme.musicLayer:true` plays the file OVER the procedural bed instead of replacing it
+(Hotel Chase = music + alarm). `theme.musicCredit` → a small "♪ MUSIC: …" line (main.js
+`showMusicCredit`, driven by `startFileMusic`'s `onStart` so it only shows on real playback).
 
 ### `js/enemies.js` (~1250 lines)
 **Mobs + bosses + waves (host-authoritative sim).** `spriteTextures` (procedural mob art
@@ -144,8 +148,9 @@ fallback). `spawnEnemy` (seeds the enemy object incl. **roam/hunt behavior**),
 `updateEnemies` (the AI loop: target nearest player, **roam vs hunt state**, `steerAround`
 wall avoidance, attack, death fade, pools wading; the **chaser** gets its own BFS-waypoint
 branch). **THE CHASER (Hotel Chase): `spawnChaser`/`spawnFloorChasers` + `chaserNextWaypoint`**
-(grid-BFS pursuit, robust around sharp turns; fixed speed = 0.9× sprint derived at runtime;
-`unkillable` flag → `applyEnemyHit` flinches but never kills/stuns it). `bossHpFor` (PURE, co-op HP scaling),
+(grid-BFS pursuit, robust around sharp turns; fixed speed = 0.95× sprint derived at runtime;
+`unkillable` flag → `applyEnemyHit` flinches but never kills/stuns it). Its visual is a fully
+PROCEDURAL writhing limb-mass (`buildChaserMonster` + `animateChaserMesh`), no model file. `bossHpFor` (PURE, co-op HP scaling),
 `spawnBoss`/`updateBoss`/`updateBossProjectiles`, `createBossExit`. Wave system
 (`spawnWave`, `waveSizeFor`) + anti-linger (`updateAntiLinger`, `spawnDangerMob`).
 Clients never run any of this — they render mirrors from snapshots.
@@ -392,7 +397,7 @@ re-run the relevant test, playtest.
 | Ammo | main.js `CLIP_SIZE`/`RESERVE_MAX`/`AMMO_DROP_CHANCE` 0.2; per-weapon stats in `WEAPONS` | Pistol baseline + each gun's damage/fireRate/clip/pellets/spread/falloff. |
 | Scare frequency | main.js `placeScareTriggers` (1-2/floor), `SCARE_SAFE_TIME` 30, `rollScareType` weights | How often/early scares fire + per-theme flavor. |
 | AI behavior | enemies.js `ROAM` roll (~0.42 in `spawnEnemy`), `HUNT_NEAR` 3cells, `HUNT_VISION` 8cells, `HUNT_MEMORY` 5s, `ROAM_SPEED_MULT` 0.5 | Roam-vs-hunt mix + detection ranges. |
-| Hotel Chase (chaser) | enemies.js `CHASER_SPRINT_FRAC` 0.9 (**the key knob** — chaser speed vs player sprint), `CHASER_GRACE` 3s (head start), `CHASER_REPATH` 0.3s (BFS interval), `MOB_TYPES.chaser.damage` 34; main.js `generateChase` `P_FURNITURE` 0.42 (obstacle density), `LANE_H`/`NL`/`LANE_LEN` (corridor shape); theme 17 `chaserCount`/`mobs` (obstacle-mob sparsity) | Chase pace, head start, obstacle density, corridor length. |
+| Hotel Chase (chaser) | enemies.js `CHASER_SPRINT_FRAC` 0.95 (**the key knob** — chaser speed vs player sprint; 0.95 = knife-edge), `CHASER_GRACE` 3s (head start), `CHASER_REPATH` 0.3s (BFS interval), `MOB_TYPES.chaser.damage` 34 / `.scale` 1.5; main.js `generateChase` `P_FURNITURE` 0.55 (obstacle density), `LANE_H` 2 / `NL` 7-9 / `LANE_LEN` (corridor shape — narrower/more turns); theme 17 `chaserCount`/`mobs` (obstacle-mob sparsity) | Chase pace, head start, obstacle density, corridor tightness. The chaser visual is procedural (`buildChaserMonster`). |
 | Mob ecology | `LEVEL_THEMES[].mobs` (types/weights/danger/speedMult/hpMult/countMult/waveBase/waveCap) | Per-floor roster, difficulty, pacing. |
 | Anti-linger | main.js `LINGER_SAFE_TIME` 45, `LINGER_SPAWN_BASE/MIN` | When/how fast danger mobs pressure a lingering player. |
 | Level Fun music | audio.js `startLevelFunMusic`: note gap 3.5-10s, drone gain 0.16, stab interval 30-70s | Dread pacing (sparse music-box, leading drone, rare distant stabs). |

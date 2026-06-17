@@ -30,6 +30,82 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **REAL MUSIC FILES wired for 2 floors (June 16, UNPLAYED) — Suno Pro,
+  commercial-licensed; the procedural loader from the earlier batch now drives them:**
+  - **Hotel Chase (floor 18):** `musicFile: 'assets/audio/hotel_chase.mp3'` (single
+    `.mp3` per the actual file). **LAYERED** (`musicLayer: true`) — the music plays
+    OVER the procedural alarm/elevator bed (keeps chase urgency); both route through
+    `ambientGain` so the Ambient slider balances them. Streamed + looped; if the file
+    is missing the bed plays alone.
+  - **Level Fun (floor 6):** `musicFile: 'assets/audio/level_fun.ogg'`. **REPLACES**
+    the procedural music box (no `musicLayer`); falls back to procedural if missing.
+  - **`updateFloorMusic` now layer-vs-replace aware:** `musicLayer` → start the
+    procedural bed THEN the file (no fallback needed); else file replaces with a
+    procedural fallback. `startFileMusic` gained an `onStart` callback that fires only
+    on a REAL successful load.
+  - **CREDIT LINE:** `theme.musicCredit` → a small non-intrusive `♪ MUSIC: <name> ·
+    Suno` line (bottom-center, menu style) shown for ~4s then fades (CSS opacity
+    transition). Driven by `onStart`, so it appears ONLY when the file truly plays
+    (a missing file → procedural fallback → no false credit); cleared on every floor
+    entry (`hideMusicCredit` in `updateFloorMusic`). New `#musicCredit` element + CSS.
+  - Headless: `test_music` extended (onStart fires on success / NOT on miss; layer
+    vs replace wiring; theme 5 + 17 paths/modes/credits; credit show/hide + fade +
+    floor-entry clear; `#musicCredit` DOM/CSS). Full suite green (19 tools); node
+    --check clean. **Loads/loops confirmed in the loader** (`audio.loop = true`,
+    streamed via HTMLAudioElement → `createMediaElementSource` → `ambientGain`).
+  - **Needs a browser session:** drop `hotel_chase.mp3` + `level_fun.ogg` into
+    `assets/audio/`, hard-refresh → confirm each streams + loops; Hotel Chase music
+    sits OVER the alarm (balance via Ambient slider); Level Fun music replaces the box;
+    the "♪ MUSIC" credit shows ~4s then fades; deleting a file cleanly falls back.
+- **HOTEL CHASE (floor 18) FIXES (June 16, UNPLAYED) — scarier chaser + tighter,
+  faster knife-edge:**
+  - **CHASER MODEL → fully PROCEDURAL writhing mass** (`buildChaserMonster`,
+    enemies.js) — replaced the red-tinted skinstealer. A lumpy central blob (3
+    overlapping faceted icosahedra) with **11 scrambling limbs** (2-segment, pivot+
+    knee groups) splaying out and down, plus a cluster of glowing eyes. `animateChaserMesh`
+    writhes every limb each frame (fast sin oscillation = frantic scramble), called
+    on BOTH the host (updateEnemies) and the client mirror (netClientUpdate). NO model
+    file (removed MODEL_DEFS.chaser), distinct from every normal mob. Shared flesh
+    material (emissive driven by setMobFlash) + unlit eye material; **zero lights**
+    (verified). isGroup so it rides the existing teardown; unkillable so the
+    death-squash path never runs. Display scale 2.0→1.5 (~3.5m mass, fits the tight
+    corridors). Faces the player (mass of limbs scrambling toward you).
+  - **TIGHTER MAZE** (`generateChase`): lanes **3→2 cells** (narrower), **7-9 lanes**
+    (was 5-7 → more forced U-turns), **shorter lanes** (LANE_LEN +5→+3 → turns come
+    sooner), **furniture 0.42→0.55** (denser). The path is now a tight ~1-wide thread
+    through walls of debris. Still flood-fill-safe: the reserved spine + island-seal
+    guarantee a clear spawn→exit path (test_chase: 600 seeds connectivity, 200 seeds
+    chaser-BFS-reaches-player, all green).
+  - **FASTER CHASER:** `CHASER_SPRINT_FRAC` **0.9 → 0.95** (chaser = 95% of player
+    sprint). A CLEAN run barely escapes; any fumble (obstacle / sharp turn / stopping
+    to shoot / a mob) lets it close. The tighter maze (more turns = lower player avg
+    speed) + near-sprint chaser is the intended knife-edge. Knobs: `CHASER_SPRINT_FRAC`
+    0.95, `CHASER_GRACE` 3s, `LANE_H`/`NL`/`LANE_LEN`/`P_FURNITURE` in generateChase.
+  - Headless: `test_chase` extended (procedural-model no-lights + limbs + animation
+    wiring on host & mirror; speed ≥0.95). Full suite green (19 tools); node --check
+    clean; sim_levels sweeps the tightened floor.
+  - **Needs a browser/co-op session:** does the writhing mass read as horrifying (limb
+    scramble speed, eye cluster, size in the tight corridor)? Is 0.95 the right
+    knife-edge — clean run barely makes it, fumble = caught — or tune toward 0.93
+    (kinder) / 0.97 (brutal)? Is the tighter maze claustrophobic without being
+    unfair? Co-op: chaser limbs animate on the client mirror too.
+- **MINIMAP → HEADING-UP (June 16, UI only):** the minimap was world-locked
+  (north-up) and geometrically correct, but because it didn't rotate with the
+  player, "forward" only pointed up when facing north and otherwise read as a 90°
+  rotation (W/S → left/right once you turned). **Diagnosis:** NOT an x/z swap — the
+  world→canvas mapping (pos.x→canvasX, pos.z→canvasY) was consistent across the grid,
+  every blip, and the heading arrow; a literal swap would've rotated a correct map.
+  **Fix (per the requirement "forward moves the blip in a *consistent* direction"):**
+  converted `updateMinimap` to **heading-up** — one `ctx.translate(center) →
+  rotate(player.yaw) → translate(-playerCanvas)` wraps EVERY rotated element (grid,
+  basins, exit, artifacts, enemies, boss, teammates) in a single save/restore, so
+  they all stay aligned; the player is drawn fixed at the center pointing straight
+  up. Now forward is ALWAYS up and strafe always perpendicular, at every facing.
+  (`rot == yaw` because forward `(-sin,-cos)` → screen-up.) Headless:
+  **`tools/test_minimap.js`** (new) reproduces the exact transform and proves
+  forward→up / strafe→right / back→down / left→left + perpendicularity across 8
+  facings, the player-at-center invariant, and the wiring (single save/restore, old
+  world-locked arrow removed). Full suite green (19 tools); node --check clean.
 - **UI OVERLAY-LAYERING BUG FIXED (June 16) — pure UI state, no gameplay change:**
   on the `?dev=1` start menu the "YOU ESCAPED" victory screen + both level-selects
   rendered stacked on top of each other. **Root cause:** `#victoryMenu` (added in

@@ -1273,7 +1273,7 @@ function updateChaseAudio(distToExit) {
 let fileMusic = null;       // { audio, srcNode, path } while a file track plays
 let fileMusicToken = 0;     // bumps on every floor change → in-flight loads abort
 
-function startFileMusic(paths, onFail) {
+function startFileMusic(paths, onFail, onStart) {
   if (!audioCtx) { if (onFail) onFail(); return; }
   const candidates = Array.isArray(paths) ? paths.slice() : [paths];
   const token = ++fileMusicToken; // a later floor change (stopFileMusic) invalidates this load
@@ -1302,6 +1302,7 @@ function startFileMusic(paths, onFail) {
       audio.play().catch(e => console.warn('[music] autoplay blocked (will play on next gesture):', e));
       fileMusic = { audio, srcNode, path };
       console.log('[music] file track:', path);
+      if (onStart) onStart(path); // fires only on a REAL successful load (drives the credit line)
     };
     const onErr = () => {
       if (settled) return;
@@ -1344,11 +1345,24 @@ function updateFloorMusic() {
   stopFileMusic();
   stopLevelFunMusic();
   stopHotelChaseAmbience();
+  if (typeof hideMusicCredit === 'function') hideMusicCredit(); // clear any prior floor's credit
 
   const theme = getTheme(currentFloor);
   const startProcedural = proceduralMusicStarterFor();
+  // Credit line (main.js UI) fires only when the file ACTUALLY starts — a missing
+  // file falls back to procedural and shows no (wrong) credit.
+  const onStart = () => { if (typeof showMusicCredit === 'function') showMusicCredit(theme); };
+
   if (theme.musicFile) {
-    startFileMusic(theme.musicFile, () => { if (startProcedural) startProcedural(); });
+    if (theme.musicLayer && startProcedural) {
+      // LAYER: the procedural bed plays UNDER the file (Hotel Chase = alarm +
+      // elevator + the music track together). Bed is already up → no fallback needed.
+      startProcedural();
+      startFileMusic(theme.musicFile, null, onStart);
+    } else {
+      // REPLACE: the file IS the track; fall back to the procedural track if missing.
+      startFileMusic(theme.musicFile, () => { if (startProcedural) startProcedural(); }, onStart);
+    }
   } else if (startProcedural) {
     startProcedural();
   }
