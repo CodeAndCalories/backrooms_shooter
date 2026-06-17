@@ -30,6 +30,51 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 18 HOTEL CHASE — FEEL/ATMOSPHERE POLISH #2 (June 17, UNPLAYED) — visibility +
+  red fog, leading lights, green EXIT signs, faster wall, hotel furniture, scarier roar.
+  No protocol/mechanic change (auto-run/steering/gate/wall mechanics untouched); light
+  budget 32 intact (all intensity-only/emissive/no-map Standard → no PROG churn), seeded,
+  co-op safe.**
+  - **WALL SPEED 0.92→0.95×** auto-run (`CHASE_WALL_SPEED`) — a clean run no longer pulls
+    way ahead; the monster stays close, threat feels constant. Roar cadence tightened to
+    ~1.6–2.7s (was 2.4–3.8) to match.
+  - **VISIBILITY + RED FOG:** brighter path (`CHASE_LIGHT_MULT` 2.2→2.7, `ambientIntensity`
+    0.11→0.14, `darknessLevel` 0.35→0.3) AND **red-tinted light fog** (`fogColor` 0x2e0810,
+    `fogNear` 6, `fogFar` 40, bg lifted to 0x1a0508) so distance fades into red murk (~see
+    past the next turn, not infinitely) — focuses you on the lit path + adds atmosphere.
+  - **LEADING LIGHTS:** the corridor-aware trail along `chasePath` is brighter; wrong-turn
+    dead-ends (overshoot stubs, off-track) get NO ceiling light, so the *continuing* bright
+    trail vs the dark dead-end reads as "follow the bright lights" at speed.
+  - **GREEN EXIT SIGNS (`buildChaseExitSigns`):** procedural illuminated **green emissive
+    panel + chevron arrow** (no-map Standard, pinned; **no lights**), hung at each
+    end-of-straight turn along the correct path, facing the approach, **arrow pointing the
+    turn direction** (left/right from the in/out cross-product). Wrong turns get none →
+    directional cue + canon backrooms detail. Glows green through the red fog. Deterministic
+    from `chasePath` (0 rng).
+  - **HOTEL FURNITURE obstacles (`buildHotelObstacle`):** the amber blocks are now
+    recognizable wrecked-hotel props — **overturned chair, reception/luggage desk, luggage
+    cart (base+casters+rail+cases), stacked suitcases, fallen wardrobe** — one per value-3
+    cell (seeded prng pick of 5 types, jittered). Full-cell collision unchanged; a small
+    shared palette of no-map Standard mats (pinned family) with a modest emissive (0.32) so
+    they self-read in the murk. Generator/placement UNCHANGED (only the visual).
+  - **SCARIER ROAR (`_chaserRoar` + `_distCurve`, audio.js):** replaced the thin roar with a
+    layered, **distorted** one — sub-rumble (felt) + a **WaveShaper-distorted guttural growl**
+    with a ~7Hz tremolo "breathing" + a dissonant **distorted shriek** with vibrato on top +
+    wet breath noise. Routed through the existing spatial panner (distance/pan from the
+    wall). New `createWaveShaper` is audio-only (not a render shader → no PROG impact).
+  - **Knobs changed:** `CHASE_WALL_SPEED` 0.95, `CHASE_LIGHT_MULT` 2.7, `CHASE_TURN_LIGHT_MULT`
+    1.55, theme fog (0x2e0810 / 6 / 40), `ambientIntensity` 0.14, `darknessLevel` 0.3, roar
+    cadence 1.6–2.7s. All main.js except the roar (audio.js).
+  - Headless: `test_autorun` extended (wall=0.95<auto-run, signs/furniture no-lights +
+    variety + turn-gated, red-fog range) + `test_audio` (createWaveShaper stub; the new
+    layered roar synthesizes through the chaser branch without throwing). Full suite green
+    (21 tools); node --check clean; sim_levels 68/68 + 4800/4800.
+  - **Needs a browser/co-op session — playtest gate:** Is the path comfortably readable now
+    (brightness + the red fog focusing you) without losing the horror mood? Do the green
+    EXIT arrows clearly lead you through turns at speed (and the dark dead-ends read as
+    wrong)? Does the wall at **0.95×** stay tense-close on a clean run (tune 0.94/0.96 if
+    needed)? Furniture read as a wrecked hotel + still clearly dodgeable? Is the new roar
+    genuinely menacing (not too much at ~1.6–2.7s cadence)? PROG flat on entry.
 - **FLOOR 18 HOTEL CHASE — PLAYTEST POLISH PASS (June 17, UNPLAYED) — gate clarity,
   damage-timing bug, siren lighting, path readability. No protocol/mechanic change
   (auto-run/steering/wall untouched); intensity-only lights, seeded, co-op safe.**

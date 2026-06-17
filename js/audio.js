@@ -1026,6 +1026,61 @@ function _vTone(dest, t, dur, f0, f1, type, peak) {
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(Math.max(0.0001, peak), t + dur * 0.18); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   o.connect(g); g.connect(dest); o.start(t); o.stop(t + dur + 0.02);
 }
+// Hard-clip distortion curve for the roar's grit (the nastier the `amount`, the harsher).
+function _distCurve(amount) {
+  const n = 256, c = new Float32Array(n), k = amount;
+  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = (1 + k) * x / (1 + k * Math.abs(x)); }
+  return c;
+}
+// THE CHASER ROAR — a layered, genuinely menacing roar you do NOT want near you:
+//   • SUB-RUMBLE you feel in the chest (two near-unison sines → a slow beat),
+//   • a DISTORTED GUTTURAL GROWL (detuned low saws through a hard waveshaper, lowpassed)
+//     with a ~7Hz tremolo so it "breathes" like a big throat,
+//   • a dissonant DISTORTED SHRIEK on top (a high saw with vibrato through a shaper +
+//     bandpass) that cuts and reads as a scream,
+//   • a WET breath-noise layer for the saliva/snarl texture.
+// All procedural, routed into the spatial panner (dest). No assets, no lights.
+function _chaserRoar(dest, t, dur, G) {
+  const end = t + dur;
+  // 1. sub-rumble — felt more than heard
+  _vTone(dest, t, dur, 46, 26, 'sine', G * 1.2);
+  _vTone(dest, t, dur, 42, 24, 'sine', G * 0.9);
+
+  // 2. guttural growl: detuned low saws → hard distortion → lowpass → tremolo body
+  const shaper = audioCtx.createWaveShaper(); shaper.curve = _distCurve(9); shaper.oversample = '2x';
+  const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.9;
+  const body = audioCtx.createGain();
+  body.gain.setValueAtTime(0.0001, t);
+  body.gain.exponentialRampToValueAtTime(G * 1.35, t + 0.09);
+  body.gain.setValueAtTime(G * 1.35, end - dur * 0.4);
+  body.gain.exponentialRampToValueAtTime(0.0001, end);
+  shaper.connect(lp); lp.connect(body); body.connect(dest);
+  const g1 = audioCtx.createOscillator(); g1.type = 'sawtooth'; g1.frequency.setValueAtTime(80, t); g1.frequency.exponentialRampToValueAtTime(56, end);
+  const g2 = audioCtx.createOscillator(); g2.type = 'sawtooth'; g2.frequency.setValueAtTime(73, t); g2.frequency.exponentialRampToValueAtTime(50, end);
+  g1.connect(shaper); g2.connect(shaper);
+  const trem = audioCtx.createOscillator(); trem.type = 'sine'; trem.frequency.value = 7;
+  const tremAmt = audioCtx.createGain(); tremAmt.gain.value = G * 0.5;
+  trem.connect(tremAmt); tremAmt.connect(body.gain);
+  g1.start(t); g2.start(t); trem.start(t);
+  g1.stop(end + 0.02); g2.stop(end + 0.02); trem.stop(end + 0.02);
+
+  // 3. distorted shriek — dissonant high saw with vibrato, cutting on top
+  const shaper2 = audioCtx.createWaveShaper(); shaper2.curve = _distCurve(5);
+  const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1300; bp.Q.value = 1.4;
+  const sg = audioCtx.createGain();
+  sg.gain.setValueAtTime(0.0001, t);
+  sg.gain.exponentialRampToValueAtTime(G * 0.6, t + 0.13);
+  sg.gain.exponentialRampToValueAtTime(0.0001, end);
+  const shr = audioCtx.createOscillator(); shr.type = 'sawtooth'; shr.frequency.setValueAtTime(560, t); shr.frequency.exponentialRampToValueAtTime(300, end);
+  const vib = audioCtx.createOscillator(); vib.type = 'sine'; vib.frequency.value = 7.5;
+  const vibAmt = audioCtx.createGain(); vibAmt.gain.value = 24;
+  vib.connect(vibAmt); vibAmt.connect(shr.frequency);
+  shr.connect(shaper2); shaper2.connect(bp); bp.connect(sg); sg.connect(dest);
+  shr.start(t); vib.start(t); shr.stop(end + 0.02); vib.stop(end + 0.02);
+
+  // 4. wet breath/snarl noise under it
+  _vNoise(dest, t, dur * 0.85, dur * 0.5, 'lowpass', 820, 0, G * 0.6);
+}
 
 function playMobVocal(type, kind, gain, pan) {
   if (!audioCtx) return;
@@ -1082,11 +1137,8 @@ function playMobVocal(type, kind, gain, pan) {
       break;
     }
     case 'chaser': {
-      // RELENTLESS angry roar — big, harsh, low: the Hotel Chase signature
-      _vTone(panner, t, dur, 130, 60, 'sawtooth', G * 1.2);
-      _vTone(panner, t, dur * 0.9, 90, 45, 'square', G * 0.7);
-      _vNoise(panner, t, dur * 0.7, dur * 0.5, 'lowpass', 900, 0, G * 0.6);
-      _vTone(panner, t + 0.08, dur * 0.6, 380, 140, 'sawtooth', G * 0.5);
+      // RELENTLESS, layered, distorted roar — the Hotel Chase signature (see _chaserRoar).
+      _chaserRoar(panner, t, dur, G);
       break;
     }
     default:

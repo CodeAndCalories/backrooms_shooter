@@ -489,15 +489,18 @@ const LEVEL_THEMES = [
     wallColor: '#5e2530', wallColor2: '#43161e',
     floorColor: '#3a1216', floorColor2: '#290c10',
     ceilColor: '#4a1c22',
-    fogColor: 0x140204, fogNear: 1, fogFar: 20,
+    // RED-TINTED LIGHT FOG: distance fades into red murk so you focus on the lit path
+    // ahead (~the next turn) without seeing infinitely far. Near=6/Far=40 ≈ see ~10
+    // cells then fade; the bright beacons + green EXIT signs glow through it.
+    fogColor: 0x2e0810, fogNear: 6, fogFar: 40,
     lightColor: 0xff2630, lightIntensity: 0.62,   // blaring neon RED corridor lights (siren-pulsed)
-    ambientColor: 0x3a0a0c, ambientIntensity: 0.11, // lifted so siren troughs stay readable (was 0.05)
-    bgColor: 0x0e0203,
+    ambientColor: 0x3a0a0c, ambientIntensity: 0.14, // lifted for readable troughs (was 0.05 → 0.11 → 0.14)
+    bgColor: 0x1a0508,                            // slightly lifted to match the red fog (was 0x0e0203)
     mazeSize: 12,
     floorType: 'carpet',
     decorations: 'hotel',
     enemyTint: 0.5,
-    darknessLevel: 0.35,                          // less dim — it's a fast action floor (was 0.5)
+    darknessLevel: 0.3,                           // less dim — it's a fast action floor (0.5 → 0.35 → 0.3)
     // OBJECTIVE: REACH the far exit (no kills, no items — surviving the run wins).
     gate: 'reach', goalText: 'RUN — REACH THE EXIT',
     // ON-RAILS AUTO-RUN: forced forward, steer-only; no stamina; caught = OUT for the
@@ -2907,7 +2910,7 @@ let chaseState = null;       // per-floor auto-run/gate/wall runtime (initChaseS
 let chaseRunStarted = false; // mirror flag audio.js reads (defer the alarm until the gate opens)
 const CHASE_GATE_HOLD = 2.0;        // seconds of (any-player) HOLD-E to open the start gate
 const CHASE_WALL_GRACE_DIST = 8;    // wall starts this far BEHIND the gate (head start), world units
-const CHASE_WALL_SPEED = AUTORUN_SPEED * 0.92; // the wall's fixed track pace (just below auto-run)
+const CHASE_WALL_SPEED = AUTORUN_SPEED * 0.95; // the wall's fixed track pace (just below auto-run) — 0.95 keeps it CLOSE on a clean run (was 0.92, too easy to outrun)
 const CHASE_CATCH_GAP = 2.0;        // caught when your track progress is within this of the wall (its reach)
 const CHASE_RUN_GRACE = 1.8;        // post-open head-start: wall FROZEN + cannot catch (zero threat until everyone's moving)
 // SIREN lighting (intensity-only, no new lights): a slow rhythmic dim→bright→dim alarm
@@ -2915,8 +2918,8 @@ const CHASE_RUN_GRACE = 1.8;        // post-open head-start: wall FROZEN + canno
 const CHASE_SIREN_PERIOD = 1.5;     // seconds per dim→bright→dim cycle (slow, NOT a seizure strobe)
 const CHASE_SIREN_MIN = 0.42;       // siren trough as a fraction of a light's base (stays readable)
 const CHASE_SIREN_MAX = 1.18;       // siren peak as a fraction of base (alarm-bright)
-const CHASE_LIGHT_MULT = 2.2;       // corridor light base brightness vs the theme nominal (a well-lit path)
-const CHASE_TURN_LIGHT_MULT = 1.5;  // turn/exit beacons are brighter (telegraph the turn)
+const CHASE_LIGHT_MULT = 2.7;       // corridor light base brightness vs the theme nominal (bright, readable path; was 2.2)
+const CHASE_TURN_LIGHT_MULT = 1.55; // turn/exit beacons are brighter (telegraph the turn)
 function initChaseState(theme) {
   chaseState = null;
   chaseRunStarted = false;
@@ -3018,6 +3021,52 @@ function disposeChaseGroup(grp) {
   const mats = new Set();
   grp.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) mats.add(o.material); });
   mats.forEach(m => m.dispose());
+}
+
+// GREEN "EXIT" ARROW SIGNS (canon backrooms detail + directional cue). A glowing-green
+// illuminated panel with a chevron arrow, hung at each turn along the CORRECT path,
+// facing the approaching player and pointing the way to turn. The bright green reads
+// straight through the red fog → "follow the green, turn here". Wrong-turn dead-ends
+// get NONE (so a missing sign + dark dead-end = wrong way). Procedural primitives, all
+// no-map Standard (the pinned ammoPickupMat family) — NO lights, NO new shader program.
+// Deterministic (derived from chasePath, no rng) → co-op machines agree.
+function buildChaseExitSigns() {
+  if (!chasePath || !chasePath.length) return;
+  const path = chasePath, n = path.length;
+  const signMat  = new THREE.MeshStandardMaterial({ color: 0x063018, emissive: 0x1cff5e, emissiveIntensity: 1.35, roughness: 0.5 });
+  const arrowMat = new THREE.MeshStandardMaterial({ color: 0x0a3a1c, emissive: 0xd2ffdd, emissiveIntensity: 1.1, roughness: 0.5 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x081610, roughness: 0.7, metalness: 0.35 });
+  const frameGeo = new THREE.BoxGeometry(1.7, 0.82, 0.06);
+  const panelGeo = new THREE.BoxGeometry(1.52, 0.64, 0.09);
+  const chevGeo  = new THREE.BoxGeometry(0.5, 0.14, 0.07);
+  const signs = new THREE.Group();
+
+  const makeSign = (cx, cz, faceX, faceZ, pointRight) => {
+    const g = new THREE.Group();
+    g.position.set(cx, WALL_H * 0.8, cz);
+    g.rotation.y = Math.atan2(faceX, faceZ);            // panel front (+Z) faces the approaching player
+    const frame = new THREE.Mesh(frameGeo, frameMat); frame.position.z = -0.03; g.add(frame);
+    g.add(new THREE.Mesh(panelGeo, signMat));
+    const chev = new THREE.Group();                      // ">" chevron, panel-local +X = player's right
+    const top = new THREE.Mesh(chevGeo, arrowMat); top.position.set(-0.05, 0.12, 0.07); top.rotation.z = -0.62; chev.add(top);
+    const bot = new THREE.Mesh(chevGeo, arrowMat); bot.position.set(-0.05, -0.12, 0.07); bot.rotation.z = 0.62; chev.add(bot);
+    chev.position.x = 0.12;
+    if (!pointRight) chev.scale.x = -1;                  // flip to "<" for a left turn
+    g.add(chev);
+    signs.add(g);
+  };
+
+  for (let j = 1; j < n - 1; j++) {
+    const inx = path[j].x - path[j - 1].x, iny = path[j].y - path[j - 1].y;
+    const outx = path[j + 1].x - path[j].x, outy = path[j + 1].y - path[j].y;
+    if (inx === outx && iny === outy) continue;          // straight — no sign
+    if (iny !== 0) continue;                             // only the "end of a straight" turns (where the dead-end is)
+    // panel faces back toward the approach (-inDir); arrow points the player's right if
+    // outDir is to their right: cross = inx*outy - iny*outx (>0 → right).
+    const cross = inx * outy - iny * outx;
+    makeSign(path[j].x * CELL + CELL / 2, path[j].y * CELL + CELL / 2, -inx, -iny, cross > 0);
+  }
+  scene.add(signs);
 }
 
 // HOLD-E start gate. Host-authoritative: progress accumulates while ANY player holds
@@ -3168,9 +3217,10 @@ function updateChaseWall(dt) {
   }
 
   // Relentless roar, spatialized from the wall toward THIS machine's camera (per-machine).
+  // Tighter cadence now that the wall stays close (0.95×) → the threat feels constant.
   cs.roarTimer = (cs.roarTimer || 0) - dt;
   if (cs.roarTimer <= 0) {
-    cs.roarTimer = 2.4 + Math.random() * 1.4;
+    cs.roarTimer = 1.6 + Math.random() * 1.1;
     if (cs.wallGroup && typeof mobVocalLocal === 'function') mobVocalLocal('chaser', 'roar', cs.wallGroup.position.x, cs.wallGroup.position.z);
   }
 
@@ -3564,6 +3614,67 @@ function buildMazeScene() {
   netOnSceneRebuilt();
 }
 
+// Procedural wrecked-hotel OBSTACLE (one per grid value-3 cell). type 0..4 → overturned
+// chair / reception-luggage desk / luggage cart / stacked suitcases / fallen wardrobe.
+// Primitives only, sharing the caller's small palette M of no-map Standard mats (the
+// pinned ammoPickupMat family → NO new shader program), NO lights. Footprint ~≤ a CELL;
+// full-cell collision is pushed by the caller. Variety/jitter via the passed prng.
+function buildHotelObstacle(type, prng, M) {
+  const g = new THREE.Group();
+  const box = (w, h, d, mat, px, py, pz, ry, parent) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(px || 0, py || 0, pz || 0); if (ry) m.rotation.y = ry; (parent || g).add(m); return m;
+  };
+  const cyl = (r, h, mat, px, py, pz) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 8), mat);
+    m.position.set(px || 0, py || 0, pz || 0); g.add(m); return m;
+  };
+  if (type === 0) {
+    // OVERTURNED CHAIR — built upright on an inner group, then tipped onto its side.
+    const ch = new THREE.Group();
+    box(1.0, 0.16, 1.0, M.wood, 0, 0.5, 0, 0, ch);                 // seat
+    box(0.9, 0.12, 0.9, M.fabric, 0, 0.59, 0, 0, ch);             // cushion
+    box(1.0, 0.95, 0.14, M.wood, 0, 1.0, -0.43, 0, ch);          // backrest
+    for (const sx of [-0.42, 0.42]) for (const sz of [-0.42, 0.42]) box(0.12, 0.5, 0.12, M.dark, sx, 0.25, sz, 0, ch); // legs
+    ch.rotation.z = Math.PI / 2 * (prng() < 0.5 ? 1 : -1);        // tip over
+    ch.position.y = 0.55;                                         // rest on the floor after the tip
+    g.add(ch);
+  } else if (type === 1) {
+    // RECEPTION / LUGGAGE DESK — a chunky counter barricade.
+    box(2.6, 1.1, 1.0, M.dark, 0, 0.55, 0);                       // body
+    box(2.8, 0.12, 1.2, M.wood, 0, 1.16, 0);                      // top lip
+    box(2.4, 0.5, 0.1, M.wood, 0, 0.5, 0.52);                     // front kick panel
+    box(0.45, 0.34, 0.55, M.brass, -0.9, 1.36, 0);                // a bell-desk lamp on top
+  } else if (type === 2) {
+    // LUGGAGE CART — flat base, casters, push-rail, a case or two.
+    box(1.8, 0.18, 1.1, M.dark, 0, 0.3, 0);                       // base platform
+    for (const wx of [-0.7, 0.7]) for (const wz of [-0.42, 0.42]) cyl(0.16, 0.2, M.metal, wx, 0.12, wz); // casters
+    box(0.08, 1.3, 0.08, M.metal, -0.82, 1.0, -0.46);            // rail post L
+    box(0.08, 1.3, 0.08, M.metal, 0.82, 1.0, -0.46);             // rail post R
+    box(1.78, 0.08, 0.08, M.metal, 0, 1.62, -0.46);              // rail top bar
+    box(0.85, 0.6, 0.6, M.case1, -0.2, 0.69, 0, 0.2);            // a suitcase
+    box(0.6, 0.42, 0.5, M.case2, 0.5, 0.6, 0.12, -0.3);          // a smaller case
+  } else if (type === 3) {
+    // STACKED SUITCASES — an askew tower with handles.
+    const cols = [M.case1, M.case2, M.wood];
+    let yy = 0; const k = 2 + Math.floor(prng() * 2);
+    for (let i = 0; i < k; i++) {
+      const w = 1.05 - i * 0.18, h = 0.42 - i * 0.03, d = 0.72 - i * 0.1;
+      const c = box(w, h, d, cols[i % cols.length], (prng() - 0.5) * 0.35, yy + h / 2, (prng() - 0.5) * 0.35, (prng() - 0.5) * 0.7);
+      box(w * 0.45, 0.06, 0.05, M.brass, c.position.x, yy + h, c.position.z + d / 2); // handle
+      yy += h;
+    }
+  } else {
+    // FALLEN WARDROBE / CABINET — a tall cabinet toppled onto its side (long low barricade).
+    box(2.6, 1.2, 0.8, M.dark, 0, 0.6, 0);                        // body
+    box(1.2, 1.05, 0.06, M.wood, -0.62, 0.6, 0.42);             // door panel 1
+    box(1.2, 1.05, 0.06, M.wood, 0.62, 0.6, 0.42);              // door panel 2
+    box(0.1, 0.12, 0.12, M.brass, -0.05, 0.6, 0.47);            // handles
+    box(0.1, 0.12, 0.12, M.brass, 0.05, 0.6, 0.47);
+  }
+  return g;
+}
+
 function addDecorations(theme, gw, gh) {
   if (theme.decorations === 'pillars') {
     const pillarGeo = new THREE.CylinderGeometry(0.15, 0.18, WALL_H, 8);
@@ -3624,57 +3735,34 @@ function addDecorations(theme, gw, gh) {
     // HOTEL CHASE (chase archetype). Two cosmetic-deterministic passes, both via a
     // floorSeed-derived prng (0 world-rng draws — same pattern as party/scares, so
     // exit/ammo placement is undisturbed and co-op machines agree):
-    //   (a) FURNITURE BARRICADES on every grid value-3 cell — knee-high piles that
-    //       block the corridor (full-cell collision, like a wall, but you see over
-    //       them). Drawn as a FEW InstancedMeshes (one per palette tone) — the SAME
-    //       program family the light fixtures already instance every floor (instanced
-    //       MeshStandardMaterial, no map, no instanceColor), so NO new shader program.
+    //   (a) WRECKED-HOTEL FURNITURE on every grid value-3 cell — recognizable props
+    //       (overturned chairs, reception/luggage desks, luggage carts, stacked
+    //       suitcases, fallen wardrobes) instead of generic blocks. Full-cell collision
+    //       like before; built from primitives sharing a small palette of no-map Standard
+    //       mats (the pinned ammoPickupMat family → NO new shader program) with a modest
+    //       emissive so they read at speed in the red murk. Seeded floorSeed prng (0 world
+    //       draws → exit/ammo placement undisturbed, co-op machines agree).
     //   (b) HOTEL-ROOM DOORS on lane-facing walls — pure flavor, no collision change.
     const prng = mulberry32((floorSeed ^ 0x40DEED) >>> 0);
-    const TONES = [0x4a3526, 0x39281c, 0x52403a, 0x2c2622]; // wood / dark wood / dust / shadow
-    const unitBox = new THREE.BoxGeometry(1, 1, 1);
-    // Auto-run obstacles must be SEEN + dodged at speed → give the barricades a warm
-    // AMBER emissive so they self-glow against the red corridor (still no-map Standard →
-    // the pinned ammoPickupMat family; no new shader program). Off-chase floors (if any
-    // reuse 'hotel') keep the plain dark wood.
-    const obstacleGlow = !!theme.autoRun;
-    const furMats = TONES.map(c => new THREE.MeshStandardMaterial({
-      color: c, roughness: 0.92, metalness: 0.04,
-      emissive: obstacleGlow ? 0x5a2e0a : 0x000000, emissiveIntensity: obstacleGlow ? 0.5 : 0
-    }));
-    const toneMatrices = TONES.map(() => []);
-
+    const glow = theme.autoRun ? 0.32 : 0; // self-lit on the chase floor so obstacles read
+    const M = {
+      wood:   new THREE.MeshStandardMaterial({ color: 0x5a3a22, roughness: 0.85, metalness: 0.05, emissive: 0x2a1606, emissiveIntensity: glow }),
+      dark:   new THREE.MeshStandardMaterial({ color: 0x3a2a1c, roughness: 0.9,  metalness: 0.05, emissive: 0x180e06, emissiveIntensity: glow }),
+      metal:  new THREE.MeshStandardMaterial({ color: 0x70737b, roughness: 0.4,  metalness: 0.6,  emissive: 0x202228, emissiveIntensity: glow * 0.7 }),
+      fabric: new THREE.MeshStandardMaterial({ color: 0x6e2a32, roughness: 0.95, metalness: 0.02, emissive: 0x2a0c10, emissiveIntensity: glow }),
+      brass:  new THREE.MeshStandardMaterial({ color: 0xb58a30, roughness: 0.45, metalness: 0.55, emissive: 0x4a3208, emissiveIntensity: glow }),
+      case1:  new THREE.MeshStandardMaterial({ color: 0x7a4a2a, roughness: 0.7,  metalness: 0.1,  emissive: 0x2a1808, emissiveIntensity: glow }),
+      case2:  new THREE.MeshStandardMaterial({ color: 0x33506e, roughness: 0.7,  metalness: 0.1,  emissive: 0x0e1828, emissiveIntensity: glow })
+    };
     for (let y = 1; y < gh - 1; y++) for (let x = 1; x < gw - 1; x++) {
       if (mazeGrid[y][x] !== 3) continue;
       const cx = x * CELL + CELL / 2, cz = y * CELL + CELL / 2;
-      // Full-cell collision so the obstacle blocks exactly its grid cell (matches
-      // the chaser BFS + the connectivity guarantee — value 3 is impassable).
+      // Full-cell collision so the obstacle blocks exactly its grid cell (value 3 is impassable).
       mazeWalls.push({ minX: x * CELL, maxX: x * CELL + CELL, minZ: y * CELL, maxZ: y * CELL + CELL });
-      // A pile: a wide low base + a smaller offset piece on top (reads as stacked
-      // furniture / a barricade). On auto-run, chunkier so it's an obvious dodge.
-      const baseH = (obstacleGlow ? 1.3 : 0.9) + prng() * 0.6;
-      const bw = CELL * (0.82 + prng() * 0.14), bd = CELL * (0.82 + prng() * 0.14);
-      const ry1 = (prng() - 0.5) * 0.5;
-      const m1 = new THREE.Matrix4().compose(
-        new THREE.Vector3(cx + (prng() - 0.5) * 0.4, baseH / 2, cz + (prng() - 0.5) * 0.4),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry1, 0)),
-        new THREE.Vector3(bw, baseH, bd));
-      toneMatrices[Math.floor(prng() * TONES.length)].push(m1);
-      const topH = 0.5 + prng() * 0.7;
-      const tw = CELL * (0.4 + prng() * 0.22), td = CELL * (0.4 + prng() * 0.22);
-      const m2 = new THREE.Matrix4().compose(
-        new THREE.Vector3(cx + (prng() - 0.5) * 1.0, baseH + topH / 2, cz + (prng() - 0.5) * 1.0),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, (prng() - 0.5) * 1.2, 0)),
-        new THREE.Vector3(tw, topH, td));
-      toneMatrices[Math.floor(prng() * TONES.length)].push(m2);
-    }
-    for (let ti = 0; ti < TONES.length; ti++) {
-      const mats = toneMatrices[ti];
-      if (!mats.length) continue;
-      const im = new THREE.InstancedMesh(unitBox, furMats[ti], mats.length);
-      mats.forEach((m, i) => im.setMatrixAt(i, m));
-      im.instanceMatrix.needsUpdate = true;
-      scene.add(im);
+      const obj = buildHotelObstacle(Math.floor(prng() * 5), prng, M);
+      obj.position.set(cx, 0, cz);
+      obj.rotation.y += (prng() - 0.5) * (Math.PI * 0.5); // a little chaos (adds to any type tip)
+      scene.add(obj);
     }
 
     // (b) Hotel-room doors: a dark panel flush on a wall face that borders a lane
@@ -3701,6 +3789,9 @@ function addDecorations(theme, gw, gh) {
       scene.add(door);
       doorCount++;
     }
+
+    // Green EXIT arrow signs leading the correct path (auto-run chase only).
+    if (theme.autoRun) buildChaseExitSigns();
   } else if (theme.decorations === 'party') {
     // CREEPY BIRTHDAY PARTY (Level Fun only). EVERYTHING here places via prng,
     // a SEPARATE seeded stream derived from floorSeed: balloons are shootable

@@ -279,6 +279,42 @@ console.log('5. polish wiring (gate / siren / corridor lights)');
   else fail('no corridor-aware light placement for auto-run');
   if (/lights\.length >= CEILING_LIGHT_BUDGET\) return;/.test(bms)) ok('placeCeilingLight still respects CEILING_LIGHT_BUDGET (count fixed)');
   else fail('budget cap missing');
+
+  // EXIT SIGNS: green emissive arrow signs along the path, no lights; only at end-of-
+  // straight turns (where dead-ends are); wrong turns get none.
+  const signs = extractFn(mainSrc, 'function buildChaseExitSigns');
+  if (/emissive: 0x1cff5e/.test(signs) && /chev/i.test(signs)) ok('exit signs: green emissive panel + chevron arrow');
+  else fail('exit signs not green-arrow');
+  if (!lightRe.test(signs)) ok('exit signs add NO lights (emissive only)');
+  else fail('exit signs introduce a light');
+  if (/iny !== 0\) continue/.test(signs)) ok('signs only at end-of-straight turns (dead-end decision points; wrong turns get none)');
+  else fail('exit signs not gated to turns');
+
+  // FURNITURE: recognizable hotel props, no lights, modest emissive (self-lit), shared mats.
+  const furn = extractFn(mainSrc, 'function buildHotelObstacle');
+  if (!lightRe.test(furn)) ok('hotel furniture adds NO lights');
+  else fail('furniture introduces a light');
+  if (/CHAIR/.test(furn) && /DESK/.test(furn) && /CART/.test(furn) && /SUITCASE/.test(furn) && /WARDROBE/.test(furn))
+    ok('furniture variety: chair / desk / cart / suitcases / wardrobe');
+  else fail('furniture lacks the 5 hotel-prop types');
+  if (/MeshStandardMaterial/.test(furn) || /M\.wood/.test(furn)) ok('furniture uses shared no-map Standard mats (pinned family)');
+  else fail('furniture material family wrong');
+  const hotelBranch = mainSrc.slice(mainSrc.indexOf("decorations === 'hotel'"));
+  if (/buildHotelObstacle\(Math\.floor\(prng\(\) \* 5\)/.test(hotelBranch) && /emissiveIntensity: glow/.test(hotelBranch))
+    ok('obstacles place varied furniture (seeded prng) with self-lit emissive');
+  else fail('hotel obstacle placement not wired to furniture');
+
+  // WALL SPEED bumped to 0.95× (stays close on a clean run) but still < auto-run.
+  const wf = parseFloat(mainSrc.match(/CHASE_WALL_SPEED = AUTORUN_SPEED \* ([\d.]+)/)[1]);
+  if (wf === 0.95) ok('CHASE_WALL_SPEED = 0.95× auto-run (close, but still escapable)');
+  else fail(`CHASE_WALL_SPEED is ${wf}× (expected 0.95)`);
+  if (wf < 1) ok('wall still slower than auto-run (a clean run can stay ahead)');
+  else fail('wall not slower than auto-run');
+
+  // RED FOG: tuned so distance fades (~past the next turn), red-tinted.
+  const fogFar = parseFloat(mainSrc.match(/fogColor: 0x2e0810, fogNear: \d+, fogFar: (\d+)/)[1]);
+  if (fogFar >= 28 && fogFar <= 60) ok(`red fog fogFar=${fogFar} (fades distance, not infinite)`);
+  else fail(`fogFar ${fogFar} out of the intended range`);
 }
 
 /* ── 4. the wall adds NO lights (budget intact) ── */

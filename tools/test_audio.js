@@ -56,11 +56,14 @@ const api = new Function(`
     createBufferSource: () => node(),
     createDelay: () => node({ delayTime: P() }),
     createStereoPanner: () => { panners++; const n = node(); n.connect = (t) => { lastPannerTarget = t; n._t = t; return t; }; return n; },
-    createBuffer: (ch, len) => ({ getChannelData: () => new Float32Array(len) })
+    createBuffer: (ch, len) => ({ getChannelData: () => new Float32Array(len) }),
+    createWaveShaper: () => node() // chaser-roar distortion (curve/oversample are plain props)
   };
   ${extractFn(audioSrc, 'function vocalSlot')}
   ${extractFn(audioSrc, 'function _vNoise')}
   ${extractFn(audioSrc, 'function _vTone')}
+  ${extractFn(audioSrc, 'function _distCurve')}
+  ${extractFn(audioSrc, 'function _chaserRoar')}
   ${extractFn(audioSrc, 'function playMobVocal')}
   return {
     playMobVocal, vocalSlot, MOB_VOCAL_CAP, sfxGain,
