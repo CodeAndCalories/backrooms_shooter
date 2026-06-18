@@ -53,6 +53,7 @@ console.log('1. no new lights / correct material family (the easy mistake)');
 /* ── 2. doScanPulse over a real grid: wall + floor + LOS-gated monster dots ── */
 console.log('2. doScanPulse (wall / floor / monster reveal + LOS gating)');
 {
+  const WALL_H = 3.4; // (matches the sandbox) — for the vertical-spread assertions below
   // 7x7 room: open 5x5 interior, solid border.
   const grid = [
     [0, 0, 0, 0, 0, 0, 0],
@@ -66,12 +67,15 @@ console.log('2. doScanPulse (wall / floor / monster reveal + LOS gating)');
   const sb = new Function(`
     const CELL = 4, WALL_H = 3.4;
     const SCAN_RANGE = CELL * 6;
-    const SCAN_WALL_RAYS = 64;
+    const SCAN_RAYS_AZ = ${(mainSrc.match(/SCAN_RAYS_AZ = (\d+)/) || [])[1]};
+    const SCAN_EL_BANDS = ${(mainSrc.match(/SCAN_EL_BANDS = (\[[^\]]+\])/) || [])[1]};
+    const SCAN_FLOOR_FAN = ${(mainSrc.match(/SCAN_FLOOR_FAN = (\d+)/) || [])[1]};
     const SCAN_MONSTER_COLOR = 0xff1414;
     const NET_PLAYER_COLORS = ${JSON.stringify([0xf2d22e, 0x3fd964, 0xe8413a, 0x3f7be8, 0xa64ae8])};
     class V3 {
       constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z;}
       set(x,y,z){this.x=x;this.y=y;this.z=z;return this;}
+      copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this;}
       clone(){return new V3(this.x,this.y,this.z);}
       add(v){this.x+=v.x;this.y+=v.y;this.z+=v.z;return this;}
       multiplyScalar(s){this.x*=s;this.y*=s;this.z*=s;return this;}
@@ -80,13 +84,14 @@ console.log('2. doScanPulse (wall / floor / monster reveal + LOS gating)');
     }
     const THREE = { Vector3: V3 };
     let mazeGrid = ${JSON.stringify(grid)};
-    const _scanDir = new V3();
+    const _scanDir = new V3(), _sd = new V3();
     const dots = [];
     function spawnScanDot(key, hex, x, y, z) { dots.push({ key, hex, x, y, z }); }
     let _mobs = [];
     function scanMobPositions() { return _mobs; }
     ${extractFn(mainSrc, 'function raycastWall')}
     ${extractFn(enemSrc, 'function isOpenCell')}
+    ${extractFn(mainSrc, 'function castScanRay')}
     ${extractFn(mainSrc, 'function doScanPulse')}
     return { doScanPulse, dots, setMobs: (m) => { _mobs = m; }, V3, clear: () => { dots.length = 0; } };
   `)();
@@ -94,25 +99,38 @@ console.log('2. doScanPulse (wall / floor / monster reveal + LOS gating)');
   const origin = new sb.V3(14, 1.6, 14); // center cell (3,3)
   // mob A in LOS (cell 4,3), mob B behind the border wall (z beyond the room)
   sb.setMobs([{ x: 18, y: 1, z: 14 }, { x: 14, y: 1, z: 30 }]);
-  sb.doScanPulse(origin, 0);
+  sb.doScanPulse(origin, 0, 0); // yaw 0 (facing -z) → forward floor fan
 
   const wallFloor = sb.dots.filter(d => d.key === 'p0');
   const red = sb.dots.filter(d => d.key === 'red');
-  if (wallFloor.length === 0) fail('no wall/floor dots painted'); else ok(`painted ${wallFloor.length} wall/floor dots in the firer's slot color`);
+  if (wallFloor.length === 0) fail('no wall/floor dots painted'); else ok(`painted ${wallFloor.length} surface dots in the firer's slot color`);
   if (red.length !== 2) fail(`monster reveal wrong: ${red.length} red dots (expected 2 = the one in-LOS mob × 2)`); else ok('in-LOS monster revealed (red); behind-wall monster stays hidden (LOS-gated)');
   // all red dots belong to the in-LOS mob A (near x=18), none near B (z=30)
   if (red.some(d => d.z > 25)) fail('painted a red dot on the behind-wall mob'); else ok('no red dot leaked through the wall');
   // slot color routing: p0 dots use P1 yellow
   if (wallFloor[0].hex !== 0xf2d22e) fail('slot-0 dots not P1 yellow'); else ok('slot 0 → P1 yellow dots');
 
-  // determinism: same pulse paints the SAME dot positions (co-op reproducibility)
-  const first = sb.dots.map(d => `${d.key}:${d.x.toFixed(2)},${d.z.toFixed(2)}`).join('|');
-  sb.clear(); sb.doScanPulse(origin, 0);
-  const second = sb.dots.map(d => `${d.key}:${d.x.toFixed(2)},${d.z.toFixed(2)}`).join('|');
-  if (first !== second) fail('doScanPulse is not deterministic (co-op would diverge)'); else ok('deterministic dot positions (co-op reproducible)');
+  // THE FIX — a 3D SPATTER, not a flat eye-level ring: dots must land on the FLOOR (low y),
+  // the WALLS (mid y, at eye-ish height), AND the CEILING (high y), not all at one height.
+  const floorDots = wallFloor.filter(d => d.y < 0.4);
+  const ceilDots  = wallFloor.filter(d => d.y > WALL_H - 0.4);
+  const wallDots  = wallFloor.filter(d => d.y >= 0.4 && d.y <= WALL_H - 0.4);
+  if (floorDots.length >= 10) ok(`FLOOR dots present (${floorDots.length}) — you can see where to step`); else fail(`too few floor dots (${floorDots.length})`);
+  if (ceilDots.length >= 3)   ok(`CEILING dots present (${ceilDots.length}) — paints above you`); else fail(`no ceiling dots (${ceilDots.length})`);
+  if (wallDots.length >= 10)  ok(`WALL dots present (${wallDots.length}) — at varied heights`); else fail(`too few wall dots (${wallDots.length})`);
+  const ys = wallFloor.map(d => d.y);
+  const ySpread = Math.max(...ys) - Math.min(...ys);
+  if (ySpread > WALL_H * 0.6) ok(`vertical spread ${ySpread.toFixed(1)}m (a cloud, NOT a flat ${(0).toFixed(0)}-height ring)`); else fail(`dots are nearly coplanar (spread ${ySpread.toFixed(2)}m) — still a flat ring`);
+  if (wallFloor.length >= 90) ok(`dense spatter: ${wallFloor.length} dots/pulse (more than the old flat ring)`); else fail(`too few dots/pulse (${wallFloor.length})`);
+
+  // forward floor fan: facing -z (yaw 0), the EXTRA floor dots cluster toward -z (in front)
+  sb.clear(); sb.doScanPulse(origin, 0, 0);
+  const frontFloor = sb.dots.filter(d => d.key === 'p0' && d.y < 0.4 && d.z < origin.z - 0.5).length;
+  const backFloor  = sb.dots.filter(d => d.key === 'p0' && d.y < 0.4 && d.z > origin.z + 0.5).length;
+  if (frontFloor > backFloor) ok(`forward floor fan: more floor dots AHEAD (${frontFloor}) than behind (${backFloor}) — navigation`); else fail(`floor not forward-biased (front ${frontFloor} / back ${backFloor})`);
 
   // a teammate's pulse in slot 1 paints GREEN
-  sb.clear(); sb.doScanPulse(origin, 1);
+  sb.clear(); sb.doScanPulse(origin, 1, 0);
   if (!sb.dots.some(d => d.key === 'p1' && d.hex === 0x3fd964)) fail('slot 1 not P2 green'); else ok('slot 1 → P2 green dots (teammates distinct)');
 }
 

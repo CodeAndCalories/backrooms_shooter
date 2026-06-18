@@ -884,26 +884,27 @@ onMessage('shot_fx', (d) => {
    immediately; this just shares the wall/floor dots so teammates' scans show up
    distinctly. PROTOCOL ADDITION: 'scan' (client→host) + 'scan_fx' (host→clients);
    old builds ignore them (they just don't see teammates' scans). */
-function netAnnounceScan(origin, slot) {
+function netAnnounceScan(origin, slot, yaw) {
+  const a = netR2(yaw || 0); // firer's facing → the forward floor fan paints toward where they look
   if (netState.role === 'host') {
-    if (netState.peers.length) sendToAll('scan_fx', { id: netState.myId, x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z), s: slot });
+    if (netState.peers.length) sendToAll('scan_fx', { id: netState.myId, x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z), s: slot, a });
   } else if (netState.role === 'client') {
-    sendToHost('scan', { x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z) });
+    sendToHost('scan', { x: netR2(origin.x), y: netR2(origin.y), z: netR2(origin.z), a });
   }
 }
 
 onMessage('scan', (d, fromConn) => {
   if (netState.role !== 'host' || gameState !== 'playing' || !d) return;
   const slot = netSlotOf(fromConn.peer);
-  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), slot); // host sees the client's scan
+  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), slot, d.a); // host sees the client's scan
   for (const conn of netState.peers) { // relay to the OTHER clients (the firer already painted locally)
-    if (conn !== fromConn && conn.open) conn.send({ t: 'scan_fx', d: { id: fromConn.peer, x: d.x, y: d.y, z: d.z, s: slot } });
+    if (conn !== fromConn && conn.open) conn.send({ t: 'scan_fx', d: { id: fromConn.peer, x: d.x, y: d.y, z: d.z, s: slot, a: d.a } });
   }
 });
 
 onMessage('scan_fx', (d) => {
   if (!netIsClient() || gameState !== 'playing' || !d || d.id === netState.myId) return;
-  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), d.s);
+  if (typeof doScanPulse === 'function') doScanPulse(new THREE.Vector3(d.x, d.y, d.z), d.s, d.a);
 });
 
 /* ── run victory (20th-floor capstone) ──

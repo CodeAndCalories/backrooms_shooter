@@ -30,6 +30,35 @@ spawner, fog-of-war minimap, pool/water system with fake caustics.
 - Host-authoritative, co-op safe; protocol changes require BOTH players on new build
 
 ## CURRENT STATE
+- **FLOOR 19 LIGHTS OUT — SCAN PULSE → 3D SPATTER (June 17, UNPLAYED) — the scan dots
+  were a thin flat LINE at eye level (the old rays were a near-horizontal ring, y=−0.04).
+  Now a forward+downward-biased HEMISPHERE of scattered rays paints floor / walls /
+  ceiling / obstacles all around. No new lights, same pinned material + InstancedMesh →
+  PROG impact ZERO; cosmetic (Math.random scatter, 0 world-rng draws); fade ~3.6s as before.**
+  - **`castScanRay` (new):** casts a genuine 3D ray and paints the NEAREST surface — floor
+    (y=0), ceiling (y=WALL_H), or a wall/obstacle. (`raycastWall` already returns a full-3D
+    hit point + true distance when handed a 3D dir, so wall dots land at the right height;
+    picking the nearest of the three is its own LOS gate.)
+  - **Distribution (`doScanPulse`):** a SURROUND spatter — `SCAN_EL_BANDS` 7 elevation bands
+    (−1.25…+0.7 rad, steep-down → up) × `SCAN_RAYS_AZ` 20 azimuth, each jittered (±az slot,
+    ±6° el) into an organic cloud, 360° around — **plus a FORWARD FLOOR FAN** (`SCAN_FLOOR_FAN`
+    34 downward rays aimed at the player's facing yaw) so the ground you step toward is
+    well-painted. **≈174 rays → up to ~174 dots/pulse** (was ~136, mostly coplanar). In the
+    test room: 109 floor / 48 ceiling / 17 wall, 3.3m vertical spread, forward-biased 60/28.
+  - **Cap `SCAN_DOT_CAP` 256→384/color** (holds ~2 dense pulses; ring-recycled). Still ONE
+    draw call per color (one shared `SphereGeometry`, one emissive Standard no-map material —
+    the ammoPickupMat-pinned family). ~384×~50 tris ≈ 19k tris/color, typically 1-2 colors
+    active; per-frame slot scan trivial. **No new shader program.**
+  - **Co-op:** the firer's yaw rides the existing `scan`/`scan_fx` relay as a new `a` field
+    so teammates' pulses fan toward where THEY were looking. **Backward-compatible** (a message
+    without `a` → the forward fan is skipped, the surround still paints; old builds ignore `a`).
+  - Headless: `test_scanner` §2 reworked — the old position-DETERMINISM assertion (which the
+    intended scatter breaks; scan dots are cosmetic, never needed determinism) is replaced by
+    a VERTICAL-SPREAD check (floor + ceiling + wall dots present, 3.3m spread, forward-bias,
+    ≥90 dots/pulse). Full suite green (21 tools); node --check clean.
+  - **Needs a browser/co-op session:** does a pulse now read as a spatter/cloud lighting the
+    geometry (floor in front, walls, ceiling), not a ring? Is the floor coverage enough to
+    navigate? Cap/perf OK (PROG flat, no hitch)? Co-op: teammates' pulses fan toward their facing.
 - **FLOOR 18 ESCAPE — VISIBILITY FIX (June 17, UNPLAYED) — the cutscene ran but played
   OFF-SCREEN behind the frozen player (they were facing the exit; the gate/monster were
   ~2 units BEHIND them). Diagnosis: the "froze then advanced" symptom = the sequence ran

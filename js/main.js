@@ -4628,11 +4628,16 @@ function clearImpactFx() {
    meshes are pulled from the scene before the buildMazeScene teardown traverse
    (same contract as sparks/decals/ammo).
    ═══════════════════════════════════════════ */
-const SCAN_DOT_CAP = 256;        // per color (ring-recycled)
+const SCAN_DOT_CAP = 384;        // per color (ring-recycled) — holds ~2 dense spatter pulses
 const SCAN_DOT_SIZE = 0.085;     // dot world radius at full scale
 const SCAN_DOT_LIFE = 3.6;       // seconds a dot lingers before it winks out
 const SCAN_RANGE = CELL * 6;     // how far a pulse reaches
-const SCAN_WALL_RAYS = 64;       // radial rays that trace walls
+// SPATTER distribution (replaces the old flat eye-level ring): a forward+downward-biased
+// HEMISPHERE of rays. Elevation bands (steep-down → up) × azimuth, jittered into an
+// organic scatter; each ray paints the NEAREST surface (floor / ceiling / wall / obstacle).
+const SCAN_RAYS_AZ = 20;         // azimuth samples per elevation band
+const SCAN_EL_BANDS = [-1.25, -0.85, -0.5, -0.18, 0.12, 0.42, 0.7]; // elevation rad: steep-down → up
+const SCAN_FLOOR_FAN = 34;       // extra DOWNWARD rays aimed FORWARD (the path ahead — navigation)
 const SCAN_COOLDOWN = 1.5;       // seconds between pulses (can't spam-light the room)
 const SCAN_MONSTER_COLOR = 0xff1414; // monsters are always RED, distinct from any slot color
 let scanCooldown = 0;
@@ -4710,43 +4715,63 @@ function scanMobPositions() {
   return out;
 }
 
-// THE PULSE. origin = world eye point; slot = firer's color slot (co-op). Paints
-// wall dots (radial rays), floor dots (radial samples), and RED monster dots
-// (LOS-gated) — all from THIS machine's geometry + mob knowledge, so it's
-// reproducible for a teammate's pulse too. Pure cosmetics (no damage/gameplay).
-function doScanPulse(origin, slot) {
+// Cast ONE 3D ray from the eye and paint a dot on the NEAREST surface it hits — floor
+// (y=0), ceiling (y=WALL_H), or a wall/obstacle (the grid-DDA raycast). Picking the
+// nearest of the three is its own LOS gate (a wall in front wins over a floor cell behind
+// it). raycastWall already returns a FULL-3D point + the true 3D distance when handed a
+// 3D dir (it only uses x/z to pick the cell), so wall dots land at the right height.
+const _sd = new THREE.Vector3();
+function castScanRay(origin, d, key, hex) {
+  const len = d.length(); if (len < 1e-4) return;
+  _sd.copy(d).multiplyScalar(1 / len);                 // unit 3D dir
+  let bestT = SCAN_RANGE, surf = 0, wp = null;          // surf: 1 wall, 2 floor, 3 ceiling
+  const w = raycastWall(origin, _sd, SCAN_RANGE);
+  if (w && w.dist < bestT) { bestT = w.dist; surf = 1; wp = w.point; }
+  if (_sd.y < -1e-3) { const t = -origin.y / _sd.y;            if (t > 0.2 && t < bestT) { bestT = t; surf = 2; } }
+  if (_sd.y >  1e-3) { const t = (WALL_H - origin.y) / _sd.y;  if (t > 0.2 && t < bestT) { bestT = t; surf = 3; } }
+  if (!surf) return;
+  if (surf === 2)      spawnScanDot(key, hex, origin.x + _sd.x * bestT, 0.05, origin.z + _sd.z * bestT);
+  else if (surf === 3) spawnScanDot(key, hex, origin.x + _sd.x * bestT, WALL_H - 0.05, origin.z + _sd.z * bestT);
+  else                 spawnScanDot(key, hex, wp.x, Math.max(0.1, Math.min(WALL_H - 0.1, wp.y)), wp.z);
+}
+
+// THE PULSE. origin = world eye point; slot = firer's color slot (co-op); yaw = the
+// firer's facing (for the forward floor fan). Paints a SPATTER of dots across floor /
+// walls / ceiling / obstacles all around (not a flat ring), plus RED monster dots
+// (LOS-gated) — all from THIS machine's geometry + mob knowledge, so it's reproducible
+// for a teammate's pulse too. Pure cosmetics (Math.random scatter is fine — no gameplay,
+// no world rng() draws; each machine paints its own dots).
+function doScanPulse(origin, slot, yaw) {
   if (!mazeGrid || !mazeGrid.length) return;
   const hex = NET_PLAYER_COLORS[slot % NET_PLAYER_COLORS.length];
   const key = 'p' + (slot % NET_PLAYER_COLORS.length);
-  const oy = origin.y;
 
-  // WALLS — a radial ring of rays at eye height (slightly downward so dots ride
-  // the wall a touch below eye level), traced by the grid-DDA wall raycast.
-  for (let i = 0; i < SCAN_WALL_RAYS; i++) {
-    const a = (i / SCAN_WALL_RAYS) * Math.PI * 2;
-    _scanDir.set(Math.sin(a), -0.04, Math.cos(a));
-    const hit = raycastWall(origin, _scanDir, SCAN_RANGE);
-    if (hit) {
-      const dy = Math.max(0.15, Math.min(WALL_H - 0.15, hit.point.y));
-      spawnScanDot(key, hex, hit.point.x, dy, hit.point.z);
+  // SURROUND SPATTER — elevation bands (steep-down → up) × jittered azimuth → an organic
+  // cloud landing on the floor near you, up the walls, and on the ceiling, 360° around.
+  for (let b = 0; b < SCAN_EL_BANDS.length; b++) {
+    const el0 = SCAN_EL_BANDS[b], azOff = b * 0.5; // stagger bands so dots don't line up into columns
+    for (let i = 0; i < SCAN_RAYS_AZ; i++) {
+      const az = (i / SCAN_RAYS_AZ) * Math.PI * 2 + azOff + (Math.random() - 0.5) * (Math.PI * 2 / SCAN_RAYS_AZ) * 0.9;
+      const el = el0 + (Math.random() - 0.5) * 0.2;  // ±~6° vertical jitter
+      const ce = Math.cos(el);
+      _scanDir.set(ce * Math.sin(az), Math.sin(el), ce * Math.cos(az));
+      castScanRay(origin, _scanDir, key, hex);
     }
   }
-  // FLOOR — radial samples on open ground (LOS-gated so you don't paint through walls).
-  const rings = [CELL * 1.1, CELL * 2.4, CELL * 3.9, CELL * 5.2];
-  for (let ri = 0; ri < rings.length; ri++) {
-    const r = rings[ri], steps = 12 + ri * 4;
-    for (let i = 0; i < steps; i++) {
-      const a = (i / steps) * Math.PI * 2 + ri * 0.6;
-      const fx = origin.x + Math.sin(a) * r, fz = origin.z + Math.cos(a) * r;
-      if (!isOpenCell(fx, fz)) continue;
-      _scanDir.set(fx - origin.x, 0, fz - origin.z);
-      const d = _scanDir.length(); if (d < 0.01) continue;
-      _scanDir.multiplyScalar(1 / d);
-      const w = raycastWall(origin, _scanDir, d);
-      if (w && w.dist < d - 0.25) continue; // a wall is between → don't paint it
-      spawnScanDot(key, hex, fx, 0.06, fz);
+
+  // FORWARD FLOOR FAN — a dense burst of DOWNWARD rays aimed in front of the player so the
+  // ground you're stepping toward is well-painted (the part that actually helps you walk).
+  if (typeof yaw === 'number') {
+    const azF = Math.atan2(-Math.sin(yaw), -Math.cos(yaw)); // forward azimuth (matches the dir convention)
+    for (let i = 0; i < SCAN_FLOOR_FAN; i++) {
+      const az = azF + (Math.random() - 0.5) * 1.5;   // ±~43° around forward
+      const el = -(0.32 + Math.random() * 0.95);      // -18° … -73° (down onto the floor)
+      const ce = Math.cos(el);
+      _scanDir.set(ce * Math.sin(az), Math.sin(el), ce * Math.cos(az));
+      castScanRay(origin, _scanDir, key, hex);
     }
   }
+
   // MONSTERS — RED dots, LOS-gated (a mob behind a wall stays hidden; you hear it).
   for (const p of scanMobPositions()) {
     const dx = p.x - origin.x, dz = p.z - origin.z;
@@ -4767,9 +4792,9 @@ function fireScannerLocal() {
   if (scanCooldown > 0) return;
   scanCooldown = SCAN_COOLDOWN;
   const slot = (typeof netMySlot === 'function') ? netMySlot() : 0;
-  doScanPulse(camera.position, slot);
+  doScanPulse(camera.position, slot, player.yaw);
   if (typeof playScannerPing === 'function') playScannerPing();
-  if (typeof netAnnounceScan === 'function') netAnnounceScan(camera.position, slot);
+  if (typeof netAnnounceScan === 'function') netAnnounceScan(camera.position, slot, player.yaw);
 }
 
 /* ═══════════════════════════════════════════
